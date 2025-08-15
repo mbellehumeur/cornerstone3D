@@ -20,7 +20,7 @@ import {
 } from '../enums';
 import ViewportType from '../enums/ViewportType';
 import eventTarget from '../eventTarget';
-import { getShouldUseCPURendering } from '../init';
+import { getConfiguration, getShouldUseCPURendering } from '../init';
 import type {
   ActorEntry,
   ColormapPublic,
@@ -77,6 +77,8 @@ import { getCameraVectors } from './helpers/getCameraVectors';
 import { isContextPoolRenderingEngine } from './helpers/isContextPoolRenderingEngine';
 import type vtkRenderer from '@kitware/vtk.js/Rendering/Core/Renderer';
 import mprCameraValues from '../constants/mprCameraValues';
+import type { Types } from '@cornerstonejs/core';
+
 /**
  * Abstract base class for volume viewports. VolumeViewports are used to render
  * 3D volumes from which various orientations can be viewed. Since VolumeViewports
@@ -136,6 +138,9 @@ abstract class BaseVolumeViewport extends Viewport {
 
     this.initializeVolumeNewImageEventDispatcher();
   }
+  public updateRenderingPipeline = (value?: boolean): void => {
+    this._updateRenderingPipeline();
+  };
 
   static get useCustomRenderingPipeline(): boolean {
     return false;
@@ -152,6 +157,74 @@ abstract class BaseVolumeViewport extends Viewport {
     throw new Error('Method not implemented.');
   }
 
+  /**
+   * Updates the rendering pipeline configuration for volume rendering.
+   * This method updates the volume mappers with new rendering settings
+   * and triggers a re-render.
+   *
+   * @param config - Optional configuration object with rendering settings
+   */
+
+  //  private _configureRenderingPipeline(value?: boolean) {
+  private _updateRenderingPipeline() {
+    const actors = this.getActors();
+
+    // Get current cornerstone configuration
+    const cornerstoneConfig = getConfiguration();
+    const volumeRenderingConfig =
+      cornerstoneConfig.rendering?.volumeRendering || {};
+
+    // Use provided config or fall back to cornerstone configuration
+    const settings = {
+      sampleDistance: volumeRenderingConfig.sampleDistance,
+      sampleDistanceMultiplier: volumeRenderingConfig.sampleDistanceMultiplier,
+    };
+
+    console.debug('Updating rendering pipeline with settings:', settings);
+
+    actors.forEach((actorEntry) => {
+      if (actorIsA(actorEntry, 'vtkVolume')) {
+        const actor = actorEntry.actor as Types.VolumeActor;
+        const mapper = actor.getMapper();
+
+        if (mapper && mapper.getInputData) {
+          const imageData = mapper.getInputData();
+
+          if (imageData) {
+            const spacing = imageData.getSpacing();
+
+            // // Calculate sample distance
+            let sampleDistance = settings.sampleDistance;
+            // if (!sampleDistance && settings.sampleDistanceMultiplier) {
+            const defaultSampleDistance =
+              (spacing[0] + spacing[1] + spacing[2]) / 6;
+            sampleDistance =
+              defaultSampleDistance * settings.sampleDistanceMultiplier;
+            // }
+
+            // Apply sample distance if specified
+            if (sampleDistance !== undefined && mapper.setSampleDistance) {
+              const currentSampleDistance = mapper.getSampleDistance();
+              mapper.setSampleDistance(sampleDistance);
+              console.debug(
+                `Updated SampleDistance: ${currentSampleDistance} -> ${sampleDistance}`
+              );
+            }
+          }
+        }
+      }
+    });
+
+    // Trigger re-render to apply changes
+    this.render();
+
+    // Trigger event to notify that rendering pipeline was updated
+
+    // triggerEvent(this.element, Events.VOLUME_RENDERING_PIPELINE_UPDATED, {
+    //   viewportId: this.id,
+    //   settings,
+    // });
+  }
   protected applyViewOrientation(
     orientation: OrientationAxis | OrientationVectors,
     resetCamera = true

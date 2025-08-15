@@ -27,6 +27,11 @@ const defaultConfig: Cornerstone3DConfig = {
      * The default value is 7, which is suitable for mobile/desktop.
      */
     webGlContextCount: 7,
+    volumeRendering: {
+      /** Multiplier for the calculated sample distance */
+      sampleDistanceMultiplier: 2,
+      sampleDistance: 1,
+    },
   },
 
   debug: {
