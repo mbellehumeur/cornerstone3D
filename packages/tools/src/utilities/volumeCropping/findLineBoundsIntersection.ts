@@ -1,4 +1,4 @@
-import { vec2 } from 'gl-matrix';
+import { vec2, vec3 } from 'gl-matrix';
 import type { Types } from '@cornerstonejs/core';
 import liangBarksyClip from '../math/vec2/liangBarksyClip';
 import { LINE_EXTENSION_DISTANCE, MIN_LINE_LENGTH_PIXELS } from './constants';
@@ -17,18 +17,19 @@ export function findLineBoundsIntersection(
   lineDirection: Types.Point3,
   viewport: Types.IViewport
 ): { start: Types.Point2; end: Types.Point2 } | null {
-  // Extend line far in both directions
   const lineLength = LINE_EXTENSION_DISTANCE;
-  const lineStart: Types.Point3 = [
-    linePoint[0] - lineDirection[0] * lineLength,
-    linePoint[1] - lineDirection[1] * lineLength,
-    linePoint[2] - lineDirection[2] * lineLength,
-  ];
-  const lineEnd: Types.Point3 = [
-    linePoint[0] + lineDirection[0] * lineLength,
-    linePoint[1] + lineDirection[1] * lineLength,
-    linePoint[2] + lineDirection[2] * lineLength,
-  ];
+  const lineStart = vec3.scaleAndAdd(
+    [0, 0, 0],
+    linePoint,
+    lineDirection,
+    -lineLength
+  ) as Types.Point3;
+  const lineEnd = vec3.scaleAndAdd(
+    [0, 0, 0],
+    linePoint,
+    lineDirection,
+    lineLength
+  ) as Types.Point3;
 
   const canvasStart = viewport.worldToCanvas(lineStart);
   const canvasEnd = viewport.worldToCanvas(lineEnd);
@@ -89,7 +90,7 @@ export function findLineBoundsIntersection(
   }
 
   return {
-    start: [clippedStart[0], clippedStart[1]] as Types.Point2,
-    end: [clippedEnd[0], clippedEnd[1]] as Types.Point2,
+    start: clippedStart as Types.Point2,
+    end: clippedEnd as Types.Point2,
   };
 }
