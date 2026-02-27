@@ -5,6 +5,7 @@ import {
   eventTarget,
 } from '@cornerstonejs/core';
 import type { Types } from '@cornerstonejs/core';
+import type { Point3 } from '@cornerstonejs/core/types';
 import { getToolGroup } from '../store/ToolGroupManager';
 import * as ToolsEnums from '../enums';
 import { vec3, mat4, quat } from 'gl-matrix';
@@ -675,12 +676,8 @@ class OrientationControllerTool extends BaseTool {
       );
 
       viewport.setCamera({
-        viewPlaneNormal: Array.from(interpolatedForward) as [
-          number,
-          number,
-          number,
-        ],
-        viewUp: Array.from(interpolatedUp) as [number, number, number],
+        viewPlaneNormal: interpolatedForward as Point3,
+        viewUp: interpolatedUp as Point3,
       });
       viewport.resetCamera({
         resetZoom: false,
