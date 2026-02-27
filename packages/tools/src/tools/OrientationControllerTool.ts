@@ -30,6 +30,77 @@ import { vtkOrientationControllerWidget } from '../utilities/vtkjs/OrientationCo
 const ADD_MARKER_DELAY_MS = 500;
 const POSITION_RETRY_DELAY_MS = 1000;
 
+type FaceColors = {
+  topBottom: number[];
+  frontBack: number[];
+  leftRight: number[];
+};
+
+type LetterColors = {
+  zMinus: number[];
+  zPlus: number[];
+  yMinus: number[];
+  yPlus: number[];
+  xMinus: number[];
+  xPlus: number[];
+};
+
+const FACE_COLOR_SCHEMES: Record<string, FaceColors> = {
+  marker: {
+    topBottom: [0, 0, 255],
+    frontBack: [0, 255, 255],
+    leftRight: [255, 255, 0],
+  },
+  gray: {
+    topBottom: [180, 180, 180],
+    frontBack: [180, 180, 180],
+    leftRight: [180, 180, 180],
+  },
+  rgy: {
+    topBottom: [255, 0, 0],
+    frontBack: [0, 255, 0],
+    leftRight: [255, 255, 0],
+  },
+};
+
+const LETTER_COLOR_SCHEMES: Record<string, LetterColors> = {
+  mixed: {
+    zMinus: [255, 255, 255],
+    zPlus: [255, 255, 255],
+    yMinus: [255, 255, 255],
+    yPlus: [255, 255, 255],
+    xMinus: [0, 0, 0],
+    xPlus: [0, 0, 0],
+  },
+  rgy: {
+    zMinus: [255, 255, 255],
+    zPlus: [255, 255, 255],
+    yMinus: [255, 255, 255],
+    yPlus: [255, 255, 255],
+    xMinus: [0, 0, 0],
+    xPlus: [0, 0, 0],
+  },
+  white: {
+    zMinus: [255, 255, 255],
+    zPlus: [255, 255, 255],
+    yMinus: [255, 255, 255],
+    yPlus: [255, 255, 255],
+    xMinus: [255, 255, 255],
+    xPlus: [255, 255, 255],
+  },
+  black: {
+    zMinus: [0, 0, 0],
+    zPlus: [0, 0, 0],
+    yMinus: [0, 0, 0],
+    yPlus: [0, 0, 0],
+    xMinus: [0, 0, 0],
+    xPlus: [0, 0, 0],
+  },
+};
+
+const DEFAULT_FACE_COLOR_SCHEME = 'marker';
+const DEFAULT_LETTER_COLOR_SCHEME = 'mixed';
+
 const ANIMATE_RESET_CAMERA_OPTIONS = {
   resetZoom: false,
   resetPan: true,
@@ -94,33 +165,10 @@ class OrientationControllerTool extends BaseTool {
       }
     }
 
-    // Otherwise, use colorScheme to determine colors
-    switch (colorScheme) {
-      case 'marker':
-        return {
-          topBottom: [0, 0, 255],
-          frontBack: [0, 255, 255],
-          leftRight: [255, 255, 0],
-        };
-      case 'gray':
-        return {
-          topBottom: [180, 180, 180],
-          frontBack: [180, 180, 180],
-          leftRight: [180, 180, 180],
-        };
-      case 'rgy':
-        return {
-          topBottom: [255, 0, 0],
-          frontBack: [0, 255, 0],
-          leftRight: [255, 255, 0],
-        };
-      default:
-        return {
-          topBottom: [0, 0, 255],
-          frontBack: [0, 255, 255],
-          leftRight: [255, 255, 0],
-        };
-    }
+    return (
+      FACE_COLOR_SCHEMES[colorScheme] ??
+      FACE_COLOR_SCHEMES[DEFAULT_FACE_COLOR_SCHEME]
+    );
   }
 
   private getLetterColors(): {
@@ -132,54 +180,10 @@ class OrientationControllerTool extends BaseTool {
     xPlus: number[];
   } {
     const letterColorScheme = this.configuration.letterColorScheme || 'mixed';
-    const faceColors = this.getFaceColors();
-
-    switch (letterColorScheme) {
-      case 'mixed':
-      case 'rgy':
-        // Match the face color scheme logic - choose contrasting colors based on face colors
-        // For rgy face scheme: topBottom=Red, frontBack=Green, leftRight=Yellow
-        // Red and Green backgrounds: use white letters for contrast
-        // Yellow background: use black letters for contrast
-        return {
-          zMinus: [255, 255, 255], // White for I (on red background - topBottom)
-          zPlus: [255, 255, 255], // White for S (on red background - topBottom)
-          yMinus: [255, 255, 255], // White for A (on green background - frontBack)
-          yPlus: [255, 255, 255], // White for P (on green background - frontBack)
-          xMinus: [0, 0, 0], // Black for L (on yellow background - leftRight)
-          xPlus: [0, 0, 0], // Black for R (on yellow background - leftRight)
-        };
-      case 'white':
-      case 'all-white': // Backward compatibility
-        return {
-          zMinus: [255, 255, 255],
-          zPlus: [255, 255, 255],
-          yMinus: [255, 255, 255],
-          yPlus: [255, 255, 255],
-          xMinus: [255, 255, 255],
-          xPlus: [255, 255, 255],
-        };
-      case 'black':
-      case 'all-black': // Backward compatibility
-        return {
-          zMinus: [0, 0, 0],
-          zPlus: [0, 0, 0],
-          yMinus: [0, 0, 0],
-          yPlus: [0, 0, 0],
-          xMinus: [0, 0, 0],
-          xPlus: [0, 0, 0],
-        };
-      default:
-        // Default matches mixed scheme
-        return {
-          zMinus: [255, 255, 255],
-          zPlus: [255, 255, 255],
-          yMinus: [255, 255, 255],
-          yPlus: [255, 255, 255],
-          xMinus: [0, 0, 0],
-          xPlus: [0, 0, 0],
-        };
-    }
+    return (
+      LETTER_COLOR_SCHEMES[letterColorScheme] ??
+      LETTER_COLOR_SCHEMES[DEFAULT_LETTER_COLOR_SCHEME]
+    );
   }
 
   onSetToolEnabled(): void {

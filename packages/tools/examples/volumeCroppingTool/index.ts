@@ -270,12 +270,12 @@ function getKeepOrientationUpFromUrl(): boolean {
 }
 
 /**
- * Get the letter color scheme from the URL (?letterColorScheme=mixed|all-white|all-black)
+ * Get the letter color scheme from the URL (?letterColorScheme=mixed|white|black)
  */
-function getLetterColorSchemeFromUrl(): 'mixed' | 'all-white' | 'all-black' {
+function getLetterColorSchemeFromUrl(): 'mixed' | 'awhite' | 'black' {
   const params = new URLSearchParams(window.location.search);
   const value = params.get('letterColorScheme');
-  if (value === 'mixed' || value === 'all-white' || value === 'all-black') {
+  if (value === 'mixed' || value === 'white' || value === 'black') {
     return value;
   }
   return 'mixed'; // default
@@ -454,48 +454,14 @@ async function run(numViewports = getNumViewportsFromUrl()) {
   // Get letter color scheme from URL
   const letterColorScheme = getLetterColorSchemeFromUrl();
 
-  // Configure faceColors based on URL parameter
-  let faceColors;
-  if (colorScheme === 'gray') {
-    faceColors = {
-      topBottom: [180, 180, 180],
-      frontBack: [180, 180, 180],
-      leftRight: [180, 180, 180],
-      corners: [180, 180, 180],
-      edges: [180, 180, 180],
-    };
-  } else if (colorScheme === 'marker') {
-    // OrientationMarkerTool colors matching exact hex values:
-    // X axis (left/right): Yellow #ffff00 - both xPlus (L) and xMinus (R)
-    // Y axis (posterior/anterior): Cyan #00ffff - both yPlus (P) and yMinus (A)
-    // Z axis (superior/inferior): Blue #0000ff - from defaultStyle.faceColor
-    faceColors = {
-      topBottom: [0, 0, 255], // Blue #0000ff - Z axis (superior/inferior)
-      frontBack: [0, 255, 255], // Cyan #00ffff - Y axis (posterior/anterior)
-      leftRight: [255, 255, 0], // Yellow #ffff00 - X axis (left/right)
-      corners: [0, 0, 255], // Blue #0000ff - same as Z axis
-      edges: [128, 128, 128], // Grey - edges
-    };
-  } else {
-    // RGY scheme (red, green, yellow)
-    faceColors = {
-      topBottom: [255, 0, 0], // Red - faces 0-1 (top/bottom)
-      frontBack: [0, 255, 0], // Green - faces 2-3 (front/back)
-      leftRight: [255, 255, 0], // Yellow - faces 4-5 (left/right)
-      corners: [0, 0, 255], // Blue - faces 6-13 (corner triangles)
-      edges: [128, 128, 128], // Grey - faces 14-25 (edge rectangles)
-    };
-  }
-
   // Disable tool if it already exists to ensure fresh configuration
   if (toolGroupVRT.hasTool(OrientationControllerTool.toolName)) {
     toolGroupVRT.setToolDisabled(OrientationControllerTool.toolName);
   }
 
-  // Add OrientationControllerTool with faceColors, keepOrientationUp, and letterColorScheme from URL
+  // Add OrientationControllerTool - colors resolved from colorScheme/letterColorScheme maps
   toolGroupVRT.addTool(OrientationControllerTool.toolName, {
     colorScheme,
-    faceColors,
     keepOrientationUp,
     letterColorScheme,
   });
@@ -528,8 +494,8 @@ async function run(numViewports = getNumViewportsFromUrl()) {
   });
 
   // Add dropdown for letter color scheme (reloads page with URL param)
-  const letterColorSchemeValues: string[] = ['mixed', 'all-white', 'all-black'];
-  const letterColorSchemeLabels = ['Mixed', 'All White', 'All Black'];
+  const letterColorSchemeValues: string[] = ['mixed', 'white', 'black'];
+  const letterColorSchemeLabels = ['Mixed', 'White', 'Black'];
   const validLetterColorScheme = letterColorSchemeValues.includes(
     letterColorScheme
   )
