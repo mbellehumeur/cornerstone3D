@@ -633,10 +633,8 @@ class OrientationControllerTool extends BaseTool {
       0, 0, 0, 1
     );
 
-    const startQuat = quat.create();
-    const targetQuat = quat.create();
-    mat4.getRotation(startQuat, startMatrix);
-    mat4.getRotation(targetQuat, targetMatrix);
+    const startQuat = mat4.getRotation(quat.create(), startMatrix);
+    const targetQuat = mat4.getRotation(quat.create(), targetMatrix);
 
     let dotProduct = quat.dot(startQuat, targetQuat);
     if (dotProduct < 0) {
