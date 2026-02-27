@@ -1131,8 +1131,6 @@ class VolumeCroppingTool extends BaseTool {
 
     // Get volume bounds and dimensions in index space
     const dimensions = imageData.getDimensions();
-    const spacing = imageData.getSpacing();
-    const origin = imageData.getOrigin();
 
     const cropFactor = this.configuration.initialCropFactor || 0.1;
 
@@ -1144,35 +1142,18 @@ class VolumeCroppingTool extends BaseTool {
     const zMin = cropFactor * dimensions[2];
     const zMax = (1 - cropFactor) * dimensions[2];
 
-    const indexToWorld = (i: number, j: number, k: number): Types.Point3 => {
-      return [
-        origin[0] +
-          i * spacing[0] * xDir[0] +
-          j * spacing[1] * yDir[0] +
-          k * spacing[2] * zDir[0],
-        origin[1] +
-          i * spacing[0] * xDir[1] +
-          j * spacing[1] * yDir[1] +
-          k * spacing[2] * zDir[1],
-        origin[2] +
-          i * spacing[0] * xDir[2] +
-          j * spacing[1] * yDir[2] +
-          k * spacing[2] * zDir[2],
-      ];
-    };
-
     // Calculate center of each face in index space
     const xCenter = (xMin + xMax) / 2;
     const yCenter = (yMin + yMax) / 2;
     const zCenter = (zMin + zMax) / 2;
 
     // Calculate world positions for face centers
-    const faceXMin = indexToWorld(xMin, yCenter, zCenter);
-    const faceXMax = indexToWorld(xMax, yCenter, zCenter);
-    const faceYMin = indexToWorld(xCenter, yMin, zCenter);
-    const faceYMax = indexToWorld(xCenter, yMax, zCenter);
-    const faceZMin = indexToWorld(xCenter, yCenter, zMin);
-    const faceZMax = indexToWorld(xCenter, yCenter, zMax);
+    const faceXMin = imageData.indexToWorld([xMin, yCenter, zCenter]);
+    const faceXMax = imageData.indexToWorld([xMax, yCenter, zCenter]);
+    const faceYMin = imageData.indexToWorld([xCenter, yMin, zCenter]);
+    const faceYMax = imageData.indexToWorld([xCenter, yMax, zCenter]);
+    const faceZMin = imageData.indexToWorld([xCenter, yCenter, zMin]);
+    const faceZMax = imageData.indexToWorld([xCenter, yCenter, zMax]);
 
     // Create clipping planes with normals based on volume orientation
     const planeXMin = vtkPlane.newInstance({
@@ -1217,8 +1198,12 @@ class VolumeCroppingTool extends BaseTool {
     this.originalClippingPlanes = originalPlanes;
 
     // Calculate world diagonal for adaptive sphere radius
-    const diag0 = indexToWorld(0, 0, 0);
-    const diag1 = indexToWorld(dimensions[0], dimensions[1], dimensions[2]);
+    const diag0 = imageData.indexToWorld([0, 0, 0]);
+    const diag1 = imageData.indexToWorld([
+      dimensions[0],
+      dimensions[1],
+      dimensions[2],
+    ]);
     const diagonal = Math.sqrt(
       Math.pow(diag1[0] - diag0[0], 2) +
         Math.pow(diag1[1] - diag0[1], 2) +
@@ -1238,14 +1223,14 @@ class VolumeCroppingTool extends BaseTool {
 
     // Calculate all 8 corners in world space
     const corners = [
-      indexToWorld(xMin, yMin, zMin),
-      indexToWorld(xMin, yMin, zMax),
-      indexToWorld(xMin, yMax, zMin),
-      indexToWorld(xMin, yMax, zMax),
-      indexToWorld(xMax, yMin, zMin),
-      indexToWorld(xMax, yMin, zMax),
-      indexToWorld(xMax, yMax, zMin),
-      indexToWorld(xMax, yMax, zMax),
+      imageData.indexToWorld([xMin, yMin, zMin]),
+      imageData.indexToWorld([xMin, yMin, zMax]),
+      imageData.indexToWorld([xMin, yMax, zMin]),
+      imageData.indexToWorld([xMin, yMax, zMax]),
+      imageData.indexToWorld([xMax, yMin, zMin]),
+      imageData.indexToWorld([xMax, yMin, zMax]),
+      imageData.indexToWorld([xMax, yMax, zMin]),
+      imageData.indexToWorld([xMax, yMax, zMax]),
     ];
 
     const cornerKeys = [
