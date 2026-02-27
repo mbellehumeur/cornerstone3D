@@ -1,3 +1,5 @@
+import { vec3 } from 'gl-matrix';
+import { utilities } from '@cornerstonejs/core';
 import type { Types } from '@cornerstonejs/core';
 import { ORIENTATION_TOLERANCE } from './constants';
 
@@ -15,31 +17,19 @@ export function getOrientationFromNormal(
     return null;
   }
 
-  // Canonical normals for each orientation
   const canonical = {
     AXIAL: [0, 0, 1],
     CORONAL: [0, 1, 0],
     SAGITTAL: [1, 0, 0],
   };
 
-  // Use a tolerance for floating point comparison
-  const tol = ORIENTATION_TOLERANCE;
-
   for (const [key, value] of Object.entries(canonical)) {
-    // Check positive direction
     if (
-      Math.abs(normal[0] - value[0]) < tol &&
-      Math.abs(normal[1] - value[1]) < tol &&
-      Math.abs(normal[2] - value[2]) < tol
-    ) {
-      return key as 'AXIAL' | 'CORONAL' | 'SAGITTAL';
-    }
-
-    // Also check negative direction
-    if (
-      Math.abs(normal[0] + value[0]) < tol &&
-      Math.abs(normal[1] + value[1]) < tol &&
-      Math.abs(normal[2] + value[2]) < tol
+      utilities.isEqualAbs(
+        1,
+        vec3.dot(value as Types.Point3, normal),
+        ORIENTATION_TOLERANCE
+      )
     ) {
       return key as 'AXIAL' | 'CORONAL' | 'SAGITTAL';
     }
