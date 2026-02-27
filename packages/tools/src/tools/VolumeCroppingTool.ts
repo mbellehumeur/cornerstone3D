@@ -1204,11 +1204,7 @@ class VolumeCroppingTool extends BaseTool {
       dimensions[1],
       dimensions[2],
     ]);
-    const diagonal = Math.sqrt(
-      Math.pow(diag1[0] - diag0[0], 2) +
-        Math.pow(diag1[1] - diag0[1], 2) +
-        Math.pow(diag1[2] - diag0[2], 2)
-    );
+    const diagonal = vec3.distance(diag0, diag1);
     const adaptiveRadius = calculateAdaptiveSphereRadius(
       diagonal,
       this.configuration
