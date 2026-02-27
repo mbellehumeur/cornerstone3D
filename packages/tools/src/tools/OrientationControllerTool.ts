@@ -576,17 +576,13 @@ class OrientationControllerTool extends BaseTool {
     vec3.cross(startRight, startUp, startForward);
     vec3.normalize(startRight, startRight);
 
-    const startMatrix = mat4.create();
-    startMatrix[0] = startRight[0];
-    startMatrix[1] = startRight[1];
-    startMatrix[2] = startRight[2];
-    startMatrix[4] = startUp[0];
-    startMatrix[5] = startUp[1];
-    startMatrix[6] = startUp[2];
-    startMatrix[8] = startForward[0];
-    startMatrix[9] = startForward[1];
-    startMatrix[10] = startForward[2];
-    startMatrix[15] = 1;
+    // prettier-ignore
+    const startMatrix = mat4.fromValues(
+      startRight[0], startRight[1], startRight[2], 0,
+      startUp[0], startUp[1], startUp[2], 0,
+      startForward[0], startForward[1], startForward[2], 0,
+      0, 0, 0, 1
+    );
 
     const targetForward = vec3.fromValues(
       targetViewPlaneNormal[0],
@@ -639,17 +635,13 @@ class OrientationControllerTool extends BaseTool {
     vec3.cross(targetRight, targetUp, targetForward);
     vec3.normalize(targetRight, targetRight);
 
-    const targetMatrix = mat4.create();
-    targetMatrix[0] = targetRight[0];
-    targetMatrix[1] = targetRight[1];
-    targetMatrix[2] = targetRight[2];
-    targetMatrix[4] = targetUp[0];
-    targetMatrix[5] = targetUp[1];
-    targetMatrix[6] = targetUp[2];
-    targetMatrix[8] = targetForward[0];
-    targetMatrix[9] = targetForward[1];
-    targetMatrix[10] = targetForward[2];
-    targetMatrix[15] = 1;
+    // prettier-ignore
+    const targetMatrix = mat4.fromValues(
+      targetRight[0], targetRight[1], targetRight[2], 0,
+      targetUp[0], targetUp[1], targetUp[2], 0,
+      targetForward[0], targetForward[1], targetForward[2], 0,
+      0, 0, 0, 1
+    );
 
     const startQuat = quat.create();
     const targetQuat = quat.create();
