@@ -670,20 +670,12 @@ class OrientationControllerTool extends BaseTool {
       const interpolatedMatrix = mat4.create();
       mat4.fromQuat(interpolatedMatrix, interpolatedQuat);
 
-      const interpolatedForward = vec3.fromValues(
-        interpolatedMatrix[8],
-        interpolatedMatrix[9],
-        interpolatedMatrix[10]
-      );
-      const interpolatedUp = vec3.fromValues(
-        interpolatedMatrix[4],
-        interpolatedMatrix[5],
-        interpolatedMatrix[6]
-      );
+      const interpolatedForward = interpolatedMatrix.slice(8, 11) as Point3;
+      const interpolatedUp = interpolatedMatrix.slice(4, 7) as Point3;
 
       viewport.setCamera({
-        viewPlaneNormal: interpolatedForward as Point3,
-        viewUp: interpolatedUp as Point3,
+        viewPlaneNormal: interpolatedForward,
+        viewUp: interpolatedUp,
       });
       viewport.resetCamera(ANIMATE_RESET_CAMERA_OPTIONS);
       viewport.render();
