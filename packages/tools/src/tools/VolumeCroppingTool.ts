@@ -32,7 +32,6 @@ import {
   calculateAdaptiveSphereRadius,
   parseCornerKey,
   addLine3DBetweenPoints,
-  calculateNewCornerPosition,
   type ClippingPlane,
   copyClippingPlanes,
 } from '../utilities/volumeCropping';
@@ -769,10 +768,9 @@ class VolumeCroppingTool extends BaseTool {
     }
 
     if (sphereState.isCorner) {
-      const newCorner = calculateNewCornerPosition(
-        world,
-        this.cornerDragOffset
-      );
+      const newCorner = this.cornerDragOffset
+        ? vec3.add([0, 0, 0], world, this.cornerDragOffset)
+        : world;
       const oldCorner = sphereState.point;
 
       const axisFlags = parseCornerKey(sphereState.uid);
