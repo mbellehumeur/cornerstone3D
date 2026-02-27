@@ -678,7 +678,8 @@ class VolumeCroppingTool extends BaseTool {
     if (this.draggingSphereIndex !== null) {
       this._onMouseMoveSphere(evt);
     } else {
-      if (this.rotatePlanesOnDrag === true) {
+      const shiftKey = (evt.detail.event as MouseEvent)?.shiftKey ?? false;
+      if (this.rotatePlanesOnDrag === true || shiftKey) {
         this._rotateClippingPlanes(evt);
         return;
       }

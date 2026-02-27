@@ -35,7 +35,7 @@ const {
   CrosshairsTool,
 } = cornerstoneTools;
 
-const { MouseBindings } = csToolsEnums;
+const { MouseBindings, KeyboardBindings } = csToolsEnums;
 const { ViewportType } = Enums;
 
 // Define a unique id for the volume
@@ -70,7 +70,7 @@ const renderingEngineId = 'myRenderingEngine';
 // ======== Set up page ======== //
 setTitleAndDescription(
   'Volume Cropping',
-  'Here we demonstrate how to crop a  volume with 6 clipping planes.'
+  'Here we demonstrate how to crop a  volume with 6 clipping planes.  Use shift-drag to rotate the clipping planes.'
 );
 
 const size = '400px';
@@ -135,8 +135,9 @@ content.appendChild(viewportGrid);
 const instructions = document.createElement('p');
 instructions.innerText = `
   Basic controls:
-  - Click/Drag the spheres in VRT or reference lines in the orthographic viewports.
-  - Rotate , pan or zoom the 3D viewport using the mouse.
+  - Click/Drag the spheres in 3D or reference lines in the orthographic viewports.
+  - Rotate, pan or zoom the 3D viewport using the mouse.
+  - Shift+Drag in the 3D viewport to rotate the crop mapping (clipping planes).
   - Use the scroll wheel to scroll through the slices in the orthographic viewports.
   - Toggle the clipping planes, handles, and rotate clipping planes on drag.
   `;
@@ -162,7 +163,20 @@ addToggleButtonToToolbar({
 });
 
 addToggleButtonToToolbar({
-  title: 'Toggle Rotate Clipping Planes',
+  title: 'Toggle Handles',
+  defaultToggle: false,
+  onClick: (toggle) => {
+    const toolGroupVRT =
+      cornerstoneTools.ToolGroupManager.getToolGroup(toolGroupIdVRT);
+    const croppingTool = toolGroupVRT.getToolInstance('VolumeCropping');
+    if (croppingTool && typeof croppingTool.setHandlesVisible === 'function') {
+      croppingTool.setHandlesVisible(!croppingTool.getHandlesVisible());
+    }
+  },
+});
+
+addToggleButtonToToolbar({
+  title: 'Toggle Rotate Clipping Planes on drag (without shift)',
   defaultToggle: false,
   onClick: (toggle) => {
     const toolGroupVRT =
@@ -175,19 +189,6 @@ addToggleButtonToToolbar({
     ) {
       const currentState = croppingTool.getRotatePlanesOnDrag();
       croppingTool.setRotatePlanesOnDrag(!currentState);
-    }
-  },
-});
-
-addToggleButtonToToolbar({
-  title: 'Toggle Handles',
-  defaultToggle: false,
-  onClick: (toggle) => {
-    const toolGroupVRT =
-      cornerstoneTools.ToolGroupManager.getToolGroup(toolGroupIdVRT);
-    const croppingTool = toolGroupVRT.getToolInstance('VolumeCropping');
-    if (croppingTool && typeof croppingTool.setHandlesVisible === 'function') {
-      croppingTool.setHandlesVisible(!croppingTool.getHandlesVisible());
     }
   },
 });
@@ -406,8 +407,10 @@ async function run(numViewports = getNumViewportsFromUrl()) {
     });
     toolGroupVRT.setToolActive(VolumeCroppingTool.toolName, {
       bindings: [
+        { mouseButton: MouseBindings.Primary },
         {
           mouseButton: MouseBindings.Primary,
+          modifierKey: KeyboardBindings.Shift,
         },
       ],
     });
