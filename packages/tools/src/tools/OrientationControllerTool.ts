@@ -638,10 +638,7 @@ class OrientationControllerTool extends BaseTool {
 
     let dotProduct = quat.dot(startQuat, targetQuat);
     if (dotProduct < 0) {
-      targetQuat[0] = -targetQuat[0];
-      targetQuat[1] = -targetQuat[1];
-      targetQuat[2] = -targetQuat[2];
-      targetQuat[3] = -targetQuat[3];
+      quat.scale(targetQuat, targetQuat, -1);
       dotProduct = -dotProduct;
     }
 
