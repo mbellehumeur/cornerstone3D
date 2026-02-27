@@ -30,6 +30,12 @@ import { vtkOrientationControllerWidget } from '../utilities/vtkjs/OrientationCo
 const ADD_MARKER_DELAY_MS = 500;
 const POSITION_RETRY_DELAY_MS = 1000;
 
+const ANIMATE_RESET_CAMERA_OPTIONS = {
+  resetZoom: false,
+  resetPan: true,
+  resetToCenter: true,
+} as const;
+
 class OrientationControllerTool extends BaseTool {
   static toolName = 'OrientationControllerTool';
 
@@ -679,11 +685,7 @@ class OrientationControllerTool extends BaseTool {
         viewPlaneNormal: interpolatedForward as Point3,
         viewUp: interpolatedUp as Point3,
       });
-      viewport.resetCamera({
-        resetZoom: false,
-        resetPan: true,
-        resetToCenter: true,
-      });
+      viewport.resetCamera(ANIMATE_RESET_CAMERA_OPTIONS);
       viewport.render();
 
       if (currentStep < steps) {
