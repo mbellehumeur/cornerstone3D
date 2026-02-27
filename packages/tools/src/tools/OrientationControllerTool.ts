@@ -258,7 +258,7 @@ class OrientationControllerTool extends BaseTool {
 
     if (enabledElement) {
       const { viewport } = enabledElement;
-      if (viewport.type === Enums.ViewportType.VOLUME_3D) {
+      if ((viewport as Types.IViewport).isOrientationChangeable()) {
         this.widget.removeActorsFromViewport(
           viewportId,
           viewport as Types.IVolumeViewport
@@ -294,7 +294,7 @@ class OrientationControllerTool extends BaseTool {
 
       if (enabledElement) {
         const { viewport } = enabledElement;
-        if (viewport.type === Enums.ViewportType.VOLUME_3D) {
+        if ((viewport as Types.IViewport).isOrientationChangeable()) {
           this.widget.removeActorsFromViewport(
             viewportId,
             viewport as Types.IVolumeViewport
@@ -337,7 +337,7 @@ class OrientationControllerTool extends BaseTool {
 
       const { viewport } = enabledElement;
 
-      if (viewport.type !== Enums.ViewportType.VOLUME_3D) {
+      if (!(viewport as Types.IViewport).isOrientationChangeable()) {
         return;
       }
 
@@ -382,8 +382,10 @@ class OrientationControllerTool extends BaseTool {
 
     const { viewport } = enabledElement;
 
-    if (viewport.type !== Enums.ViewportType.VOLUME_3D) {
-      console.warn('OrientationControllerTool: Viewport is not VOLUME_3D');
+    if (!(viewport as Types.IViewport).isOrientationChangeable()) {
+      console.warn(
+        'OrientationControllerTool: Viewport does not support orientation changes'
+      );
       return;
     }
 
@@ -506,7 +508,7 @@ class OrientationControllerTool extends BaseTool {
     }
 
     const { viewport } = enabledElement;
-    if (viewport.type !== Enums.ViewportType.VOLUME_3D) {
+    if (!(viewport as Types.IViewport).isOrientationChangeable()) {
       return;
     }
 
@@ -541,7 +543,7 @@ class OrientationControllerTool extends BaseTool {
     }
 
     const { viewport } = enabledElement;
-    if (viewport.type !== Enums.ViewportType.VOLUME_3D) {
+    if (!(viewport as Types.IViewport).isOrientationChangeable()) {
       return;
     }
 
