@@ -12,6 +12,7 @@ import {
   CONSTANTS,
   triggerEvent,
   eventTarget,
+  convertColorArrayToRgbString,
 } from '@cornerstonejs/core';
 
 import { getToolGroup } from '../store/ToolGroupManager';
@@ -57,7 +58,6 @@ import {
   getOrientationFromNormal,
   computePlanePlaneIntersection,
   findLineBoundsIntersection,
-  convertColorArrayToRgbString,
 } from '../utilities/volumeCropping';
 
 type ReferenceLine = [
