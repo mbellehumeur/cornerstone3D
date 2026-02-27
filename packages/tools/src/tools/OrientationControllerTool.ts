@@ -595,8 +595,7 @@ class OrientationControllerTool extends BaseTool {
     } else {
       // Keep current viewUp, but project it onto the plane perpendicular to targetViewPlaneNormal
       // to ensure orthogonality
-      const currentUp = vec3.fromValues(startUp[0], startUp[1], startUp[2]);
-      vec3.normalize(currentUp, currentUp);
+      const currentUp = vec3.normalize(vec3.create(), startUp);
 
       // Normalize targetViewPlaneNormal for projection
       const normalizedForward = vec3.create();
