@@ -8,10 +8,7 @@ import type { Types } from '@cornerstonejs/core';
 import { getToolGroup } from '../store/ToolGroupManager';
 import * as ToolsEnums from '../enums';
 import { vec3, mat4, quat } from 'gl-matrix';
-import {
-  vtkOrientationControllerWidget,
-  type OrientationControllerConfig,
-} from '../utilities/vtkjs/OrientationControllerWidget';
+import { vtkOrientationControllerWidget } from '../utilities/vtkjs/OrientationControllerWidget';
 
 /**
  * OrientationControllerTool provides an interactive orientation marker
