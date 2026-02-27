@@ -14,10 +14,6 @@ export function calculateAdaptiveSphereRadius(
     maxSphereRadius?: number;
   }
 ): number {
-  // Get base radius from configuration (acts as a scaling factor)
-  const baseRadius =
-    config.sphereRadius !== undefined ? config.sphereRadius : 8;
-
   // Scale radius as a percentage of diagonal (adjustable factor)
   const scaleFactor = config.sphereRadiusScale || 0.01; // 1% of diagonal by default
   const adaptiveRadius = diagonal * scaleFactor;

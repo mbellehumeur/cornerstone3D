@@ -29,12 +29,14 @@ import {
   SPHEREINDEX,
   NUM_CLIPPING_PLANES,
   extractVolumeDirectionVectors,
-  calculateAdaptiveSphereRadius,
   parseCornerKey,
-  addLine3DBetweenPoints,
   type ClippingPlane,
   copyClippingPlanes,
 } from '../utilities/volumeCropping';
+import {
+  addLine3DBetweenPoints,
+  calculateAdaptiveSphereRadius,
+} from '../utilities/draw3D';
 
 /**
  * VolumeCroppingTool provides manipulatable spheres and real-time volume cropping capabilities.
