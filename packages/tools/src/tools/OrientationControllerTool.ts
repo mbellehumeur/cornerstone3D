@@ -584,12 +584,6 @@ class OrientationControllerTool extends BaseTool {
       0, 0, 0, 1
     );
 
-    const targetForward = vec3.fromValues(
-      targetViewPlaneNormal[0],
-      targetViewPlaneNormal[1],
-      targetViewPlaneNormal[2]
-    );
-
     let targetUp: vec3;
     if (keepOrientationUp) {
       // Use the target viewUp as specified (original behavior)
@@ -599,26 +593,26 @@ class OrientationControllerTool extends BaseTool {
         targetViewUp[2]
       );
     } else {
-      // Keep current viewUp, but project it onto the plane perpendicular to targetForward
+      // Keep current viewUp, but project it onto the plane perpendicular to targetViewPlaneNormal
       // to ensure orthogonality
       const currentUp = vec3.fromValues(startUp[0], startUp[1], startUp[2]);
       vec3.normalize(currentUp, currentUp);
 
-      // Normalize targetForward for projection
+      // Normalize targetViewPlaneNormal for projection
       const normalizedForward = vec3.create();
-      vec3.normalize(normalizedForward, targetForward);
+      vec3.normalize(normalizedForward, targetViewPlaneNormal as vec3);
 
-      // Project currentUp onto the plane perpendicular to targetForward
-      // Remove the component of currentUp that's parallel to targetForward
+      // Project currentUp onto the plane perpendicular to targetViewPlaneNormal
+      // Remove the component of currentUp that's parallel to targetViewPlaneNormal
       const dot = vec3.dot(currentUp, normalizedForward);
       targetUp = vec3.create();
       vec3.scaleAndAdd(targetUp, currentUp, normalizedForward, -dot);
       vec3.normalize(targetUp, targetUp);
 
-      // If the projection results in a zero vector (currentUp was parallel to targetForward),
+      // If the projection results in a zero vector (currentUp was parallel to targetViewPlaneNormal),
       // use a default up vector
       if (vec3.length(targetUp) < 0.001) {
-        // Use a default up vector perpendicular to targetForward
+        // Use a default up vector perpendicular to targetViewPlaneNormal
         if (Math.abs(normalizedForward[2]) < 0.9) {
           targetUp = vec3.fromValues(0, 0, 1);
         } else {
@@ -632,14 +626,14 @@ class OrientationControllerTool extends BaseTool {
     }
 
     const targetRight = vec3.create();
-    vec3.cross(targetRight, targetUp, targetForward);
+    vec3.cross(targetRight, targetUp, targetViewPlaneNormal as vec3);
     vec3.normalize(targetRight, targetRight);
 
     // prettier-ignore
     const targetMatrix = mat4.fromValues(
       targetRight[0], targetRight[1], targetRight[2], 0,
       targetUp[0], targetUp[1], targetUp[2], 0,
-      targetForward[0], targetForward[1], targetForward[2], 0,
+      targetViewPlaneNormal[0], targetViewPlaneNormal[1], targetViewPlaneNormal[2], 0,
       0, 0, 0, 1
     );
 
