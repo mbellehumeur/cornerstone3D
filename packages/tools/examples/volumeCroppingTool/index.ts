@@ -84,7 +84,7 @@ if (toolbar) {
 
 // Add dropdown to toolbar to select number of orthographic viewports (reloads page with URL param)
 addDropdownToToolbar({
-  labelText: 'Number of Orthographic Viewports',
+  labelText: 'Number of Orthographic Viewports:',
   options: {
     values: [1, 2, 3],
     defaultValue: getNumViewportsFromUrl(),
@@ -102,7 +102,7 @@ const renderingEngineId = 'myRenderingEngine';
 // ======== Set up page ======== //
 setTitleAndDescription(
   'Volume Cropping with Orientation Controller',
-  'Here we demonstrate how to crop a 3D  volume with 6 clipping planes aligned on the x,y and z axes and an orientation controller.'
+  'Here we demonstrate how to crop a 3D  volume with 6 clipping planes and an orientation controller. Use shift-drag to rotate the planes.'
 );
 
 const size = '400px';
@@ -178,6 +178,11 @@ instructions.innerText = `
 
 content.append(instructions);
 
+const croppingLabel = document.createElement('span');
+croppingLabel.textContent = 'Cropping:';
+croppingLabel.style.marginRight = '4px';
+planesRow.appendChild(croppingLabel);
+
 addToggleButtonToToolbar({
   title: 'Toggle Clipping Planes',
   defaultToggle: false,
@@ -212,7 +217,7 @@ addToggleButtonToToolbar({
 });
 
 addToggleButtonToToolbar({
-  title: 'Toggle Rotate Clipping Planes<br>on drag (without shift)',
+  title: 'Toggle Rotate Clipping Planes on drag (without shift)',
   defaultToggle: false,
   container: planesRow,
   onClick: (toggle) => {
@@ -472,14 +477,6 @@ async function run(numViewports = getNumViewportsFromUrl()) {
       },
     ],
   });
-  // toolGroupVRT.addTool(OrientationMarkerTool.toolName, {
-  //   overlayMarkerType:
-  //     OrientationMarkerTool.OVERLAY_MARKER_TYPES.ANNOTATED_CUBE,
-  //   orientationWidget: {
-  //       viewportCorner: 2, // 3 = BOTTOM_RIGHT
-  //     },
-  // });
-  // toolGroupVRT.setToolActive(OrientationMarkerTool.toolName);
 
   // Disable tool if it already exists to ensure fresh configuration
   if (toolGroupVRT.hasTool(OrientationControllerTool.toolName)) {
