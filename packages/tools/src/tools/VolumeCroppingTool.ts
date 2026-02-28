@@ -316,12 +316,12 @@ class VolumeCroppingTool extends BaseTool {
       this._initialize3DViewports(viewportsInfo);
     }
 
-    // Apply configured visibility for clipping planes and handles.
-    // Default to hidden if not explicitly set, for backward compatibility.
-    const showClippingPlanes = this.configuration.showClippingPlanes ?? false;
-    const showHandles = this.configuration.showHandles ?? false;
-    this.configuration.showClippingPlanes = showClippingPlanes;
-    this.configuration.showHandles = showHandles;
+    // Explicitly disable clipping planes and handles after initialization
+    // They should only be shown via hotkeys or the VolumeCropping component
+    // This ensures that even if _initialize3DViewports added clipping planes,
+    // they will be removed if the configuration says they should be hidden
+    this.configuration.showClippingPlanes = false;
+    this.configuration.showHandles = false;
 
     const viewport = this._getViewport();
     if (
@@ -333,13 +333,10 @@ class VolumeCroppingTool extends BaseTool {
       if (this.sphereStates && this.sphereStates.length > 0) {
         this._updateHandlesVisibility();
       }
-      if (showClippingPlanes) {
-        this._notifyClippingPlanesChanged(viewport);
-      }
       viewport.render();
     }
 
-    // Visibility is controlled by configuration (showClippingPlanes, showHandles)
+    // DO NOT show handles or clipping planes by default
     // They should only be shown via hotkeys or the VolumeCropping component
     // Rotation is already enabled via mouseDragCallback, so no additional setup needed
   }
