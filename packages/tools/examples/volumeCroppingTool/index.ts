@@ -163,9 +163,10 @@ instructions.innerText = `
   Basic controls:
   - Click/Drag the spheres in 3D or reference lines in the orthographic viewports.
   - Rotate, pan or zoom the 3D viewport using the mouse.
-  - Shift+Drag in the 3D viewport to rotate the crop mapping (clipping planes).
+  - Shift+Drag in the 3D viewport to rotate the clipping planes.
   - Use the scroll wheel to scroll through the slices in the orthographic viewports.
   - Toggle the clipping planes, handles, and rotate clipping planes on drag.
+  - Click on the faces/edges/corners of the beveled cube orientation widget to change the orientation.
   `;
 
 content.append(instructions);
@@ -203,7 +204,7 @@ addToggleButtonToToolbar({
 });
 
 addToggleButtonToToolbar({
-  title: 'Toggle Rotate Clipping Planes on drag (without shift)',
+  title: 'Toggle Rotate Clipping Planes<br>on drag (without shift)',
   defaultToggle: false,
   container: leftToolbarContainer,
   onClick: (toggle) => {
@@ -637,8 +638,10 @@ async function run(numViewports = getNumViewportsFromUrl()) {
   });
   toolGroupVRT.setToolActive(VolumeCroppingTool.toolName, {
     bindings: [
+      { mouseButton: MouseBindings.Primary },
       {
         mouseButton: MouseBindings.Primary,
+        modifierKey: KeyboardBindings.Shift,
       },
     ],
   });
