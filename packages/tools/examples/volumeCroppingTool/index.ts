@@ -433,6 +433,19 @@ async function run(numViewports = getNumViewportsFromUrl()) {
     ],
   });
 
+  // Get color scheme from URL (needed for both orthographic and 3D viewports)
+  const colorScheme = getColorSchemeFromUrl();
+  const keepOrientationUp = getKeepOrientationUpFromUrl();
+  const letterColorScheme = getLetterColorSchemeFromUrl();
+
+  toolGroup.addTool(OrientationControllerTool.toolName, {
+    colorScheme,
+    keepOrientationUp,
+    letterColorScheme,
+    position: 'top-right',
+  });
+  toolGroup.setToolEnabled(OrientationControllerTool.toolName);
+
   // Tool group for 3D viewport
   const toolGroupVRT = ToolGroupManager.createToolGroup(toolGroupIdVRT);
   toolGroupVRT.addTool(ZoomTool.toolName);
@@ -459,15 +472,6 @@ async function run(numViewports = getNumViewportsFromUrl()) {
   //     },
   // });
   // toolGroupVRT.setToolActive(OrientationMarkerTool.toolName);
-
-  // Get color scheme from URL
-  const colorScheme = getColorSchemeFromUrl();
-
-  // Get keepOrientationUp from URL
-  const keepOrientationUp = getKeepOrientationUpFromUrl();
-
-  // Get letter color scheme from URL
-  const letterColorScheme = getLetterColorSchemeFromUrl();
 
   // Disable tool if it already exists to ensure fresh configuration
   if (toolGroupVRT.hasTool(OrientationControllerTool.toolName)) {
