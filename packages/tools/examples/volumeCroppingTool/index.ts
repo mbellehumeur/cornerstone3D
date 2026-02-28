@@ -53,27 +53,33 @@ const viewportId3 = 'CT_SAGITTAL';
 const viewportId4 = 'CT_3D_VOLUME'; // New 3D volume viewport
 const viewportIds = [viewportId1, viewportId2, viewportId3, viewportId4];
 
-// Set up toolbar with left and right containers
+// Set up toolbar with three rows: viewports, planes, control
 const toolbar = document.getElementById('demo-toolbar');
 if (toolbar) {
   toolbar.style.display = 'flex';
-  toolbar.style.justifyContent = 'space-between';
-  toolbar.style.alignItems = 'center';
+  toolbar.style.flexDirection = 'column';
+  toolbar.style.gap = '8px';
 }
 
-const leftToolbarContainer = document.createElement('div');
-leftToolbarContainer.style.display = 'flex';
-leftToolbarContainer.style.gap = '0';
-leftToolbarContainer.style.alignItems = 'center';
+const viewportsRow = document.createElement('div');
+viewportsRow.style.display = 'flex';
+viewportsRow.style.gap = '10px';
+viewportsRow.style.alignItems = 'center';
 
-const rightToolbarContainer = document.createElement('div');
-rightToolbarContainer.style.display = 'flex';
-rightToolbarContainer.style.gap = '10px';
-rightToolbarContainer.style.alignItems = 'center';
+const planesRow = document.createElement('div');
+planesRow.style.display = 'flex';
+planesRow.style.gap = '10px';
+planesRow.style.alignItems = 'center';
 
-// Add left container to toolbar first
+const controlRow = document.createElement('div');
+controlRow.style.display = 'flex';
+controlRow.style.gap = '10px';
+controlRow.style.alignItems = 'center';
+
 if (toolbar) {
-  toolbar.appendChild(leftToolbarContainer);
+  toolbar.appendChild(viewportsRow);
+  toolbar.appendChild(planesRow);
+  toolbar.appendChild(controlRow);
 }
 
 // Add dropdown to toolbar to select number of orthographic viewports (reloads page with URL param)
@@ -83,7 +89,7 @@ addDropdownToToolbar({
     values: [1, 2, 3],
     defaultValue: getNumViewportsFromUrl(),
   },
-  container: leftToolbarContainer,
+  container: viewportsRow,
   onSelectedValueChange: (selectedValue) => {
     const url = new URL(window.location.href);
     url.searchParams.set('numViewports', String(selectedValue));
@@ -167,13 +173,15 @@ instructions.innerText = `
   - Use the scroll wheel to scroll through the slices in the orthographic viewports.
   - Toggle the clipping planes, handles, and rotate clipping planes on drag.
   - Click on the faces/edges/corners of the beveled cube orientation widget to change the orientation.
+  URL params: numViewports=1|2|3, colorScheme=gray|rgy|marker, letterColorScheme=mixed|white|black, keepOrientationUp=true|false
   `;
 
 content.append(instructions);
 
 addToggleButtonToToolbar({
   title: 'Toggle Clipping Planes',
-  defaultToggle: true,
+  defaultToggle: false,
+  container: planesRow,
   onClick: (toggle) => {
     const toolGroupVRT =
       cornerstoneTools.ToolGroupManager.getToolGroup(toolGroupIdVRT);
@@ -192,7 +200,7 @@ addToggleButtonToToolbar({
 addToggleButtonToToolbar({
   title: 'Toggle Handles',
   defaultToggle: false,
-  container: leftToolbarContainer,
+  container: planesRow,
   onClick: (toggle) => {
     const toolGroupVRT =
       cornerstoneTools.ToolGroupManager.getToolGroup(toolGroupIdVRT);
@@ -206,7 +214,7 @@ addToggleButtonToToolbar({
 addToggleButtonToToolbar({
   title: 'Toggle Rotate Clipping Planes<br>on drag (without shift)',
   defaultToggle: false,
-  container: leftToolbarContainer,
+  container: planesRow,
   onClick: (toggle) => {
     const toolGroupVRT =
       cornerstoneTools.ToolGroupManager.getToolGroup(toolGroupIdVRT);
@@ -266,7 +274,7 @@ function getColorSchemeFromUrl(): 'gray' | 'rgy' | 'marker' {
   if (grayColors === 'true') {
     return 'gray';
   }
-  return 'marker'; // default - matches OrientationMarkerTool colors
+  return 'rgy'; // default
 }
 
 /**
@@ -490,19 +498,19 @@ async function run(numViewports = getNumViewportsFromUrl()) {
   // Add dropdown for orientation control colors (reloads page with URL param)
   const colorSchemeValues: string[] = ['rgy', 'gray', 'marker'];
   const colorSchemeLabels = ['RGY', 'Gray', 'Marker'];
-  // Ensure colorScheme is valid, default to 'marker' if not
+  // Ensure colorScheme is valid, default to 'rgy' if not
   const validColorScheme = colorSchemeValues.includes(colorScheme)
     ? colorScheme
-    : 'marker';
+    : 'rgy';
 
   addDropdownToToolbar({
-    labelText: 'Orientation Control Colors',
+    labelText: 'Orientation Control: Colors',
     options: {
       values: colorSchemeValues,
       defaultValue: validColorScheme,
       labels: colorSchemeLabels,
     },
-    container: rightToolbarContainer,
+    container: controlRow,
     onSelectedValueChange: (selectedValue) => {
       const url = new URL(window.location.href);
       url.searchParams.set('colorScheme', String(selectedValue));
@@ -528,7 +536,7 @@ async function run(numViewports = getNumViewportsFromUrl()) {
       defaultValue: validLetterColorScheme,
       labels: letterColorSchemeLabels,
     },
-    container: rightToolbarContainer,
+    container: controlRow,
     onSelectedValueChange: (selectedValue) => {
       const url = new URL(window.location.href);
       url.searchParams.set('letterColorScheme', String(selectedValue));
@@ -547,7 +555,7 @@ async function run(numViewports = getNumViewportsFromUrl()) {
       defaultValue: String(keepOrientationUp),
       labels: keepOrientationUpLabels,
     },
-    container: rightToolbarContainer,
+    container: controlRow,
     onSelectedValueChange: (selectedValue) => {
       const newValue = selectedValue === 'true';
       // Update URL parameter
@@ -573,11 +581,11 @@ async function run(numViewports = getNumViewportsFromUrl()) {
   });
 
   addSliderToToolbar({
-    title: 'Orientation marker size',
+    title: 'Marker size',
     range: [0.01, 0.05],
     defaultValue: 0.04,
     step: 0.01,
-    container: rightToolbarContainer,
+    container: controlRow,
     onSelectedValueChange: (value) => {
       const size = Number(value);
       const toolGroupVRT =
@@ -596,14 +604,14 @@ async function run(numViewports = getNumViewportsFromUrl()) {
     },
   });
 
-  // Append the right container to the toolbar
-  if (toolbar) {
-    toolbar.appendChild(rightToolbarContainer);
-  }
-
   const viewport = renderingEngine.getViewport(viewportId4) as VolumeViewport3D;
 
-  await setVolumesForViewports(renderingEngine, [{ volumeId }], [viewportId4]);
+  await setVolumesForViewports(
+    renderingEngine,
+    [{ volumeId }],
+    [viewportId4],
+    true
+  );
 
   viewport.setProperties({
     preset: 'CT-Bone',
@@ -611,22 +619,13 @@ async function run(numViewports = getNumViewportsFromUrl()) {
 
   toolGroupVRT.addViewport(viewportId4, renderingEngineId);
 
-  // First render the viewport BEFORE adding cropping tool
   viewport.resetCamera();
   viewport.setZoom(1.2);
 
-  // Manually trigger camera modified to initialize VTK rendering state
-  const camera = viewport.getCamera();
-  const { position, focalPoint, viewUp } = camera;
-  viewport.setCamera({
-    position: [...position],
-    focalPoint: [...focalPoint],
-    viewUp: [...viewUp],
-  });
+  // Force VTK pipeline to size and render (workaround for volume not showing until interaction)
+  renderingEngine.resize(true, true);
 
-  viewport.render();
-
-  // Now add and activate the cropping tool
+  // Now add and activate the cropping tool (start with clipping off so volume gets first render)
   toolGroupVRT.addTool(VolumeCroppingTool.toolName, {
     showHandles: false,
     showClippingPlanes: false,
@@ -655,15 +654,8 @@ async function run(numViewports = getNumViewportsFromUrl()) {
   if (croppingTool && typeof croppingTool.setHandlesVisible === 'function') {
     croppingTool.setHandlesVisible(false);
   }
-
-  // Render again after cropping tool is initialized
-  viewport.render();
+  // Clipping off on load; user enables via Toggle Clipping Planes button
   renderingEngine.renderViewports(activeViewportIds);
-
-  // Force another render after a brief moment to ensure everything is visible
-  setTimeout(() => {
-    renderingEngine.render();
-  }, 100);
 }
 
 run();

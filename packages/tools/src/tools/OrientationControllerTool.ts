@@ -98,7 +98,7 @@ const LETTER_COLOR_SCHEMES: Record<string, LetterColors> = {
   },
 };
 
-const DEFAULT_FACE_COLOR_SCHEME = 'marker';
+const DEFAULT_FACE_COLOR_SCHEME = 'rgy';
 const DEFAULT_LETTER_COLOR_SCHEME = 'mixed';
 
 const ANIMATE_RESET_CAMERA_OPTIONS = {
@@ -123,7 +123,7 @@ class OrientationControllerTool extends BaseTool {
         opacity: 1.0,
         size: 0.04,
         position: 'bottom-right',
-        colorScheme: 'marker',
+        colorScheme: 'rgy',
         letterColorScheme: 'mixed',
         showEdgeFaces: true,
         showCornerFaces: true,
@@ -151,7 +151,7 @@ class OrientationControllerTool extends BaseTool {
     frontBack: number[];
     leftRight: number[];
   } {
-    const colorScheme = this.configuration.colorScheme || 'marker';
+    const colorScheme = this.configuration.colorScheme || 'rgy';
 
     // If faceColors are explicitly provided, use them (but ensure they have the required properties)
     if (this.configuration.faceColors) {
