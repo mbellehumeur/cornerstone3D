@@ -1,5 +1,6 @@
 import {
   CONSTANTS,
+  Enums,
   utilities as csUtils,
   type Types,
 } from '@cornerstonejs/core';
@@ -7,15 +8,63 @@ import { getViewportPresentation } from './viewportPresentation';
 
 const { RENDERING_DEFAULTS } = CONSTANTS;
 
+type PresentationSlabViewport = Types.IViewport & {
+  getSourceDataId?: () => string | undefined;
+  getDisplaySetPresentation?: (
+    dataId: string
+  ) => { slabThickness?: number; blendMode?: Enums.BlendModes } | undefined;
+  setDisplaySetPresentation?: (
+    dataId: string,
+    presentation: { slabThickness?: number; blendMode?: Enums.BlendModes }
+  ) => void;
+};
+
 /**
- * Returns the viewport's slab thickness, defaulting to the minimum slab thickness
- * for native (Generic) viewports which have no slab API.
+ * Returns the viewport's slab thickness. Native PLANAR_NEXT stores slab on
+ * display-set presentation; legacy volume viewports expose getSlabThickness().
  */
 export function getSlabThicknessOrDefault(viewport: Types.IViewport): number {
   if (csUtils.isGenericViewport(viewport)) {
+    const vp = viewport as PresentationSlabViewport;
+    const sourceDataId = vp.getSourceDataId?.();
+    const slabThickness = sourceDataId
+      ? vp.getDisplaySetPresentation?.(sourceDataId)?.slabThickness
+      : undefined;
+
+    if (typeof slabThickness === 'number' && Number.isFinite(slabThickness)) {
+      return Math.max(slabThickness, RENDERING_DEFAULTS.MINIMUM_SLAB_THICKNESS);
+    }
+
     return RENDERING_DEFAULTS.MINIMUM_SLAB_THICKNESS;
   }
   return (viewport as Types.IVolumeViewport).getSlabThickness();
+}
+
+/**
+ * Writes slab thickness (and blend mode) for a native PLANAR_NEXT viewport via
+ * display-set presentation. No-ops when the viewport has no source binding.
+ */
+export function setNativeSlabThickness(
+  viewport: Types.IViewport,
+  slabThickness: number,
+  blendMode: Enums.BlendModes
+): void {
+  if (!csUtils.isGenericViewport(viewport)) {
+    return;
+  }
+
+  const vp = viewport as PresentationSlabViewport;
+  const sourceDataId = vp.getSourceDataId?.();
+
+  if (!sourceDataId || typeof vp.setDisplaySetPresentation !== 'function') {
+    return;
+  }
+
+  vp.setDisplaySetPresentation(sourceDataId, {
+    slabThickness,
+    blendMode,
+  });
+  viewport.render();
 }
 
 /**

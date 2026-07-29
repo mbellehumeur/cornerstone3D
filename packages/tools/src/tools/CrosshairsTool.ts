@@ -43,7 +43,9 @@ import liangBarksyClip from '../utilities/math/vec2/liangBarksyClip';
 import {
   getSlabThicknessOrDefault,
   jumpToFocalPoint,
+  setNativeSlabThickness,
 } from '../utilities/genericViewportToolHelpers';
+import setViewportCamera from '../utilities/setViewportCamera';
 
 import * as lineSegment from '../utilities/math/line';
 import type {
@@ -321,7 +323,14 @@ class CrosshairsTool extends AnnotationTool {
     this._clearAllVolumeListenersAndViewportState();
     this._bindToolGroupViewportListeners();
     this._syncVolumeListenersWithToolGroup();
-    this._computeToolCenter(this._getViewportsInfo());
+    const viewportsInfo = this._getViewportsInfo();
+    this._computeToolCenter(viewportsInfo);
+
+    // ToolGroup mode changes only re-render the image viewport; crosshair
+    // lines are SVG annotations created above — redraw them immediately.
+    triggerAnnotationRenderForViewportIds(
+      viewportsInfo.map(({ viewportId }) => viewportId)
+    );
   };
 
   onSetToolActive() {
@@ -368,6 +377,13 @@ class CrosshairsTool extends AnnotationTool {
         });
       }
     });
+
+    // ToolGroup.setToolDisabled only re-renders the image viewport; crosshair
+    // lines live in the SVG annotation layer, so force an annotation redraw
+    // (Disabled tools are skipped) or the lines stay until the next interaction.
+    triggerAnnotationRenderForViewportIds(
+      viewportsInfo.map(({ viewportId }) => viewportId)
+    );
   }
 
   resetCrosshairs = () => {
@@ -389,14 +405,19 @@ class CrosshairsTool extends AnnotationTool {
       const suppressEvents = true;
       if (csUtils.isGenericViewport(viewport)) {
         // Native PLANAR_NEXT has no resetCamera/resetSlabThickness; resetViewState
-        // resets pan/zoom/orientation/flip (slice/navigation is preserved and there
-        // is no slab concept). Wrapped by the caller's _ignoreFiredEvents guard.
+        // resets pan/zoom/orientation/flip (slice/navigation is preserved). Slab
+        // lives on display-set presentation — clear it separately.
         viewport.resetViewState({
           resetPan,
           resetZoom,
           resetOrientation: resetRotation,
           resetFlip: true,
         });
+        setNativeSlabThickness(
+          viewport,
+          RENDERING_DEFAULTS.MINIMUM_SLAB_THICKNESS,
+          Enums.BlendModes.COMPOSITE
+        );
       } else {
         viewport.resetCamera({
           resetPan,
@@ -2273,13 +2294,8 @@ class CrosshairsTool extends AnnotationTool {
       });
     } else if (handles.activeOperation === OPERATION.ROTATE) {
       // ROTATION
-      // Native PLANAR_NEXT has no setCamera and no validated free-oblique orientation
-      // write, so crosshairs rotation cannot be applied; skip it on native (the rotate
-      // handles are inert rather than throwing). TODO(next): oblique reformat via a
-      // setViewReference orientation write once cornerstone supports it.
-      if (csUtils.isGenericViewport(enabledElement.viewport)) {
-        return;
-      }
+      // Native PLANAR_NEXT has no setCamera; setViewportCamera writes orientation
+      // through setViewReference (viewPlaneNormal / viewUp / focalPoint).
       const otherViewportAnnotations =
         this._getAnnotationsForViewportsWithDifferentCameras(
           enabledElement,
@@ -2373,7 +2389,7 @@ class CrosshairsTool extends AnnotationTool {
           viewUp[1] -= position[1];
           viewUp[2] -= position[2];
 
-          otherViewport.setCamera({
+          setViewportCamera(otherViewport, {
             position,
             viewUp,
             focalPoint,
@@ -2390,11 +2406,8 @@ class CrosshairsTool extends AnnotationTool {
       });
     } else if (handles.activeOperation === OPERATION.SLAB) {
       // SLAB THICKNESS
-      // Native PLANAR_NEXT has no slab-thickness API (setSlabThickness/
-      // resetSlabThickness); skip the slab operation on native rather than throwing.
-      if (csUtils.isGenericViewport(enabledElement.viewport)) {
-        return;
-      }
+      // Native PLANAR_NEXT writes slab via display-set presentation
+      // (setNativeSlabThickness); legacy uses setBlendMode/setSlabThickness.
       // this should be just the active one under the mouse,
       const otherViewportAnnotations =
         this._getAnnotationsForViewportsWithDifferentCameras(
@@ -2586,11 +2599,18 @@ class CrosshairsTool extends AnnotationTool {
   };
 
   setSlabThickness(viewport, slabThickness) {
-    // Native PLANAR_NEXT has no slab API (setBlendMode/setSlabThickness). The SLAB
-    // drag operation is already gated off on native; guard here too for safety.
+    let blendModeToUse = this.configuration.slabThicknessBlendMode;
+    if (slabThickness === RENDERING_DEFAULTS.MINIMUM_SLAB_THICKNESS) {
+      blendModeToUse = Enums.BlendModes.COMPOSITE;
+    }
+
+    // Native PLANAR_NEXT has no setBlendMode/setSlabThickness; slab lives on
+    // display-set presentation (also used by vtk/WebGPU volume-slice paths).
     if (csUtils.isGenericViewport(viewport)) {
+      setNativeSlabThickness(viewport, slabThickness, blendModeToUse);
       return;
     }
+
     let actorUIDs;
     const { filterActorUIDsToSetSlabThickness } = this.configuration;
     if (
@@ -2598,11 +2618,6 @@ class CrosshairsTool extends AnnotationTool {
       filterActorUIDsToSetSlabThickness.length > 0
     ) {
       actorUIDs = filterActorUIDsToSetSlabThickness;
-    }
-
-    let blendModeToUse = this.configuration.slabThicknessBlendMode;
-    if (slabThickness === RENDERING_DEFAULTS.MINIMUM_SLAB_THICKNESS) {
-      blendModeToUse = Enums.BlendModes.COMPOSITE;
     }
 
     const immediate = false;
