@@ -18,7 +18,7 @@ export class DefaultVolume3DDataProvider implements Volume3DDataProvider {
   async load(
     dataId: string,
     options?: {
-      renderMode: 'vtkVolume3d' | 'vtkGeometry3d';
+      renderMode: 'vtkVolume3d' | 'webgpuVolume3d' | 'vtkGeometry3d';
     }
   ): Promise<LoadedData<Volume3DVolumePayload | Volume3DGeometryPayload>> {
     if (!options) {
@@ -29,7 +29,10 @@ export class DefaultVolume3DDataProvider implements Volume3DDataProvider {
 
     const dataSet = this.getDataSet(dataId);
 
-    if (options.renderMode === 'vtkVolume3d') {
+    if (
+      options.renderMode === 'vtkVolume3d' ||
+      options.renderMode === 'webgpuVolume3d'
+    ) {
       if (!dataSet?.imageIds?.length) {
         throw new Error(
           `[VolumeViewport3D] No registered volume dataset for ${dataId}`
@@ -47,7 +50,7 @@ export class DefaultVolume3DDataProvider implements Volume3DDataProvider {
         type: 'image',
         imageIds: imageVolume.imageIds || dataSet.imageIds,
         imageVolume,
-        renderMode: 'vtkVolume3d',
+        renderMode: options.renderMode,
         volumeId,
       };
     }

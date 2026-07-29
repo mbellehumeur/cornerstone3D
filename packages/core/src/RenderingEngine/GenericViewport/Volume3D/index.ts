@@ -8,6 +8,7 @@ export {
   createDefaultVolume3DRenderPaths,
   createVolume3DRenderPathResolver,
 } from './Volume3DRenderPathResolver';
+export { WEBGPU_VOLUME_3D_RENDER_MODE } from './WebGPUVolume3DRenderPath';
 /**
  * Lower-level 3D projection helpers for custom synchronizers and tooling.
  * This namespace is less stable than the core viewport API while the generic
@@ -31,6 +32,7 @@ export type {
   Volume3DDataPresentation,
   Volume3DPresentationProps,
   Volume3DProperties,
+  Volume3DRenderMode,
   Volume3DRequestedRenderMode,
   Volume3DSetDataOptions,
   VolumeViewport3DInput,

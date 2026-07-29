@@ -1,6 +1,5 @@
 import vtkPlaneFactory from '@kitware/vtk.js/Common/DataModel/Plane';
 import type vtkPlane from '@kitware/vtk.js/Common/DataModel/Plane';
-import vtkDataArray from '@kitware/vtk.js/Common/Core/DataArray';
 import vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
 import vtkImageResliceMapper from '@kitware/vtk.js/Rendering/Core/ImageResliceMapper';
 import vtkImageSlice from '@kitware/vtk.js/Rendering/Core/ImageSlice';
@@ -43,6 +42,11 @@ import {
   releaseWebGPUViewportWindow,
   renderWebGPUViewportWindow,
 } from './webgpuViewportRenderWindow';
+import {
+  acquireWebGPUMapperImageData,
+  refreshWebGPUMapperScalars,
+  releaseWebGPUMapperImageData,
+} from '../webgpuMapperImageData';
 
 /**
  * Wire id of the WebGPU volume-slice (MPR) render mode (follows the
@@ -118,7 +122,7 @@ export class WebGPUVolumeSliceRenderPath
     });
     this.window = window;
 
-    const mapperImageDataEntry = acquireMapperImageData(
+    const mapperImageDataEntry = acquireWebGPUMapperImageData(
       payload.volumeId,
       imageVolume
     );
@@ -173,8 +177,9 @@ export class WebGPUVolumeSliceRenderPath
             eventType === Events.IMAGE_VOLUME_LOADING_COMPLETED &&
             !mapperImageDataEntry.refreshedAfterLoad
           ) {
-            mapperImageDataEntry.refreshedAfterLoad = true;
-            refreshMapperScalars(rendering);
+            if (refreshMapperScalars(rendering)) {
+              mapperImageDataEntry.refreshedAfterLoad = true;
+            }
           }
 
           ctx.display.renderNow();
@@ -387,7 +392,7 @@ export class WebGPUVolumeSliceRenderPath
       releaseWebGPUViewportWindow(ctx.viewportId);
     }
 
-    releaseMapperImageData(rendering.imageVolume.volumeId);
+    releaseWebGPUMapperImageData(rendering.imageVolume.volumeId);
   }
 }
 
@@ -430,128 +435,22 @@ export class WebGPUVolumeSlicePath
 }
 
 /**
- * Shared mapper-input imageData per volume. Materializing the voxel data is
- * a full copy (cornerstone volumes are image-backed and own no contiguous
- * array), so every viewport rendering the same volume must share one
- * instance — reference-counted like the per-viewport windows.
- */
-const mapperImageDataByVolumeId = new Map<
-  string,
-  {
-    imageData: ReturnType<typeof vtkImageData.newInstance>;
-    refCount: number;
-    refreshedAfterLoad: boolean;
-  }
->();
-
-function acquireMapperImageData(volumeId: string, imageVolume: IImageVolume) {
-  let entry = mapperImageDataByVolumeId.get(volumeId);
-
-  if (!entry) {
-    entry = {
-      imageData: createMapperImageData(imageVolume),
-      refCount: 0,
-      refreshedAfterLoad: false,
-    };
-    mapperImageDataByVolumeId.set(volumeId, entry);
-  }
-
-  entry.refCount += 1;
-  return entry;
-}
-
-function releaseMapperImageData(volumeId: string): void {
-  const entry = mapperImageDataByVolumeId.get(volumeId);
-
-  if (!entry) {
-    return;
-  }
-
-  entry.refCount -= 1;
-
-  if (entry.refCount <= 0) {
-    mapperImageDataByVolumeId.delete(volumeId);
-    entry.imageData.delete();
-  }
-}
-
-/**
- * Builds the mapper input vtkImageData: same geometry as the volume's
- * imageData, with real scalar point data materialized from the voxelManager
- * (the volume's own imageData intentionally carries none — see the class
- * docstring).
- */
-function createMapperImageData(imageVolume: IImageVolume) {
-  const sourceImageData = imageVolume.imageData;
-
-  if (!sourceImageData) {
-    throw new Error(
-      '[PlanarViewport] WebGPU volume rendering requires volume imageData'
-    );
-  }
-
-  const values = getVolumeScalarArray(imageVolume);
-  const imageDataMetadata = sourceImageData.get('numberOfComponents') as
-    | { numberOfComponents?: number }
-    | undefined;
-  const scalars = vtkDataArray.newInstance({
-    name: 'Pixels',
-    numberOfComponents: imageDataMetadata?.numberOfComponents ?? 1,
-    values,
-  });
-  const mapperImageData = vtkImageData.newInstance();
-
-  mapperImageData.setDimensions(sourceImageData.getDimensions());
-  mapperImageData.setSpacing(sourceImageData.getSpacing());
-  mapperImageData.setDirection(sourceImageData.getDirection());
-  mapperImageData.setOrigin(sourceImageData.getOrigin());
-  mapperImageData.getPointData().setScalars(scalars);
-
-  return mapperImageData;
-}
-
-function getVolumeScalarArray(imageVolume: IImageVolume) {
-  const voxelManager = imageVolume.voxelManager as
-    | {
-        getCompleteScalarDataArray?: () => ArrayLike<number>;
-        getScalarData?: () => ArrayLike<number>;
-      }
-    | undefined;
-  const values =
-    voxelManager?.getCompleteScalarDataArray?.() ??
-    voxelManager?.getScalarData?.();
-
-  if (!values) {
-    throw new Error(
-      '[PlanarViewport] WebGPU volume rendering requires voxel data'
-    );
-  }
-
-  return values as number[];
-}
-
-/**
  * Re-materializes the voxel data into the mapper's scalar array once the
  * volume finishes loading, invalidating the cached GPU texture exactly once.
+ *
+ * @returns `true` when scalars were successfully updated.
  */
 function refreshMapperScalars(
   rendering: PlanarWebGPUVolumeSliceRendering
-): void {
-  const scalars = rendering.mapperImageData.getPointData().getScalars();
-
-  if (!scalars) {
-    return;
+): boolean {
+  const refreshed = refreshWebGPUMapperScalars(
+    rendering.mapperImageData,
+    rendering.imageVolume
+  );
+  if (refreshed) {
+    rendering.mapper.modified();
   }
-
-  const values = getVolumeScalarArray(rendering.imageVolume);
-
-  if (scalars.getData() !== values) {
-    scalars.setData(values as never);
-  }
-
-  scalars.modified();
-  rendering.mapperImageData.modified();
-  rendering.mapper.modified();
+  return refreshed;
 }
 
 /**

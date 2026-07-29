@@ -74,9 +74,8 @@ setTitleAndDescription(
     'the same study with the CT-Bone preset; drag with the left mouse ' +
     'button to rotate it. Use the buttons to switch the render backend ' +
     'between webgpu and gpu (WebGL) — the CPU backend is intentionally ' +
-    'omitted. Note: the 3D volume viewport has no WebGPU render mode yet, ' +
-    'so it reports its actual mode in the panel regardless of the selected ' +
-    'backend; its blue tint on webgpu is only a visual cue. Tip: append ' +
+    'omitted. The 3D viewport uses renderMode webgpuVolume3d when the ' +
+    'effective backend is webgpu, and vtkVolume3d otherwise. Tip: append ' +
     '?renderBackend=webgpu|gpu to pick the initial backend.'
 );
 
@@ -187,8 +186,26 @@ function applyBackendBackgrounds(): void {
   }
 }
 
-function switchBackend(backend: string): void {
+async function switchBackend(backend: string): Promise<void> {
   setRenderBackend(backend, 'example-toolbar');
+  const volume3dViewport = getViewport(volume3dViewportId) as
+    | (PlanarViewport & {
+        setDisplaySets?: (entry: {
+          displaySetId: string;
+          options: { renderMode: 'vtkVolume3d' | 'webgpuVolume3d' };
+        }) => Promise<void>;
+      })
+    | undefined;
+
+  await volume3dViewport?.setDisplaySets?.({
+    displaySetId: volume3dDataId,
+    options: {
+      renderMode:
+        getEffectiveRenderBackend() === 'webgpu'
+          ? 'webgpuVolume3d'
+          : 'vtkVolume3d',
+    },
+  });
   applyBackendBackgrounds();
   [mipViewportId, volume3dViewportId].forEach((viewportId) =>
     getViewport(viewportId)?.render()
@@ -479,7 +496,12 @@ async function run() {
     }),
     volume3dViewport.setDisplaySets({
       displaySetId: volume3dDataId,
-      options: { renderMode: 'vtkVolume3d' },
+      options: {
+        renderMode:
+          getEffectiveRenderBackend() === 'webgpu'
+            ? 'webgpuVolume3d'
+            : 'vtkVolume3d',
+      },
     }),
   ]);
 

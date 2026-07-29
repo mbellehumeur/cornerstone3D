@@ -1,4 +1,5 @@
 import vtkRenderWindow from '@kitware/vtk.js/Rendering/Core/RenderWindow';
+import vtkRenderWindowInteractor from '@kitware/vtk.js/Rendering/Core/RenderWindowInteractor';
 import vtkRenderer from '@kitware/vtk.js/Rendering/Core/Renderer';
 import vtkWebGPURenderWindow from '@kitware/vtk.js/Rendering/WebGPU/RenderWindow';
 import renderingEngineCache from '../../renderingEngineCache';
@@ -42,7 +43,14 @@ export interface WebGPUViewportWindow {
   renderWindow: ReturnType<typeof vtkRenderWindow.newInstance>;
   view: WebGPUView;
   renderer: ReturnType<typeof vtkRenderer.newInstance>;
+  /**
+   * Detached interactor required by vtk.js WebGPU VolumePass timing
+   * (`getInteractor().isAnimating()`). No DOM events are bound — Cornerstone
+   * owns interaction on the visible canvas.
+   */
+  interactor: ReturnType<typeof vtkRenderWindowInteractor.newInstance>;
   refCount: number;
+  destroyTimer?: ReturnType<typeof setTimeout>;
   /**
    * Set when the last binding releases the window. Deferred blits (the
    * device work-done promise from the final frame) must bail out instead of
@@ -85,6 +93,14 @@ export function acquireWebGPUViewportWindow(
       view as unknown as Parameters<typeof renderWindow.addView>[0]
     );
 
+    // VolumePass.computeTiming requires a non-null interactor. Mirror the
+    // offscreen OpenGL window: create + initialize without binding DOM events.
+    const interactor = vtkRenderWindowInteractor.newInstance();
+    interactor.setView(
+      view as unknown as Parameters<typeof interactor.setView>[0]
+    );
+    interactor.initialize();
+
     const renderer = vtkRenderer.newInstance({
       background: resolveViewportBackground(
         options?.renderingEngineId,
@@ -94,10 +110,21 @@ export function acquireWebGPUViewportWindow(
     renderer.getActiveCamera().setParallelProjection(true);
     renderWindow.addRenderer(renderer);
 
-    entry = { renderWindow, view, renderer, refCount: 0, destroyed: false };
+    entry = {
+      renderWindow,
+      view,
+      renderer,
+      interactor,
+      refCount: 0,
+      destroyed: false,
+    };
     windowsByViewportId.set(viewportId, entry);
   }
 
+  if (entry.destroyTimer) {
+    clearTimeout(entry.destroyTimer);
+    entry.destroyTimer = undefined;
+  }
   entry.refCount += 1;
   return entry;
 }
@@ -124,6 +151,23 @@ function resolveViewportBackground(
   }
 }
 
+/**
+ * Returns the live WebGPU window for a viewport without changing its
+ * reference count. Used by viewports that need to pin camera/canvas helpers
+ * onto the same renderer the render path draws with.
+ */
+export function getWebGPUViewportWindow(
+  viewportId: string
+): WebGPUViewportWindow | undefined {
+  const entry = windowsByViewportId.get(viewportId);
+
+  if (!entry || entry.destroyed) {
+    return undefined;
+  }
+
+  return entry;
+}
+
 /** Releases one reference; destroys the window when the last binding leaves. */
 export function releaseWebGPUViewportWindow(viewportId: string): void {
   const entry = windowsByViewportId.get(viewportId);
@@ -132,16 +176,28 @@ export function releaseWebGPUViewportWindow(viewportId: string): void {
     return;
   }
 
-  entry.refCount -= 1;
+  entry.refCount = Math.max(0, entry.refCount - 1);
 
-  if (entry.refCount <= 0) {
+  if (entry.refCount > 0 || entry.destroyed) {
+    return;
+  }
+
+  // Defer destruction so rapid layout switches (MPR ↔ 3D) can reacquire the
+  // same window, and so in-flight WebGPU initialize callbacks see
+  // `model.deleted` / our `destroyed` flag before objects are torn down.
+  entry.destroyTimer = setTimeout(() => {
+    entry.destroyTimer = undefined;
+    if (entry.refCount > 0 || entry.destroyed) {
+      return;
+    }
     entry.destroyed = true;
     windowsByViewportId.delete(viewportId);
     entry.renderWindow.removeRenderer(entry.renderer);
     entry.renderer.delete();
+    entry.interactor.delete();
     entry.view.delete();
     entry.renderWindow.delete();
-  }
+  }, 50);
 }
 
 /**
@@ -169,12 +225,35 @@ export function renderWebGPUViewportWindow(
     view.setSize(width, height);
   }
 
-  // Handles the uninitialized case internally by queueing a traverse for
-  // when the device becomes ready.
-  view.traverseAllPasses();
+  const safeTraverse = (): boolean => {
+    if (entry.destroyed) {
+      return false;
+    }
+
+    // Handles the uninitialized case internally by queueing a traverse for
+    // when the device becomes ready. vtk.js may also invoke traverse from its
+    // own onInitialized callback (outside this try/catch), so keep VolumePass
+    // prerequisites (interactor) intact and treat teardown races as soft fails.
+    try {
+      view.traverseAllPasses();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  if (!safeTraverse()) {
+    return;
+  }
 
   const finish = () => {
     if (entry.destroyed) {
+      return;
+    }
+
+    // Re-traverse once initialized so the first Volume3D frame is not skipped
+    // when the initial call only queued device acquisition.
+    if (!safeTraverse()) {
       return;
     }
 

@@ -26,7 +26,10 @@ import type {
 import type { ViewportCameraBase } from '../ViewportCameraTypes';
 
 /** @internal */
-export type Volume3DRenderMode = 'vtkVolume3d' | 'vtkGeometry3d';
+export type Volume3DRenderMode =
+  | 'vtkVolume3d'
+  | 'webgpuVolume3d'
+  | 'vtkGeometry3d';
 export type Volume3DRequestedRenderMode = Volume3DRenderMode | 'auto';
 
 /** @internal */
@@ -46,7 +49,7 @@ export interface Volume3DSetDataOptions {
 export interface Volume3DVolumePayload {
   imageIds: string[];
   imageVolume: IImageVolume;
-  renderMode: 'vtkVolume3d';
+  renderMode: 'vtkVolume3d' | 'webgpuVolume3d';
   volumeId: string;
 }
 
@@ -100,7 +103,13 @@ export interface Volume3DViewportRenderContext
     options: Pick<ViewportInputOptions, 'orientation' | 'parallelProjection'>;
   };
   display: {
+    activateRenderMode(renderMode: Volume3DRenderMode): void;
+    renderNow(): void;
     requestRender(): void;
+  };
+  cpu: {
+    canvas: HTMLCanvasElement;
+    context: CanvasRenderingContext2D;
   };
   vtk: {
     canvas: HTMLCanvasElement;
@@ -110,7 +119,13 @@ export interface Volume3DViewportRenderContext
 
 type Volume3DContextBase = Pick<
   Volume3DViewportRenderContext,
-  'display' | 'type' | 'viewport' | 'viewportId' | 'vtk'
+  | 'cpu'
+  | 'display'
+  | 'renderingEngineId'
+  | 'type'
+  | 'viewport'
+  | 'viewportId'
+  | 'vtk'
 >;
 
 /** @internal */
@@ -120,7 +135,7 @@ export type Volume3DVtkGeometryAdapterContext = Volume3DContextBase;
 
 /** @internal */
 export type Volume3DVolumeRendering = MountedRendering<{
-  renderMode: 'vtkVolume3d';
+  renderMode: 'vtkVolume3d' | 'webgpuVolume3d';
   actorEntryUID: string;
   actor: vtkVolume;
   defaultVOIRange?: VOIRange;

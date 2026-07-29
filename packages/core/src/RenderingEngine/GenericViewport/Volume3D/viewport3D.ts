@@ -1,4 +1,5 @@
 import { vec3 } from 'gl-matrix';
+import type vtkRenderer from '@kitware/vtk.js/Rendering/Core/Renderer';
 import { ViewportType } from '../../../enums';
 import type {
   ActorEntry,
@@ -36,12 +37,17 @@ import type {
   Volume3DCamera,
   Volume3DPayload,
   Volume3DDataPresentation,
+  Volume3DRenderMode,
   Volume3DRegisteredDataSet,
   Volume3DRendering,
+  Volume3DVolumePayload,
+  Volume3DVolumeRendering,
   Volume3DSetDataOptions,
   Volume3DViewportRenderContext,
   VolumeViewport3DInput,
 } from './viewport3DTypes';
+import { getWebGPUViewportWindow } from '../Planar/webgpuViewportRenderWindow';
+import { WEBGPU_VOLUME_3D_RENDER_MODE } from './WebGPUVolume3DRenderPath';
 
 class VolumeViewport3D extends GenericViewport<
   Volume3DCamera,
@@ -51,6 +57,8 @@ class VolumeViewport3D extends GenericViewport<
   readonly type = ViewportType.VOLUME_3D_NEXT;
   readonly renderingEngineId: string;
   readonly canvas: HTMLCanvasElement;
+  readonly cpuCanvas: HTMLCanvasElement;
+  private readonly defaultVtkRenderer: vtkRenderer;
   sWidth: number;
   sHeight: number;
   defaultOptions: ViewportInputOptions;
@@ -87,6 +95,30 @@ class VolumeViewport3D extends GenericViewport<
     this.element.style.position = this.element.style.position || 'relative';
     this.element.style.overflow = 'hidden';
     this.element.style.background = this.element.style.background || '#000';
+    this.element.style.isolation = 'isolate';
+    const viewportElement = this.element.querySelector(
+      '.viewport-element'
+    ) as HTMLDivElement | null;
+    const cpuCanvas = document.createElement('canvas');
+    cpuCanvas.style.display = 'none';
+    cpuCanvas.style.height = '100%';
+    cpuCanvas.style.inset = '0';
+    cpuCanvas.style.pointerEvents = 'none';
+    cpuCanvas.style.position = 'absolute';
+    cpuCanvas.style.width = '100%';
+    cpuCanvas.style.zIndex = '0';
+    this.element.appendChild(cpuCanvas);
+    this.cpuCanvas = cpuCanvas;
+    if (viewportElement) {
+      viewportElement.style.position =
+        viewportElement.style.position || 'relative';
+      viewportElement.style.zIndex = '1';
+    }
+    const cpuCanvasContext = cpuCanvas.getContext('2d');
+
+    if (!cpuCanvasContext) {
+      throw new Error('[VolumeViewport3D] Failed to initialize CPU canvas');
+    }
     this.dataProvider = args.dataProvider || new DefaultVolume3DDataProvider();
     this.renderPathResolver =
       args.renderPathResolver || createVolume3DRenderPathResolver();
@@ -103,6 +135,7 @@ class VolumeViewport3D extends GenericViewport<
     renderer
       .getActiveCamera()
       .setParallelProjection(this.defaultOptions.parallelProjection ?? true);
+    this.defaultVtkRenderer = renderer;
 
     this.renderContext = {
       viewportId: this.id,
@@ -116,9 +149,19 @@ class VolumeViewport3D extends GenericViewport<
         },
       },
       display: {
+        activateRenderMode: (renderMode: Volume3DRenderMode) => {
+          this.setRenderModeVisibility(renderMode);
+        },
+        renderNow: () => {
+          this.render();
+        },
         requestRender: () => {
           this.requestRenderingEngineRender();
         },
+      },
+      cpu: {
+        canvas: cpuCanvas,
+        context: cpuCanvasContext,
       },
       vtk: {
         canvas: this.canvas,
@@ -134,6 +177,7 @@ class VolumeViewport3D extends GenericViewport<
       'data-rendering-engine-uid',
       this.renderingEngineId
     );
+    this.setRenderModeVisibility('vtkVolume3d');
   }
 
   /**
@@ -179,7 +223,10 @@ class VolumeViewport3D extends GenericViewport<
       role: volumeOptions.role,
     });
 
-    if (renderMode === 'vtkVolume3d' && volumeOptions.role === 'source') {
+    if (
+      isVolume3DVolumeRenderMode(renderMode) &&
+      volumeOptions.role === 'source'
+    ) {
       this.primaryDataId = displaySetId;
     }
 
@@ -216,8 +263,8 @@ class VolumeViewport3D extends GenericViewport<
 
     if (
       !data ||
-      data.renderMode !== 'vtkVolume3d' ||
-      rendering.renderMode !== 'vtkVolume3d'
+      !isVolume3DVolumePayload(data) ||
+      !isVolume3DVolumeRendering(rendering)
     ) {
       return [];
     }
@@ -235,11 +282,14 @@ class VolumeViewport3D extends GenericViewport<
   }
 
   /**
-   * Returns the viewport canvas element.
-   *
-   * @returns The canvas owned by this viewport.
+   * Returns the viewport canvas element. In WebGPU volume mode the visible
+   * surface is `cpuCanvas` (blit target); otherwise the VTK OpenGL canvas.
    */
   getCanvas(): HTMLCanvasElement {
+    if (this.isWebGPUVolumeRenderModeActive()) {
+      return this.cpuCanvas;
+    }
+
     return this.canvas;
   }
 
@@ -294,7 +344,7 @@ class VolumeViewport3D extends GenericViewport<
   getResolvedView(): Volume3DResolvedView {
     return new Volume3DResolvedView({
       camera: this.getViewState(),
-      canvas: this.canvas,
+      canvas: this.renderContext.vtk.canvas,
       frameOfReferenceUID: this.resolveFrameOfReferenceUID(),
       renderer: this.getRenderer(),
     });
@@ -318,7 +368,7 @@ class VolumeViewport3D extends GenericViewport<
       viewUp,
     };
 
-    if (data?.renderMode === 'vtkVolume3d') {
+    if (data && isVolume3DVolumePayload(data)) {
       viewReference.volumeId = data.volumeId;
       Object.assign(
         viewReference,
@@ -359,8 +409,8 @@ class VolumeViewport3D extends GenericViewport<
 
     if (
       !data ||
-      data.renderMode !== 'vtkVolume3d' ||
-      rendering.renderMode !== 'vtkVolume3d'
+      !isVolume3DVolumePayload(data) ||
+      !isVolume3DVolumeRendering(rendering)
     ) {
       return;
     }
@@ -534,8 +584,10 @@ class VolumeViewport3D extends GenericViewport<
       return;
     }
 
-    this.sWidth = this.canvas.width;
-    this.sHeight = this.canvas.height;
+    this.syncCpuCanvasSize();
+    const activeCanvas = this.getCanvas();
+    this.sWidth = activeCanvas.width;
+    this.sHeight = activeCanvas.height;
 
     this.resizeBindings();
   }
@@ -555,6 +607,7 @@ class VolumeViewport3D extends GenericViewport<
 
   protected override onDestroy(): void {
     this.primaryDataId = undefined;
+    this.cpuCanvas.remove();
   }
 
   /**
@@ -595,7 +648,7 @@ class VolumeViewport3D extends GenericViewport<
     for (const [dataId, binding] of this.bindings.entries()) {
       const data = this.getVolume3DPayload(binding);
       const volumeId =
-        data?.renderMode === 'vtkVolume3d' ? data.volumeId : undefined;
+        data && isVolume3DVolumePayload(data) ? data.volumeId : undefined;
 
       contexts.push({
         dataId,
@@ -603,12 +656,12 @@ class VolumeViewport3D extends GenericViewport<
         frameOfReferenceUID:
           binding.getFrameOfReferenceUID() ?? this.getFrameOfReferenceUID(),
         imageIds:
-          data?.renderMode === 'vtkVolume3d' ? data.imageIds : undefined,
+          data && isVolume3DVolumePayload(data) ? data.imageIds : undefined,
         volumeId,
         volumeIds: volumeId ? [volumeId] : undefined,
         cameraFocalPoint: camera.focalPoint as Point3 | undefined,
         viewPlaneNormal: camera.viewPlaneNormal as Point3 | undefined,
-        ...(data?.renderMode === 'vtkVolume3d'
+        ...(data && isVolume3DVolumePayload(data)
           ? getDimensionGroupReferenceContext(data.imageVolume)
           : {}),
       });
@@ -628,7 +681,7 @@ class VolumeViewport3D extends GenericViewport<
   private resolveRenderMode(
     dataId: string,
     requestedRenderMode: Volume3DSetDataOptions['renderMode'] = 'auto'
-  ): 'vtkVolume3d' | 'vtkGeometry3d' {
+  ): Volume3DRenderMode {
     if (requestedRenderMode && requestedRenderMode !== 'auto') {
       return requestedRenderMode;
     }
@@ -676,7 +729,7 @@ class VolumeViewport3D extends GenericViewport<
       return;
     }
 
-    if (data.renderMode === 'vtkVolume3d') {
+    if (isVolume3DVolumePayload(data)) {
       return data.imageVolume.metadata?.FrameOfReferenceUID;
     }
 
@@ -701,10 +754,7 @@ class VolumeViewport3D extends GenericViewport<
     rendering: Volume3DRendering,
     data: LoadedData<Volume3DPayload>
   ): ActorEntry[] {
-    if (
-      rendering.renderMode === 'vtkVolume3d' &&
-      data.renderMode === 'vtkVolume3d'
-    ) {
+    if (isVolume3DVolumeRendering(rendering) && isVolume3DVolumePayload(data)) {
       return [
         {
           actor: rendering.actor,
@@ -720,6 +770,55 @@ class VolumeViewport3D extends GenericViewport<
 
     return [];
   }
+
+  private setRenderModeVisibility(renderMode: Volume3DRenderMode): void {
+    const useCPUCanvas = renderMode === WEBGPU_VOLUME_3D_RENDER_MODE;
+    this.cpuCanvas.style.display = useCPUCanvas ? '' : 'none';
+    this.cpuCanvas.style.pointerEvents = useCPUCanvas ? 'auto' : 'none';
+    this.canvas.style.display = useCPUCanvas ? 'none' : '';
+
+    if (useCPUCanvas) {
+      this.syncCpuCanvasSize();
+      this.renderContext.vtk.canvas = this.cpuCanvas;
+      // Prefer the live WebGPU renderer when the path has already acquired it
+      // so viewport camera APIs stay aligned with what is drawn.
+      const window = getWebGPUViewportWindow(this.id);
+      if (window) {
+        this.renderContext.vtk.renderer = window.renderer;
+      }
+      return;
+    }
+
+    this.renderContext.vtk.renderer = this.defaultVtkRenderer;
+    this.renderContext.vtk.canvas = this.canvas;
+  }
+
+  private isWebGPUVolumeRenderModeActive(): boolean {
+    return this.cpuCanvas.style.display !== 'none';
+  }
+
+  /**
+   * Sizes the WebGPU blit target like PlanarViewport: bitmap pixels follow
+   * CSS client size * devicePixelRatio. Without this the canvas stays at the
+   * browser default (300x150) and the volume blit looks empty/stretched.
+   */
+  private syncCpuCanvasSize(): void {
+    const { clientHeight, clientWidth } = this.element;
+    const devicePixelRatio = window.devicePixelRatio || 1;
+    const targetWidth = Math.max(1, Math.round(clientWidth * devicePixelRatio));
+    const targetHeight = Math.max(
+      1,
+      Math.round(clientHeight * devicePixelRatio)
+    );
+
+    if (
+      this.cpuCanvas.width !== targetWidth ||
+      this.cpuCanvas.height !== targetHeight
+    ) {
+      this.cpuCanvas.width = targetWidth;
+      this.cpuCanvas.height = targetHeight;
+    }
+  }
 }
 
 export default VolumeViewport3D;
@@ -732,7 +831,9 @@ function isVolume3DData(data: LoadedData): data is LoadedData<Volume3DPayload> {
   const payload = data as Record<string, unknown>;
 
   return (
-    (payload.type === 'image' && payload.renderMode === 'vtkVolume3d') ||
+    (payload.type === 'image' &&
+      (payload.renderMode === 'vtkVolume3d' ||
+        payload.renderMode === WEBGPU_VOLUME_3D_RENDER_MODE)) ||
     (payload.type === 'geometry' && payload.renderMode === 'vtkGeometry3d')
   );
 }
@@ -742,8 +843,29 @@ function isVolume3DRendering(rendering: {
 }): rendering is Volume3DRendering {
   return (
     rendering.renderMode === 'vtkVolume3d' ||
+    rendering.renderMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
     rendering.renderMode === 'vtkGeometry3d'
   );
+}
+
+function isVolume3DVolumeRenderMode(
+  renderMode: unknown
+): renderMode is 'vtkVolume3d' | typeof WEBGPU_VOLUME_3D_RENDER_MODE {
+  return (
+    renderMode === 'vtkVolume3d' || renderMode === WEBGPU_VOLUME_3D_RENDER_MODE
+  );
+}
+
+function isVolume3DVolumePayload(
+  data: LoadedData<Volume3DPayload>
+): data is LoadedData<Volume3DVolumePayload> {
+  return isVolume3DVolumeRenderMode(data.renderMode);
+}
+
+function isVolume3DVolumeRendering(
+  rendering: Volume3DRendering
+): rendering is Volume3DVolumeRendering {
+  return isVolume3DVolumeRenderMode(rendering.renderMode);
 }
 
 function isVolume3DRegisteredDataSet(
