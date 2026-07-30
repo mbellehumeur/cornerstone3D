@@ -57,8 +57,9 @@ export function registerWebGPURenderBackend(): void {
         createDefinition: () => new WebGPUVolumeSlicePath(),
       },
     },
-    // The WebGPU path blits into the viewport's `cpu` surface canvas (the
-    // `vtk` surface belongs to the engine's WebGL blit cycle).
+    // The WebGPU path presents the vtk WebGPU canvas directly in the viewport
+    // element. `surface: 'cpu'` keeps these modes off the engine WebGL blit
+    // cycle (the `vtk` surface); the cpuCanvas is only a size authority now.
     surface: 'cpu',
   });
 }

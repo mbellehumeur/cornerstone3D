@@ -46,7 +46,11 @@ import type {
   Volume3DViewportRenderContext,
   VolumeViewport3DInput,
 } from './viewport3DTypes';
-import { getWebGPUViewportWindow } from '../Planar/webgpuViewportRenderWindow';
+import {
+  attachWebGPUViewportCanvas,
+  getWebGPUViewportWindow,
+  setWebGPUViewportCanvasVisible,
+} from '../Planar/webgpuViewportRenderWindow';
 import { WEBGPU_VOLUME_3D_RENDER_MODE } from './WebGPUVolume3DRenderPath';
 
 class VolumeViewport3D extends GenericViewport<
@@ -67,6 +71,11 @@ class VolumeViewport3D extends GenericViewport<
   protected renderContext: Volume3DViewportRenderContext;
 
   private primaryDataId?: string;
+  /**
+   * Camera snapshot used as the zoom=1 baseline (`parallelScale` ratio),
+   * matching legacy `Viewport.getZoom` / `setZoom` for OHIF overlays/tools.
+   */
+  private initialCamera?: Volume3DCamera & ICamera;
 
   static get useCustomRenderingPipeline(): boolean {
     return false;
@@ -235,6 +244,7 @@ class VolumeViewport3D extends GenericViewport<
       opacity: 1,
     });
     this.viewState = this.getViewState();
+    this.captureInitialCamera();
   }
 
   /**
@@ -283,11 +293,14 @@ class VolumeViewport3D extends GenericViewport<
 
   /**
    * Returns the viewport canvas element. In WebGPU volume mode the visible
-   * surface is `cpuCanvas` (blit target); otherwise the VTK OpenGL canvas.
+   * surface is the attached WebGPU canvas; otherwise the VTK OpenGL canvas.
    */
   getCanvas(): HTMLCanvasElement {
     if (this.isWebGPUVolumeRenderModeActive()) {
-      return this.cpuCanvas;
+      const window = getWebGPUViewportWindow(this.id);
+      if (window) {
+        return window.view.getCanvas();
+      }
     }
 
     return this.canvas;
@@ -323,6 +336,56 @@ class VolumeViewport3D extends GenericViewport<
     });
     this.viewState = this.getRuntimeCamera();
     this.modified(previousCamera);
+  }
+
+  /**
+   * Zoom relative to the initial parallel scale (1 = fit / baseline camera).
+   * Matches legacy `Viewport.getZoom` for OHIF overlay and tool consumers.
+   */
+  getZoom(compareCamera = this.initialCamera): number {
+    const baseline = compareCamera?.parallelScale;
+
+    if (!baseline) {
+      return 1;
+    }
+
+    const parallelScale = this.getVtkActiveCamera().getParallelScale();
+
+    if (!parallelScale) {
+      return 1;
+    }
+
+    return baseline / parallelScale;
+  }
+
+  /**
+   * Sets zoom via parallel scale relative to {@link initialCamera}.
+   * Matches legacy `Viewport.setZoom`.
+   */
+  setZoom(value: number, storeAsInitialCamera = false): void {
+    if (!Number.isFinite(value) || value === 0) {
+      return;
+    }
+
+    if (!this.initialCamera?.parallelScale) {
+      this.captureInitialCamera();
+    }
+
+    const initialParallelScale = this.initialCamera?.parallelScale;
+
+    if (!initialParallelScale) {
+      return;
+    }
+
+    this.setViewState({ parallelScale: initialParallelScale / value });
+
+    if (storeAsInitialCamera) {
+      this.captureInitialCamera();
+    }
+  }
+
+  private captureInitialCamera(): void {
+    this.initialCamera = { ...this.getViewState() };
   }
 
   protected getRuntimeCamera(): Volume3DCamera & ICamera {
@@ -559,6 +622,9 @@ class VolumeViewport3D extends GenericViewport<
     }
 
     this.viewState = this.getViewState();
+    if (resetZoom) {
+      this.captureInitialCamera();
+    }
     this.render();
     this.triggerCameraModifiedEvent(previousCamera);
     this.triggerCameraResetEvent();
@@ -584,7 +650,7 @@ class VolumeViewport3D extends GenericViewport<
       return;
     }
 
-    this.syncCpuCanvasSize();
+    this.syncPresentSize();
     const activeCanvas = this.getCanvas();
     this.sWidth = activeCanvas.width;
     this.sHeight = activeCanvas.height;
@@ -771,22 +837,33 @@ class VolumeViewport3D extends GenericViewport<
     return [];
   }
 
-  private setRenderModeVisibility(renderMode: Volume3DRenderMode): void {
-    const useCPUCanvas = renderMode === WEBGPU_VOLUME_3D_RENDER_MODE;
-    this.cpuCanvas.style.display = useCPUCanvas ? '' : 'none';
-    this.cpuCanvas.style.pointerEvents = useCPUCanvas ? 'auto' : 'none';
-    this.canvas.style.display = useCPUCanvas ? 'none' : '';
+  private activeRenderMode: Volume3DRenderMode = 'vtkVolume3d';
 
-    if (useCPUCanvas) {
-      this.syncCpuCanvasSize();
-      this.renderContext.vtk.canvas = this.cpuCanvas;
-      // Prefer the live WebGPU renderer when the path has already acquired it
-      // so viewport camera APIs stay aligned with what is drawn.
-      const window = getWebGPUViewportWindow(this.id);
-      if (window) {
-        this.renderContext.vtk.renderer = window.renderer;
+  private setRenderModeVisibility(renderMode: Volume3DRenderMode): void {
+    this.activeRenderMode = renderMode;
+    const useWebGPU = renderMode === WEBGPU_VOLUME_3D_RENDER_MODE;
+    // cpuCanvas is unused for direct WebGPU present; keep it hidden.
+    this.cpuCanvas.style.display = 'none';
+    this.cpuCanvas.style.pointerEvents = 'none';
+    this.canvas.style.display = useWebGPU ? 'none' : '';
+
+    const webgpuWindow = getWebGPUViewportWindow(this.id);
+
+    if (useWebGPU) {
+      this.syncPresentSize();
+      if (webgpuWindow) {
+        const gpuCanvas = attachWebGPUViewportCanvas(
+          webgpuWindow,
+          this.element
+        );
+        this.renderContext.vtk.canvas = gpuCanvas;
+        this.renderContext.vtk.renderer = webgpuWindow.renderer;
       }
       return;
+    }
+
+    if (webgpuWindow) {
+      setWebGPUViewportCanvasVisible(webgpuWindow, false);
     }
 
     this.renderContext.vtk.renderer = this.defaultVtkRenderer;
@@ -794,15 +871,15 @@ class VolumeViewport3D extends GenericViewport<
   }
 
   private isWebGPUVolumeRenderModeActive(): boolean {
-    return this.cpuCanvas.style.display !== 'none';
+    return this.activeRenderMode === WEBGPU_VOLUME_3D_RENDER_MODE;
   }
 
   /**
-   * Sizes the WebGPU blit target like PlanarViewport: bitmap pixels follow
-   * CSS client size * devicePixelRatio. Without this the canvas stays at the
-   * browser default (300x150) and the volume blit looks empty/stretched.
+   * Sizes the WebGPU present canvas (and keeps cpuCanvas dimensions in sync
+   * as a size authority for callers that still pass it into render). Bitmap
+   * pixels follow CSS client size * devicePixelRatio.
    */
-  private syncCpuCanvasSize(): void {
+  private syncPresentSize(): void {
     const { clientHeight, clientWidth } = this.element;
     const devicePixelRatio = window.devicePixelRatio || 1;
     const targetWidth = Math.max(1, Math.round(clientWidth * devicePixelRatio));
@@ -817,6 +894,16 @@ class VolumeViewport3D extends GenericViewport<
     ) {
       this.cpuCanvas.width = targetWidth;
       this.cpuCanvas.height = targetHeight;
+    }
+
+    const webgpuWindow = getWebGPUViewportWindow(this.id);
+    if (webgpuWindow) {
+      const [currentWidth, currentHeight] = webgpuWindow.view.getSize() ?? [
+        0, 0,
+      ];
+      if (currentWidth !== targetWidth || currentHeight !== targetHeight) {
+        webgpuWindow.view.setSize(targetWidth, targetHeight);
+      }
     }
   }
 }

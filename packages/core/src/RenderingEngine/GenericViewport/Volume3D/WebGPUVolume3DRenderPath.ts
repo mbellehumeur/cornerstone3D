@@ -117,6 +117,7 @@ export class WebGPUVolume3DRenderPath
               // Retry if an earlier completion refresh failed to materialize.
               eventType === Events.IMAGE_VOLUME_MODIFIED);
 
+          let refreshed = false;
           if (
             shouldRefreshScalars &&
             (eventType === Events.IMAGE_VOLUME_LOADING_COMPLETED ||
@@ -125,7 +126,7 @@ export class WebGPUVolume3DRenderPath
             if (eventType === Events.IMAGE_VOLUME_LOADING_COMPLETED) {
               mapperImageDataEntry.loadCompletedSeen = true;
             }
-            const refreshed = refreshWebGPUMapperScalars(
+            refreshed = refreshWebGPUMapperScalars(
               mapperImageData,
               imageVolume
             );
@@ -135,10 +136,12 @@ export class WebGPUVolume3DRenderPath
             }
           }
 
-          // Self-render via renderNow (like planar WebGPU paths). requestRender
-          // goes through the engine OpenGL blit onto the hidden VTK canvas and
-          // never updates the visible cpuCanvas.
-          ctx.display.renderNow();
+          // Skip full raycasts on progressive IMAGE_VOLUME_MODIFIED until
+          // scalars actually rematerialize. Self-render via renderNow (like
+          // planar WebGPU paths) — requestRender blits the hidden OpenGL canvas.
+          if (refreshed) {
+            ctx.display.renderNow();
+          }
         }
       ),
     };
@@ -208,7 +211,7 @@ export class WebGPUVolume3DRenderPath
     }
 
     ctx.vtk.renderer = this.window.renderer;
-    ctx.vtk.canvas = ctx.cpu.canvas;
+    ctx.vtk.canvas = this.window.view.getCanvas();
   }
 
   private canvasToWorld(
@@ -410,6 +413,11 @@ function applyCamera(
 function applyDefaultSampleDistance(mapper: vtkVolumeMapper): void {
   applySampleDistanceMultiplier(mapper, 1);
   mapper.setMaximumSamplesPerRay(4000);
+  // VolumePass only downscales while isAnimating && _lastScale > 1.5.
+  // Default initialInteractionScale is 1.0, which never opens that gate.
+  // Scale 4 → half-res per axis (1/sqrt(4)); settled frames still use full DPR
+  // because isAnimating is false outside interaction.
+  mapper.setInitialInteractionScale(4);
 }
 
 function applySampleDistanceMultiplier(

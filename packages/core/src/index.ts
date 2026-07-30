@@ -217,9 +217,17 @@ import {
   isWebGPURenderingAvailable,
 } from './RenderingEngine/helpers/registerWebGPURenderBackend';
 import {
+  beginWebGPUViewportAnimation,
+  endWebGPUViewportAnimation,
   getWebGPUViewportDebugInfo,
+  getWebGPUViewportWindow,
   setWebGPUViewportBackground,
 } from './RenderingEngine/GenericViewport/Planar/webgpuViewportRenderWindow';
+import {
+  isStatsOverlayVisible,
+  setStatsOverlayEnabled,
+  toggleStatsOverlay,
+} from './RenderingEngine/helpers/stats/toggleStatsOverlay';
 export type {
   ViewportType,
   ViewportTypeConstants,
@@ -393,8 +401,14 @@ export {
   // WebGPU render backend (experimental)
   registerWebGPURenderBackend,
   isWebGPURenderingAvailable,
+  beginWebGPUViewportAnimation,
+  endWebGPUViewportAnimation,
   getWebGPUViewportDebugInfo,
+  getWebGPUViewportWindow,
   setWebGPUViewportBackground,
+  isStatsOverlayVisible,
+  toggleStatsOverlay,
+  setStatsOverlayEnabled,
   //
   imageLoadPoolManager as requestPoolManager,
   imageRetrievalPoolManager,

@@ -30,9 +30,8 @@ interface WebGPUView {
 
 /**
  * A per-viewport WebGPU rendering context: one core vtkRenderWindow with a
- * vtk.js WebGPU view and a single renderer. The WebGPU canvas stays detached
- * from the DOM; frames are blitted into the viewport's visible canvas after
- * the device reports the submitted work done.
+ * vtk.js WebGPU view and a single renderer. The WebGPU canvas is attached to
+ * the viewport element and presented directly (no CPU 2D blit).
  *
  * This intentionally does NOT go through the engine's shared offscreen
  * OpenGL multi-render-window: the render path that owns this window is
@@ -51,10 +50,11 @@ export interface WebGPUViewportWindow {
   interactor: ReturnType<typeof vtkRenderWindowInteractor.newInstance>;
   refCount: number;
   destroyTimer?: ReturnType<typeof setTimeout>;
+  /** Viewport element the WebGPU canvas is currently mounted under, if any. */
+  hostElement?: HTMLElement;
   /**
-   * Set when the last binding releases the window. Deferred blits (the
-   * device work-done promise from the final frame) must bail out instead of
-   * touching the deleted vtk objects.
+   * Set when the last binding releases the window. Deferred presents and
+   * initialize callbacks must bail out instead of touching deleted vtk objects.
    */
   destroyed: boolean;
 }
@@ -168,6 +168,92 @@ export function getWebGPUViewportWindow(
   return entry;
 }
 
+/**
+ * Marks the detached WebGPU interactor as animating so vtk.js WebGPU
+ * VolumePass can use its interaction-scale (small) viewport.
+ *
+ * Uses `switchToXRAnimation` rather than `requestAnimation`: Cornerstone owns
+ * presents on the WebGPU canvas, and an interactor RAF loop would double-render
+ * and fake a high frame rate that collapses adaptive scale back to full-res.
+ *
+ * (vtk.js .d.ts still names these VR*; runtime exposes XR*.)
+ */
+export function beginWebGPUViewportAnimation(viewportId: string): boolean {
+  const entry = windowsByViewportId.get(viewportId);
+
+  if (!entry || entry.destroyed) {
+    return false;
+  }
+
+  if (entry.interactor.isAnimating()) {
+    return true;
+  }
+
+  const interactor = entry.interactor as typeof entry.interactor & {
+    switchToXRAnimation(): void;
+  };
+  interactor.switchToXRAnimation();
+  return true;
+}
+
+/**
+ * Clears the interaction-animating flag and leaves the next Cornerstone present
+ * at full resolution (VolumePass `_useSmallViewport` off).
+ */
+export function endWebGPUViewportAnimation(viewportId: string): boolean {
+  const entry = windowsByViewportId.get(viewportId);
+
+  if (!entry || entry.destroyed) {
+    return false;
+  }
+
+  if (!entry.interactor.isAnimating()) {
+    return false;
+  }
+
+  const interactor = entry.interactor as typeof entry.interactor & {
+    returnFromXRAnimation(): void;
+  };
+  interactor.returnFromXRAnimation();
+  return true;
+}
+
+/**
+ * Mounts the vtk WebGPU canvas into `container` as the visible present
+ * surface (absolute, full-bleed). Idempotent when already attached.
+ */
+export function attachWebGPUViewportCanvas(
+  entry: WebGPUViewportWindow,
+  container: HTMLElement
+): HTMLCanvasElement {
+  const canvas = entry.view.getCanvas();
+
+  canvas.style.display = '';
+  canvas.style.height = '100%';
+  canvas.style.inset = '0';
+  canvas.style.pointerEvents = 'auto';
+  canvas.style.position = 'absolute';
+  canvas.style.width = '100%';
+  canvas.style.zIndex = '0';
+
+  if (canvas.parentElement !== container) {
+    container.appendChild(canvas);
+  }
+
+  entry.hostElement = container;
+  return canvas;
+}
+
+/** Hides or shows an already-attached WebGPU canvas without unmounting it. */
+export function setWebGPUViewportCanvasVisible(
+  entry: WebGPUViewportWindow,
+  visible: boolean
+): void {
+  const canvas = entry.view.getCanvas();
+  canvas.style.display = visible ? '' : 'none';
+  canvas.style.pointerEvents = visible ? 'auto' : 'none';
+}
+
 /** Releases one reference; destroys the window when the last binding leaves. */
 export function releaseWebGPUViewportWindow(viewportId: string): void {
   const entry = windowsByViewportId.get(viewportId);
@@ -192,6 +278,8 @@ export function releaseWebGPUViewportWindow(viewportId: string): void {
     }
     entry.destroyed = true;
     windowsByViewportId.delete(viewportId);
+    entry.view.getCanvas().remove();
+    entry.hostElement = undefined;
     entry.renderWindow.removeRenderer(entry.renderer);
     entry.renderer.delete();
     entry.interactor.delete();
@@ -200,108 +288,94 @@ export function releaseWebGPUViewportWindow(viewportId: string): void {
   }, 50);
 }
 
+export type WebGPUPresentSize =
+  | HTMLCanvasElement
+  | { width: number; height: number };
+
 /**
- * Renders the WebGPU scene and blits the result into `targetCanvas` (the
- * viewport's visible surface canvas). The first frame is inherently
- * asynchronous — the vtk.js WebGPU view acquires its adapter/device on the
- * initial traverse — so the blit (and `onBlitted`) runs once the device
- * reports the submitted work done.
+ * Renders the WebGPU scene directly to the attached WebGPU canvas.
+ * No CPU 2D blit and no GPU fence wait — present is the canvas itself.
+ *
+ * `sizeSource` supplies the bitmap size (typically the viewport's sized
+ * surface or `{ width, height }` from clientSize * dpr). `onPresented` runs
+ * after traverse is issued (or after the first device init + traverse).
  */
 export function renderWebGPUViewportWindow(
   entry: WebGPUViewportWindow,
-  targetCanvas: HTMLCanvasElement,
-  onBlitted?: () => void
+  sizeSource: WebGPUPresentSize,
+  onPresented?: () => void
 ): void {
   if (entry.destroyed) {
     return;
   }
 
   const { view } = entry;
-  const width = Math.max(targetCanvas.width, 1);
-  const height = Math.max(targetCanvas.height, 1);
+  const { width, height } = resolvePresentSize(sizeSource);
   const [currentWidth, currentHeight] = view.getSize() ?? [0, 0];
 
   if (currentWidth !== width || currentHeight !== height) {
     view.setSize(width, height);
   }
 
-  const safeTraverse = (): boolean => {
+  const present = () => {
     if (entry.destroyed) {
-      return false;
+      return;
     }
 
     // Handles the uninitialized case internally by queueing a traverse for
     // when the device becomes ready. vtk.js may also invoke traverse from its
-    // own onInitialized callback (outside this try/catch), so keep VolumePass
-    // prerequisites (interactor) intact and treat teardown races as soft fails.
+    // own onInitialized callback; treat teardown races as soft fails.
     try {
       view.traverseAllPasses();
-      return true;
     } catch {
-      return false;
-    }
-  };
-
-  if (!safeTraverse()) {
-    return;
-  }
-
-  const finish = () => {
-    if (entry.destroyed) {
       return;
     }
 
-    // Re-traverse once initialized so the first Volume3D frame is not skipped
-    // when the initial call only queued device acquisition.
-    if (!safeTraverse()) {
-      return;
-    }
-
-    const device = view.getDevice();
-
-    if (!device) {
-      return;
-    }
-
-    void device.onSubmittedWorkDone().then(() => {
-      // The window may have been released while the device work was in
-      // flight (e.g. a live render-backend switch tearing this path down);
-      // the vtk objects are deleted at that point.
-      if (entry.destroyed) {
-        return;
-      }
-
-      const source = view.getCanvas();
-      const context = targetCanvas.getContext('2d');
-
-      if (!source || !context || source.width === 0 || source.height === 0) {
-        return;
-      }
-
-      context.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
-      context.drawImage(
-        source,
-        0,
-        0,
-        source.width,
-        source.height,
-        0,
-        0,
-        targetCanvas.width,
-        targetCanvas.height
-      );
-      onBlitted?.();
-    });
+    onPresented?.();
   };
 
   if (view.getInitialized()) {
-    finish();
-  } else {
-    const subscription = view.onInitialized(() => {
-      subscription.unsubscribe();
-      finish();
-    });
+    present();
+    return;
   }
+
+  // Kick device acquisition; vtk queues an internal traverse on init as well.
+  try {
+    view.traverseAllPasses();
+  } catch {
+    // Device not ready yet — wait for onInitialized below.
+  }
+
+  if (view.getInitialized()) {
+    present();
+    return;
+  }
+
+  const subscription = view.onInitialized(() => {
+    subscription.unsubscribe();
+    present();
+  });
+}
+
+function resolvePresentSize(sizeSource: WebGPUPresentSize): {
+  width: number;
+  height: number;
+} {
+  if (
+    typeof HTMLCanvasElement !== 'undefined' &&
+    sizeSource instanceof HTMLCanvasElement
+  ) {
+    return {
+      width: Math.max(sizeSource.width, 1),
+      height: Math.max(sizeSource.height, 1),
+    };
+  }
+
+  const size = sizeSource as { width: number; height: number };
+  return {
+    width: Math.max(size.width, 1),
+    height: Math.max(size.height, 1),
+  };
 }
 
 /**
