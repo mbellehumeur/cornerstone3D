@@ -4,6 +4,10 @@ import {
   eventTarget,
   getEnabledElement,
   getEnabledElementByIds,
+  beginWebGPUViewportAnimation,
+  endWebGPUViewportAnimation,
+  beginFuberlinVolume3DInteraction,
+  endFuberlinVolume3DInteraction,
   utilities as csUtils,
 } from '@cornerstonejs/core';
 import type { Types } from '@cornerstonejs/core';
@@ -50,8 +54,35 @@ class TrackballRotateTool extends BaseTool {
     const { element } = eventDetail;
     const enabledElement = getEnabledElement(element);
     const { viewport } = enabledElement;
+
+    // Fuberlin Volume3D: no VTK volume mapper — drop interactive quality via
+    // VolumeRenderer.beginInteraction / endInteraction instead.
+    if (beginFuberlinVolume3DInteraction(viewport.id)) {
+      if (!this._hasResolutionChanged) {
+        this._hasResolutionChanged = true;
+
+        if (this.cleanUp !== null) {
+          document.removeEventListener('mouseup', this.cleanUp);
+        }
+
+        this.cleanUp = () => {
+          endFuberlinVolume3DInteraction(viewport.id);
+          viewport.render();
+          this._hasResolutionChanged = false;
+        };
+
+        document.addEventListener('mouseup', this.cleanUp, { once: true });
+      }
+      return true;
+    }
+
     const actorEntry = viewport.getDefaultActor();
-    const actor = actorEntry.actor as Types.VolumeActor;
+    const actor = actorEntry?.actor as Types.VolumeActor | undefined;
+
+    if (!actor?.getMapper) {
+      return true;
+    }
+
     const mapper = actor.getMapper();
 
     const hasSampleDistance =
@@ -70,6 +101,10 @@ class TrackballRotateTool extends BaseTool {
       );
       this._hasResolutionChanged = true;
 
+      // Drive vtk WebGPU VolumePass interaction downscale (isAnimating).
+      // No-op when this viewport has no WebGPU window.
+      beginWebGPUViewportAnimation(viewport.id);
+
       if (this.cleanUp !== null) {
         // Clean up previous event listener
         document.removeEventListener('mouseup', this.cleanUp);
@@ -77,6 +112,7 @@ class TrackballRotateTool extends BaseTool {
 
       this.cleanUp = () => {
         mapper.setSampleDistance(originalSampleDistance);
+        endWebGPUViewportAnimation(viewport.id);
         viewport.render();
         this._hasResolutionChanged = false;
       };

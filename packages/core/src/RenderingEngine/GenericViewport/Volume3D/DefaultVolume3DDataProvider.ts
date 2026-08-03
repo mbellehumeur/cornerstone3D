@@ -18,7 +18,11 @@ export class DefaultVolume3DDataProvider implements Volume3DDataProvider {
   async load(
     dataId: string,
     options?: {
-      renderMode: 'vtkVolume3d' | 'webgpuVolume3d' | 'vtkGeometry3d';
+      renderMode:
+        | 'vtkVolume3d'
+        | 'webgpuVolume3d'
+        | 'fuberlinVolume3D'
+        | 'vtkGeometry3d';
     }
   ): Promise<LoadedData<Volume3DVolumePayload | Volume3DGeometryPayload>> {
     if (!options) {
@@ -31,7 +35,8 @@ export class DefaultVolume3DDataProvider implements Volume3DDataProvider {
 
     if (
       options.renderMode === 'vtkVolume3d' ||
-      options.renderMode === 'webgpuVolume3d'
+      options.renderMode === 'webgpuVolume3d' ||
+      options.renderMode === 'fuberlinVolume3D'
     ) {
       if (!dataSet?.imageIds?.length) {
         throw new Error(

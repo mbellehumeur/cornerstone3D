@@ -1,6 +1,7 @@
 import { vec3 } from 'gl-matrix';
 import type vtkRenderer from '@kitware/vtk.js/Rendering/Core/Renderer';
-import { ViewportType } from '../../../enums';
+import { Events, ViewportType } from '../../../enums';
+import triggerEvent from '../../../utilities/triggerEvent';
 import type {
   ActorEntry,
   ICamera,
@@ -37,6 +38,7 @@ import type {
   Volume3DCamera,
   Volume3DPayload,
   Volume3DDataPresentation,
+  Volume3DFuberlinRendering,
   Volume3DRenderMode,
   Volume3DRegisteredDataSet,
   Volume3DRendering,
@@ -52,6 +54,12 @@ import {
   setWebGPUViewportCanvasVisible,
 } from '../Planar/webgpuViewportRenderWindow';
 import { WEBGPU_VOLUME_3D_RENDER_MODE } from './WebGPUVolume3DRenderPath';
+import { FUBERLIN_VOLUME_3D_RENDER_MODE } from './FuberlinVolume3DRenderPath';
+import { iCameraToFuberlinCamera } from './fuberlinVolume3DCamera';
+import {
+  getFuberlinVolume3D,
+  setFuberlinVolume3DCanvasVisible,
+} from './fuberlinVolume3DRegistry';
 
 class VolumeViewport3D extends GenericViewport<
   Volume3DCamera,
@@ -274,7 +282,10 @@ class VolumeViewport3D extends GenericViewport<
     if (
       !data ||
       !isVolume3DVolumePayload(data) ||
-      !isVolume3DVolumeRendering(rendering)
+      !(
+        isVolume3DVolumeRendering(rendering) ||
+        isVolume3DFuberlinRendering(rendering)
+      )
     ) {
       return [];
     }
@@ -296,6 +307,13 @@ class VolumeViewport3D extends GenericViewport<
    * surface is the attached WebGPU canvas; otherwise the VTK OpenGL canvas.
    */
   getCanvas(): HTMLCanvasElement {
+    if (this.isFuberlinVolumeRenderModeActive()) {
+      const entry = getFuberlinVolume3D(this.id);
+      if (entry) {
+        return entry.canvas;
+      }
+    }
+
     if (this.isWebGPUVolumeRenderModeActive()) {
       const window = getWebGPUViewportWindow(this.id);
       if (window) {
@@ -304,6 +322,28 @@ class VolumeViewport3D extends GenericViewport<
     }
 
     return this.canvas;
+  }
+
+  /**
+   * Active Volume3D render mode (`vtkVolume3d` | `webgpuVolume3d` |
+   * `fuberlinVolume3D` | `vtkGeometry3d`). Used by OHIF overlay badges.
+   * Prefers the mounted binding's render mode so the badge is correct as soon
+   * as data is attached (not the constructor default `vtkVolume3d`).
+   */
+  getActiveRenderMode(): Volume3DRenderMode {
+    const binding = this.getCurrentBinding();
+    const mountedMode = binding?.rendering?.renderMode;
+
+    if (
+      mountedMode === 'vtkVolume3d' ||
+      mountedMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
+      mountedMode === FUBERLIN_VOLUME_3D_RENDER_MODE ||
+      mountedMode === 'vtkGeometry3d'
+    ) {
+      return mountedMode;
+    }
+
+    return this.activeRenderMode;
   }
 
   /**
@@ -335,6 +375,7 @@ class VolumeViewport3D extends GenericViewport<
       resetClippingRange: true,
     });
     this.viewState = this.getRuntimeCamera();
+    this.syncFuberlinCameraFromViewState();
     this.modified(previousCamera);
   }
 
@@ -473,7 +514,10 @@ class VolumeViewport3D extends GenericViewport<
     if (
       !data ||
       !isVolume3DVolumePayload(data) ||
-      !isVolume3DVolumeRendering(rendering)
+      !(
+        isVolume3DVolumeRendering(rendering) ||
+        isVolume3DFuberlinRendering(rendering)
+      )
     ) {
       return;
     }
@@ -625,6 +669,7 @@ class VolumeViewport3D extends GenericViewport<
     if (resetZoom) {
       this.captureInitialCamera();
     }
+    this.syncFuberlinCameraFromViewState();
     this.render();
     this.triggerCameraModifiedEvent(previousCamera);
     this.triggerCameraResetEvent();
@@ -660,15 +705,39 @@ class VolumeViewport3D extends GenericViewport<
 
   /**
    * Renders active 3D bindings or queues an engine-driven render.
+   * Binding-owned presents (WebGPU / fuberlin) skip the engine frame loop, so
+   * fire IMAGE_RENDERED here for OHIF overlays and other consumers.
    */
   render(): void {
     if (this.isDestroyed) {
       return;
     }
 
-    if (!this.renderBindings()) {
-      this.requestRenderingEngineRender();
+    if (this.renderBindings()) {
+      this.setRendered();
+      this.triggerImageRenderedEvent();
+      return;
     }
+
+    this.requestRenderingEngineRender();
+  }
+
+  /**
+   * Notify listeners that a Volume3D present (or mode switch) completed.
+   * Custom binding renders do not go through ContextPoolRenderingEngine's
+   * IMAGE_RENDERED emission.
+   */
+  private triggerImageRenderedEvent(): void {
+    if (this.suppressEvents || this.isDestroyed) {
+      return;
+    }
+
+    triggerEvent(this.element, Events.IMAGE_RENDERED, {
+      element: this.element,
+      viewportId: this.id,
+      renderingEngineId: this.renderingEngineId,
+      viewportStatus: this.viewportStatus,
+    });
   }
 
   protected override onDestroy(): void {
@@ -840,12 +909,16 @@ class VolumeViewport3D extends GenericViewport<
   private activeRenderMode: Volume3DRenderMode = 'vtkVolume3d';
 
   private setRenderModeVisibility(renderMode: Volume3DRenderMode): void {
+    const modeChanged = this.activeRenderMode !== renderMode;
     this.activeRenderMode = renderMode;
     const useWebGPU = renderMode === WEBGPU_VOLUME_3D_RENDER_MODE;
+    const useFuberlin = renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE;
     // cpuCanvas is unused for direct WebGPU present; keep it hidden.
     this.cpuCanvas.style.display = 'none';
     this.cpuCanvas.style.pointerEvents = 'none';
-    this.canvas.style.display = useWebGPU ? 'none' : '';
+    this.canvas.style.display = useWebGPU || useFuberlin ? 'none' : '';
+
+    setFuberlinVolume3DCanvasVisible(this.id, useFuberlin);
 
     const webgpuWindow = getWebGPUViewportWindow(this.id);
 
@@ -859,6 +932,9 @@ class VolumeViewport3D extends GenericViewport<
         this.renderContext.vtk.canvas = gpuCanvas;
         this.renderContext.vtk.renderer = webgpuWindow.renderer;
       }
+      if (modeChanged) {
+        this.triggerImageRenderedEvent();
+      }
       return;
     }
 
@@ -866,12 +942,72 @@ class VolumeViewport3D extends GenericViewport<
       setWebGPUViewportCanvasVisible(webgpuWindow, false);
     }
 
+    if (useFuberlin) {
+      this.syncPresentSize();
+      const entry = getFuberlinVolume3D(this.id);
+      if (entry) {
+        this.renderContext.vtk.canvas = entry.canvas;
+      }
+      // Keep the default VTK renderer as the camera authority for tools.
+      this.renderContext.vtk.renderer = this.defaultVtkRenderer;
+      if (modeChanged) {
+        this.triggerImageRenderedEvent();
+      }
+      return;
+    }
+
     this.renderContext.vtk.renderer = this.defaultVtkRenderer;
     this.renderContext.vtk.canvas = this.canvas;
+    if (modeChanged) {
+      this.triggerImageRenderedEvent();
+    }
   }
 
   private isWebGPUVolumeRenderModeActive(): boolean {
     return this.activeRenderMode === WEBGPU_VOLUME_3D_RENDER_MODE;
+  }
+
+  private isFuberlinVolumeRenderModeActive(): boolean {
+    return this.activeRenderMode === FUBERLIN_VOLUME_3D_RENDER_MODE;
+  }
+
+  private syncFuberlinCameraFromViewState(): void {
+    if (!this.isFuberlinVolumeRenderModeActive()) {
+      return;
+    }
+
+    const entry = getFuberlinVolume3D(this.id);
+
+    if (!entry) {
+      return;
+    }
+
+    const binding = this.getCurrentBinding();
+
+    if (!binding) {
+      return;
+    }
+
+    let direction: ArrayLike<number> | number[] | undefined;
+
+    try {
+      const rendering = this.getVolume3DRendering(binding);
+
+      if (isVolume3DFuberlinRendering(rendering)) {
+        direction =
+          rendering.imageVolume.direction ??
+          rendering.imageVolume.imageData?.getDirection?.();
+      }
+    } catch {
+      // Binding not ready yet — still sync with identity volume axes.
+    }
+
+    const patch = iCameraToFuberlinCamera(this.getViewState(), { direction });
+
+    if (patch) {
+      // Orientation only — never push zoom/pan (those blank the present).
+      entry.renderer.setCamera(patch);
+    }
   }
 
   /**
@@ -905,6 +1041,17 @@ class VolumeViewport3D extends GenericViewport<
         webgpuWindow.view.setSize(targetWidth, targetHeight);
       }
     }
+
+    const fuberlin = getFuberlinVolume3D(this.id);
+    if (fuberlin) {
+      if (
+        fuberlin.canvas.width !== targetWidth ||
+        fuberlin.canvas.height !== targetHeight
+      ) {
+        fuberlin.canvas.width = targetWidth;
+        fuberlin.canvas.height = targetHeight;
+      }
+    }
   }
 }
 
@@ -920,7 +1067,8 @@ function isVolume3DData(data: LoadedData): data is LoadedData<Volume3DPayload> {
   return (
     (payload.type === 'image' &&
       (payload.renderMode === 'vtkVolume3d' ||
-        payload.renderMode === WEBGPU_VOLUME_3D_RENDER_MODE)) ||
+        payload.renderMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
+        payload.renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE)) ||
     (payload.type === 'geometry' && payload.renderMode === 'vtkGeometry3d')
   );
 }
@@ -931,15 +1079,21 @@ function isVolume3DRendering(rendering: {
   return (
     rendering.renderMode === 'vtkVolume3d' ||
     rendering.renderMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
+    rendering.renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE ||
     rendering.renderMode === 'vtkGeometry3d'
   );
 }
 
 function isVolume3DVolumeRenderMode(
   renderMode: unknown
-): renderMode is 'vtkVolume3d' | typeof WEBGPU_VOLUME_3D_RENDER_MODE {
+): renderMode is
+  | 'vtkVolume3d'
+  | typeof WEBGPU_VOLUME_3D_RENDER_MODE
+  | typeof FUBERLIN_VOLUME_3D_RENDER_MODE {
   return (
-    renderMode === 'vtkVolume3d' || renderMode === WEBGPU_VOLUME_3D_RENDER_MODE
+    renderMode === 'vtkVolume3d' ||
+    renderMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
+    renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE
   );
 }
 
@@ -952,7 +1106,16 @@ function isVolume3DVolumePayload(
 function isVolume3DVolumeRendering(
   rendering: Volume3DRendering
 ): rendering is Volume3DVolumeRendering {
-  return isVolume3DVolumeRenderMode(rendering.renderMode);
+  return (
+    rendering.renderMode === 'vtkVolume3d' ||
+    rendering.renderMode === WEBGPU_VOLUME_3D_RENDER_MODE
+  );
+}
+
+function isVolume3DFuberlinRendering(
+  rendering: Volume3DRendering
+): rendering is Volume3DFuberlinRendering {
+  return rendering.renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE;
 }
 
 function isVolume3DRegisteredDataSet(

@@ -1,3 +1,4 @@
+import type { VolumeRenderer } from '@mview/webgpu-volume-standalone';
 import type vtkRenderer from '@kitware/vtk.js/Rendering/Core/Renderer';
 import type vtkVolume from '@kitware/vtk.js/Rendering/Core/Volume';
 import type vtkVolumeMapper from '@kitware/vtk.js/Rendering/Core/VolumeMapper';
@@ -29,6 +30,7 @@ import type { ViewportCameraBase } from '../ViewportCameraTypes';
 export type Volume3DRenderMode =
   | 'vtkVolume3d'
   | 'webgpuVolume3d'
+  | 'fuberlinVolume3D'
   | 'vtkGeometry3d';
 export type Volume3DRequestedRenderMode = Volume3DRenderMode | 'auto';
 
@@ -49,7 +51,7 @@ export interface Volume3DSetDataOptions {
 export interface Volume3DVolumePayload {
   imageIds: string[];
   imageVolume: IImageVolume;
-  renderMode: 'vtkVolume3d' | 'webgpuVolume3d';
+  renderMode: 'vtkVolume3d' | 'webgpuVolume3d' | 'fuberlinVolume3D';
   volumeId: string;
 }
 
@@ -145,6 +147,16 @@ export type Volume3DVolumeRendering = MountedRendering<{
 }>;
 
 /** @internal */
+export type Volume3DFuberlinRendering = MountedRendering<{
+  renderMode: 'fuberlinVolume3D';
+  actorEntryUID: string;
+  defaultVOIRange?: VOIRange;
+  imageVolume: IImageVolume;
+  renderer: VolumeRenderer;
+  removeStreamingSubscriptions?: () => void;
+}>;
+
+/** @internal */
 export type Volume3DGeometryRendering = MountedRendering<{
   renderMode: 'vtkGeometry3d';
   actors: ActorEntry[];
@@ -154,4 +166,5 @@ export type Volume3DGeometryRendering = MountedRendering<{
 /** @internal */
 export type Volume3DRendering =
   | Volume3DVolumeRendering
+  | Volume3DFuberlinRendering
   | Volume3DGeometryRendering;

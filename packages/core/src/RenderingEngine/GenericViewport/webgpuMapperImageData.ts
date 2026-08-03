@@ -1,5 +1,6 @@
 import vtkDataArray from '@kitware/vtk.js/Common/Core/DataArray';
 import vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
+import cache from '../../cache/cache';
 import type { IImageVolume } from '../../types';
 
 type MapperImageDataEntry = {
@@ -147,11 +148,18 @@ function createMapperImageData(imageVolume: IImageVolume) {
 }
 
 /**
- * Materializes contiguous scalars for WebGPU volume mappers.
+ * Materializes contiguous scalars for WebGPU / fuberlin volume upload.
  * Image-backed streaming volumes expose `getCompleteScalarDataArray` (same as
  * `convertMapperToNotSharedMapper`), not a contiguous `getScalarData()` store.
+ *
+ * Note: CS `getCompleteScalarDataArray` only resolves the TypedArray constructor
+ * from slice 0. Progressive loads often fill middle slices first and return an
+ * empty buffer until slice 0 lands — so we fall back to assembling from any
+ * cached images.
  */
-function getVolumeScalarArray(imageVolume: IImageVolume) {
+export function getVolumeScalarArray(
+  imageVolume: IImageVolume
+): ArrayLike<number> | undefined {
   const voxelManager = imageVolume.voxelManager as
     | {
         getCompleteScalarDataArray?: () => ArrayLike<number>;
@@ -162,10 +170,15 @@ function getVolumeScalarArray(imageVolume: IImageVolume) {
   try {
     const complete = voxelManager?.getCompleteScalarDataArray?.();
     if (complete && complete.length > 0) {
-      return complete as number[];
+      return complete;
     }
   } catch {
     // Incomplete progressive load — fall through to other sources.
+  }
+
+  const fromCache = materializeFromCachedImages(imageVolume);
+  if (fromCache) {
+    return fromCache;
   }
 
   const sourceScalars = imageVolume.imageData
@@ -174,19 +187,118 @@ function getVolumeScalarArray(imageVolume: IImageVolume) {
     ?.getData?.();
 
   if (sourceScalars && sourceScalars.length > 0) {
-    return sourceScalars as number[];
+    return sourceScalars;
   }
 
   try {
     const values = voxelManager?.getScalarData?.();
     if (values && values.length > 0) {
-      return values as number[];
+      return values;
     }
   } catch {
     return undefined;
   }
 
   return undefined;
+}
+
+/**
+ * Build a contiguous TypedArray from whichever volume slices are already in
+ * the image cache (order-independent). Returns undefined until at least one
+ * slice has scalar data.
+ */
+function materializeFromCachedImages(
+  imageVolume: IImageVolume
+): ArrayLike<number> | undefined {
+  const imageIds = imageVolume.imageIds;
+  const dimensions =
+    imageVolume.dimensions ?? imageVolume.imageData?.getDimensions?.();
+
+  if (!imageIds?.length || !dimensions || dimensions.length < 3) {
+    return undefined;
+  }
+
+  const width = dimensions[0];
+  const height = dimensions[1];
+  const depth = dimensions[2];
+  const imageDataMeta = imageVolume.imageData?.get?.('numberOfComponents') as
+    | { numberOfComponents?: number }
+    | undefined;
+  const numberOfComponents = imageDataMeta?.numberOfComponents ?? 1;
+  const sliceSize = width * height * numberOfComponents;
+  const expectedLength = sliceSize * depth;
+
+  let ScalarCtor:
+    | (new (length: number) => ArrayLike<number> & {
+        set: (array: ArrayLike<number>, offset?: number) => void;
+      })
+    | undefined;
+
+  for (const imageId of imageIds) {
+    const image = cache.getImage(imageId);
+    const sliceVm = image?.voxelManager as
+      | { getScalarData?: () => ArrayLike<number> }
+      | undefined;
+
+    if (!sliceVm?.getScalarData) {
+      continue;
+    }
+
+    try {
+      const pixelData = sliceVm.getScalarData();
+      const ctor = pixelData?.constructor as
+        | (new (length: number) => ArrayLike<number> & {
+            set: (array: ArrayLike<number>, offset?: number) => void;
+          })
+        | undefined;
+
+      if (ctor && pixelData && pixelData.length > 0) {
+        ScalarCtor = ctor;
+        break;
+      }
+    } catch {
+      // Slice not ready yet.
+    }
+  }
+
+  if (!ScalarCtor) {
+    return undefined;
+  }
+
+  const scalarData = new ScalarCtor(expectedLength);
+  let loadedSlices = 0;
+
+  for (let sliceIndex = 0; sliceIndex < depth; sliceIndex++) {
+    const imageId = imageIds[sliceIndex];
+
+    if (!imageId) {
+      continue;
+    }
+
+    const image = cache.getImage(imageId);
+    const sliceVm = image?.voxelManager as
+      | { getScalarData?: () => ArrayLike<number> }
+      | undefined;
+
+    if (!sliceVm?.getScalarData) {
+      continue;
+    }
+
+    try {
+      const pixelData = sliceVm.getScalarData();
+
+      if (!pixelData || pixelData.length === 0) {
+        continue;
+      }
+
+      scalarData.set(pixelData, sliceIndex * sliceSize);
+      loadedSlices += 1;
+    } catch {
+      // Skip unloaded / errored slices.
+    }
+  }
+
+  return loadedSlices > 0 ? scalarData : undefined;
 }
 
 function createEmptyScalarArray(
