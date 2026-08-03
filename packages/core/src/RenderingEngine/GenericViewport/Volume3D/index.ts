@@ -11,15 +11,20 @@ export {
 export { WEBGPU_VOLUME_3D_RENDER_MODE } from './WebGPUVolume3DRenderPath';
 export { FUBERLIN_VOLUME_3D_RENDER_MODE } from './FuberlinVolume3DRenderPath';
 export {
+  applyFuberlinVolume3DPreset,
   beginFuberlinVolume3DInteraction,
   endFuberlinVolume3DInteraction,
+  flushFuberlinVolume3DPendingPreset,
   getFuberlinVolume3D,
   getFuberlinVolume3DRenderMode,
   isFuberlinVolume3DRenderMode,
   rotateFuberlinVolume3D,
   setFuberlinVolume3DRenderMode,
+  setFuberlinVolume3DValueRange,
 } from './fuberlinVolume3DRegistry';
 export type { FuberlinVolume3DRenderMode } from './fuberlinVolume3DRegistry';
+export { viewportPresetToFuberlinAppearance } from './fuberlinViewportPreset';
+export type { FuberlinPresetAppearance } from './fuberlinViewportPreset';
 /**
  * Lower-level 3D projection helpers for custom synchronizers and tooling.
  * This namespace is less stable than the core viewport API while the generic

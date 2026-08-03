@@ -1,4 +1,6 @@
 import type { VolumeRenderer } from '@mview/webgpu-volume-standalone';
+import type { ViewportPreset } from '../../../types';
+import { viewportPresetToFuberlinAppearance } from './fuberlinViewportPreset';
 
 /** Mview VolumeRenderer raymarch modes (surface / composite / mip). */
 export type FuberlinVolume3DRenderMode = 'surface' | 'composite' | 'mip';
@@ -14,6 +16,10 @@ export type FuberlinVolume3DEntry = {
   renderer: VolumeRenderer;
   /** parallelScale at fit (reserved for a future zoom bridge) */
   baselineParallelScale?: number;
+  /** Volume scalar range used to normalize VIEWPORT_PRESET HU curves. */
+  valueRange?: [number, number];
+  /** Preset applied before scalars were ready; flushed after upload. */
+  pendingPreset?: ViewportPreset;
 };
 
 const entries = new Map<string, FuberlinVolume3DEntry>();
@@ -23,7 +29,14 @@ export function registerFuberlinVolume3D(
   viewportId: string,
   entry: FuberlinVolume3DEntry
 ): void {
-  entries.set(viewportId, entry);
+  const existing = entries.get(viewportId);
+  entries.set(viewportId, {
+    ...existing,
+    ...entry,
+    // Preserve range / pending preset across re-registers that only patch canvas.
+    valueRange: entry.valueRange ?? existing?.valueRange,
+    pendingPreset: entry.pendingPreset ?? existing?.pendingPreset,
+  });
 }
 
 /** @internal */
@@ -36,6 +49,20 @@ export function getFuberlinVolume3D(
   viewportId: string
 ): FuberlinVolume3DEntry | undefined {
   return entries.get(viewportId);
+}
+
+/** @internal */
+export function setFuberlinVolume3DValueRange(
+  viewportId: string,
+  valueRange: [number, number]
+): void {
+  const entry = entries.get(viewportId);
+
+  if (!entry) {
+    return;
+  }
+
+  entry.valueRange = valueRange;
 }
 
 /** @internal */
@@ -150,4 +177,64 @@ export function setFuberlinVolume3DRenderMode(
 
   entry.renderer.setSettings({ mode });
   return true;
+}
+
+/**
+ * Apply a Cornerstone VIEWPORT_PRESET to a fuberlin present (composite TF).
+ * If scalars are not uploaded yet, stashes the preset and returns true so OHIF
+ * does not fall through to the VTK actor path.
+ *
+ * @internal
+ */
+export function applyFuberlinVolume3DPreset(
+  viewportId: string,
+  preset: ViewportPreset
+): boolean {
+  const entry = entries.get(viewportId);
+
+  if (!entry) {
+    return false;
+  }
+
+  if (!entry.valueRange) {
+    entry.pendingPreset = preset;
+    return true;
+  }
+
+  const appearance = viewportPresetToFuberlinAppearance(
+    preset,
+    entry.valueRange
+  );
+
+  if (!appearance) {
+    entry.pendingPreset = preset;
+    return true;
+  }
+
+  entry.pendingPreset = undefined;
+  entry.renderer.setTransferFunction(appearance.points);
+  entry.renderer.setSettings({
+    mode: 'composite',
+    opacity: 1,
+    shade: appearance.shade,
+    threshold: appearance.threshold,
+  });
+  return true;
+}
+
+/**
+ * Apply a stashed preset after volume upload when valueRange is known.
+ *
+ * @internal
+ */
+export function flushFuberlinVolume3DPendingPreset(
+  viewportId: string
+): boolean {
+  const entry = entries.get(viewportId);
+
+  if (!entry?.pendingPreset || !entry.valueRange) {
+    return false;
+  }
+
+  return applyFuberlinVolume3DPreset(viewportId, entry.pendingPreset);
 }

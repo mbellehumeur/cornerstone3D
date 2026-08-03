@@ -16,9 +16,13 @@ import {
   pitchVolume3DCameraUp90,
 } from './fuberlinVolume3DCamera';
 import {
+  applyFuberlinVolume3DPreset,
+  flushFuberlinVolume3DPendingPreset,
   registerFuberlinVolume3D,
+  setFuberlinVolume3DValueRange,
   unregisterFuberlinVolume3D,
 } from './fuberlinVolume3DRegistry';
+import { VIEWPORT_PRESETS } from '../../../constants';
 import type {
   Volume3DCamera,
   Volume3DDataPresentation,
@@ -34,6 +38,8 @@ import { getWebGPUViewportWindow } from '../Planar/webgpuViewportRenderWindow';
 
 export const FUBERLIN_VOLUME_3D_RENDER_MODE = 'fuberlinVolume3D';
 
+const DEFAULT_FUBERLIN_PRESET_NAME = 'CT-Bone';
+
 /** @internal */
 export class FuberlinVolume3DRenderPath
   implements RenderPath<Volume3DViewportRenderContext>
@@ -43,6 +49,7 @@ export class FuberlinVolume3DRenderPath
   private baselineParallelScale?: number;
   private volumeUploaded = false;
   private volumeDirection?: number[];
+  private viewportId?: string;
 
   async addData(
     ctx: Volume3DViewportRenderContext,
@@ -62,20 +69,29 @@ export class FuberlinVolume3DRenderPath
     this.resizeCanvas(canvas, ctx.viewport.element);
 
     const renderer = new VolumeRenderer(canvas, {
-      // Match the standalone demo defaults that previously rendered in OHIF.
-      mode: 'surface',
+      // Match OHIF Volume3D defaults (CT-Bone composite DVR).
+      mode: 'composite',
       threshold: 0.36,
-      opacity: 0.08,
+      opacity: 1,
+      shade: true,
       background: [0, 0, 0],
     });
     await renderer.initialize();
     this.canvas = canvas;
     this.renderer = renderer;
     this.volumeUploaded = false;
+    this.viewportId = ctx.viewportId;
     this.volumeDirection = getVolumeDirection(imageVolume);
 
     registerFuberlinVolume3D(ctx.viewportId, { canvas, renderer });
 
+    // Seed CT-Bone until OHIF/HP applies a specific preset (or after upload).
+    const defaultPreset = VIEWPORT_PRESETS.find(
+      (entry) => entry.name === DEFAULT_FUBERLIN_PRESET_NAME
+    );
+    if (defaultPreset) {
+      applyFuberlinVolume3DPreset(ctx.viewportId, defaultPreset);
+    }
     // Hide any leftover vtk-WebGPU present canvas that could cover ours.
     const webgpuWindow = getWebGPUViewportWindow(ctx.viewportId);
     if (webgpuWindow) {
@@ -321,6 +337,7 @@ export class FuberlinVolume3DRenderPath
     unregisterFuberlinVolume3D(ctx.viewportId);
     rendering.renderer.dispose();
     this.renderer = undefined;
+    this.viewportId = undefined;
 
     if (this.canvas?.parentElement) {
       this.canvas.parentElement.removeChild(this.canvas);
@@ -389,6 +406,12 @@ export class FuberlinVolume3DRenderPath
             : undefined,
         label: imageVolume.volumeId,
       });
+
+      if (this.viewportId && range && range.length === 2) {
+        setFuberlinVolume3DValueRange(this.viewportId, [range[0], range[1]]);
+        flushFuberlinVolume3DPendingPreset(this.viewportId);
+      }
+
       return true;
     } catch (error) {
       console.error('[FuberlinVolume3D] setVolume failed', error);

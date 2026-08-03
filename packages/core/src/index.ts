@@ -54,15 +54,20 @@ import GenericVolumeViewport3D, {
   volume3DProjection,
   beginFuberlinVolume3DInteraction,
   endFuberlinVolume3DInteraction,
+  applyFuberlinVolume3DPreset,
+  flushFuberlinVolume3DPendingPreset,
   getFuberlinVolume3D,
   getFuberlinVolume3DRenderMode,
   isFuberlinVolume3DRenderMode,
   rotateFuberlinVolume3D,
   setFuberlinVolume3DRenderMode,
+  setFuberlinVolume3DValueRange,
   FUBERLIN_VOLUME_3D_RENDER_MODE,
   WEBGPU_VOLUME_3D_RENDER_MODE,
 } from './RenderingEngine/GenericViewport/Volume3D';
 export type { FuberlinVolume3DRenderMode } from './RenderingEngine/GenericViewport/Volume3D';
+export { viewportPresetToFuberlinAppearance } from './RenderingEngine/GenericViewport/Volume3D';
+export type { FuberlinPresetAppearance } from './RenderingEngine/GenericViewport/Volume3D';
 import WSIGenericViewport, {
   createDefaultWSIRenderPaths,
   createWSIRenderPathResolver,
@@ -418,11 +423,14 @@ export {
   setWebGPUViewportBackground,
   beginFuberlinVolume3DInteraction,
   endFuberlinVolume3DInteraction,
+  applyFuberlinVolume3DPreset,
+  flushFuberlinVolume3DPendingPreset,
   getFuberlinVolume3D,
   getFuberlinVolume3DRenderMode,
   isFuberlinVolume3DRenderMode,
   rotateFuberlinVolume3D,
   setFuberlinVolume3DRenderMode,
+  setFuberlinVolume3DValueRange,
   FUBERLIN_VOLUME_3D_RENDER_MODE,
   WEBGPU_VOLUME_3D_RENDER_MODE,
   isStatsOverlayVisible,
