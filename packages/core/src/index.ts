@@ -57,15 +57,23 @@ import GenericVolumeViewport3D, {
   applyFuberlinVolume3DPreset,
   flushFuberlinVolume3DPendingPreset,
   getFuberlinVolume3D,
+  getFuberlinVolume3DProjection,
   getFuberlinVolume3DRenderMode,
+  getFuberlinVolume3DThreshold,
+  isFuberlinVolume3DProjection,
   isFuberlinVolume3DRenderMode,
   rotateFuberlinVolume3D,
+  setFuberlinVolume3DProjection,
   setFuberlinVolume3DRenderMode,
+  setFuberlinVolume3DThreshold,
   setFuberlinVolume3DValueRange,
   FUBERLIN_VOLUME_3D_RENDER_MODE,
   WEBGPU_VOLUME_3D_RENDER_MODE,
 } from './RenderingEngine/GenericViewport/Volume3D';
-export type { FuberlinVolume3DRenderMode } from './RenderingEngine/GenericViewport/Volume3D';
+export type {
+  FuberlinVolume3DProjection,
+  FuberlinVolume3DRenderMode,
+} from './RenderingEngine/GenericViewport/Volume3D';
 export { viewportPresetToFuberlinAppearance } from './RenderingEngine/GenericViewport/Volume3D';
 export type { FuberlinPresetAppearance } from './RenderingEngine/GenericViewport/Volume3D';
 import WSIGenericViewport, {
@@ -426,10 +434,15 @@ export {
   applyFuberlinVolume3DPreset,
   flushFuberlinVolume3DPendingPreset,
   getFuberlinVolume3D,
+  getFuberlinVolume3DProjection,
   getFuberlinVolume3DRenderMode,
+  getFuberlinVolume3DThreshold,
+  isFuberlinVolume3DProjection,
   isFuberlinVolume3DRenderMode,
   rotateFuberlinVolume3D,
+  setFuberlinVolume3DProjection,
   setFuberlinVolume3DRenderMode,
+  setFuberlinVolume3DThreshold,
   setFuberlinVolume3DValueRange,
   FUBERLIN_VOLUME_3D_RENDER_MODE,
   WEBGPU_VOLUME_3D_RENDER_MODE,

@@ -12,12 +12,15 @@ import type {
 } from '../ViewportArchitectureTypes';
 import { getVolumeScalarArray } from '../webgpuMapperImageData';
 import {
+  getVolumeCenterWorld,
+  getVolumePhysicalMax,
   iCameraToFuberlinCamera,
   pitchVolume3DCameraUp90,
 } from './fuberlinVolume3DCamera';
 import {
   applyFuberlinVolume3DPreset,
   flushFuberlinVolume3DPendingPreset,
+  getFuberlinVolume3DProjection,
   registerFuberlinVolume3D,
   setFuberlinVolume3DValueRange,
   unregisterFuberlinVolume3D,
@@ -47,6 +50,8 @@ export class FuberlinVolume3DRenderPath
   private canvas?: HTMLCanvasElement;
   private renderer?: VolumeRenderer;
   private baselineParallelScale?: number;
+  private volumePhysicalMax?: number;
+  private volumeCenter?: [number, number, number];
   private volumeUploaded = false;
   private volumeDirection?: number[];
   private viewportId?: string;
@@ -75,6 +80,10 @@ export class FuberlinVolume3DRenderPath
       opacity: 1,
       shade: true,
       background: [0, 0, 0],
+      camera: {
+        projection: 'orthographic',
+        zoom: 0.55,
+      },
     });
     await renderer.initialize();
     this.canvas = canvas;
@@ -82,8 +91,24 @@ export class FuberlinVolume3DRenderPath
     this.volumeUploaded = false;
     this.viewportId = ctx.viewportId;
     this.volumeDirection = getVolumeDirection(imageVolume);
+    this.volumePhysicalMax = getVolumePhysicalMax({
+      dimensions: imageVolume.dimensions,
+      spacing: imageVolume.spacing,
+    });
+    this.volumeCenter = getVolumeCenterWorld(
+      imageVolume.imageData ?? {
+        getOrigin: () => imageVolume.origin,
+        getDimensions: () => imageVolume.dimensions,
+        getSpacing: () => imageVolume.spacing,
+      }
+    ) as [number, number, number] | undefined;
 
-    registerFuberlinVolume3D(ctx.viewportId, { canvas, renderer });
+    registerFuberlinVolume3D(ctx.viewportId, {
+      canvas,
+      renderer,
+      volumePhysicalMax: this.volumePhysicalMax,
+      volumeCenter: this.volumeCenter,
+    });
 
     // Seed CT-Bone until OHIF/HP applies a specific preset (or after upload).
     const defaultPreset = VIEWPORT_PRESETS.find(
@@ -122,8 +147,10 @@ export class FuberlinVolume3DRenderPath
         canvas,
         renderer,
         baselineParallelScale: this.baselineParallelScale,
+        volumePhysicalMax: this.volumePhysicalMax,
+        volumeCenter: this.volumeCenter,
       });
-      this.applyFuberlinOrientation(fuberlinCamera);
+      this.applyFuberlinCamera(fuberlinCamera);
     } else {
       setVtkCameraClippingRange(ctx.vtk.renderer.getActiveCamera());
       ctx.vtk.renderer.resetCameraClippingRange();
@@ -284,19 +311,22 @@ export class FuberlinVolume3DRenderPath
     applyVolume3DCamera(ctx, viewState, {
       resetClippingRange: true,
     });
-    // Orientation only — keep mview zoom/pan alone (zoom bridge blanks present).
-    this.applyFuberlinOrientation(viewState);
+    this.applyFuberlinCamera(viewState);
   }
 
-  private applyFuberlinOrientation(
+  private applyFuberlinCamera(
     camera: Partial<Volume3DCamera> | undefined
   ): void {
-    if (!this.renderer || !camera) {
+    if (!this.renderer || !camera || !this.viewportId) {
       return;
     }
 
+    const projection = getFuberlinVolume3DProjection(this.viewportId);
     const patch = iCameraToFuberlinCamera(camera, {
       direction: this.volumeDirection,
+      volumePhysicalMax: this.volumePhysicalMax,
+      volumeCenter: this.volumeCenter,
+      includeFraming: projection === 'orthographic',
     });
 
     if (patch) {

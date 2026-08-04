@@ -1002,10 +1002,14 @@ class VolumeViewport3D extends GenericViewport<
       // Binding not ready yet — still sync with identity volume axes.
     }
 
-    const patch = iCameraToFuberlinCamera(this.getViewState(), { direction });
+    const patch = iCameraToFuberlinCamera(this.getViewState(), {
+      direction,
+      volumePhysicalMax: entry.volumePhysicalMax,
+      volumeCenter: entry.volumeCenter,
+      includeFraming: entry.renderer.getCamera()?.projection === 'orthographic',
+    });
 
     if (patch) {
-      // Orientation only — never push zoom/pan (those blank the present).
       entry.renderer.setCamera(patch);
     }
   }

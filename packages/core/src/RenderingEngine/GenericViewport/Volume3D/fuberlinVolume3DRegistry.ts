@@ -1,9 +1,13 @@
 import type { VolumeRenderer } from '@mview/webgpu-volume-standalone';
 import type { ViewportPreset } from '../../../types';
 import { viewportPresetToFuberlinAppearance } from './fuberlinViewportPreset';
+import { FUBERLIN_ORTHO_DEFAULT_HALF_HEIGHT } from './fuberlinVolume3DCamera';
 
 /** Mview VolumeRenderer raymarch modes (surface / composite / mip). */
 export type FuberlinVolume3DRenderMode = 'surface' | 'composite' | 'mip';
+
+/** Mview camera projection (orthographic default for OHIF Volume3D parity). */
+export type FuberlinVolume3DProjection = 'perspective' | 'orthographic';
 
 const FUBERLIN_RENDER_MODES: ReadonlySet<string> = new Set([
   'surface',
@@ -11,11 +15,20 @@ const FUBERLIN_RENDER_MODES: ReadonlySet<string> = new Set([
   'mip',
 ]);
 
+const FUBERLIN_PROJECTIONS: ReadonlySet<string> = new Set([
+  'perspective',
+  'orthographic',
+]);
+
 export type FuberlinVolume3DEntry = {
   canvas: HTMLCanvasElement;
   renderer: VolumeRenderer;
-  /** parallelScale at fit (reserved for a future zoom bridge) */
+  /** parallelScale at fit (for zoom bridge / getZoom baseline) */
   baselineParallelScale?: number;
+  /** max(dims×spacing) — mview box normalization divisor */
+  volumePhysicalMax?: number;
+  /** Volume center in world/LPS for pan bridge */
+  volumeCenter?: [number, number, number];
   /** Volume scalar range used to normalize VIEWPORT_PRESET HU curves. */
   valueRange?: [number, number];
   /** Preset applied before scalars were ready; flushed after upload. */
@@ -33,9 +46,12 @@ export function registerFuberlinVolume3D(
   entries.set(viewportId, {
     ...existing,
     ...entry,
-    // Preserve range / pending preset across re-registers that only patch canvas.
     valueRange: entry.valueRange ?? existing?.valueRange,
     pendingPreset: entry.pendingPreset ?? existing?.pendingPreset,
+    volumePhysicalMax: entry.volumePhysicalMax ?? existing?.volumePhysicalMax,
+    volumeCenter: entry.volumeCenter ?? existing?.volumeCenter,
+    baselineParallelScale:
+      entry.baselineParallelScale ?? existing?.baselineParallelScale,
   });
 }
 
@@ -176,6 +192,108 @@ export function setFuberlinVolume3DRenderMode(
   }
 
   entry.renderer.setSettings({ mode });
+  return true;
+}
+
+/** @internal */
+export function isFuberlinVolume3DProjection(
+  projection: unknown
+): projection is FuberlinVolume3DProjection {
+  return typeof projection === 'string' && FUBERLIN_PROJECTIONS.has(projection);
+}
+
+/**
+ * Current mview projection for a fuberlin present, if any.
+ *
+ * @internal
+ */
+export function getFuberlinVolume3DProjection(
+  viewportId: string
+): FuberlinVolume3DProjection | undefined {
+  const entry = entries.get(viewportId);
+
+  if (!entry) {
+    return undefined;
+  }
+
+  const projection = entry.renderer.getCamera()?.projection;
+  return isFuberlinVolume3DProjection(projection) ? projection : 'orthographic';
+}
+
+/**
+ * Set mview projection (perspective / orthographic).
+ * Switching to orthographic resets to a safe half-height when needed.
+ *
+ * @internal
+ */
+export function setFuberlinVolume3DProjection(
+  viewportId: string,
+  projection: FuberlinVolume3DProjection
+): boolean {
+  const entry = entries.get(viewportId);
+
+  if (!entry || !isFuberlinVolume3DProjection(projection)) {
+    return false;
+  }
+
+  if (projection === 'orthographic') {
+    entry.renderer.setCamera({
+      projection: 'orthographic',
+      zoom: FUBERLIN_ORTHO_DEFAULT_HALF_HEIGHT,
+    });
+  } else {
+    entry.renderer.setCamera({
+      projection: 'perspective',
+      zoom: 1.55,
+    });
+  }
+
+  return true;
+}
+
+/**
+ * Current mview threshold [0,1] for a fuberlin present, if any.
+ *
+ * @internal
+ */
+export function getFuberlinVolume3DThreshold(
+  viewportId: string
+): number | undefined {
+  const entry = entries.get(viewportId);
+
+  if (!entry) {
+    return undefined;
+  }
+
+  const threshold = (
+    entry.renderer as VolumeRenderer & {
+      settings?: { threshold?: number };
+    }
+  ).settings?.threshold;
+
+  return typeof threshold === 'number' && Number.isFinite(threshold)
+    ? threshold
+    : undefined;
+}
+
+/**
+ * Set mview surface/MIP threshold (normalized [0,1]).
+ *
+ * @internal
+ */
+export function setFuberlinVolume3DThreshold(
+  viewportId: string,
+  threshold: number
+): boolean {
+  const entry = entries.get(viewportId);
+
+  if (!entry || !Number.isFinite(threshold)) {
+    return false;
+  }
+
+  entry.renderer.setSettings({
+    threshold: Math.max(0, Math.min(1, threshold)),
+  });
   return true;
 }
 

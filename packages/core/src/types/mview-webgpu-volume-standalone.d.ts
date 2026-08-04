@@ -19,6 +19,7 @@ declare module '@mview/webgpu-volume-standalone' {
     zoom: number;
     panX: number;
     panY: number;
+    projection: 'perspective' | 'orthographic';
   };
 
   export type FuberlinCameraPatch = Partial<{
@@ -28,6 +29,7 @@ declare module '@mview/webgpu-volume-standalone' {
     zoom: number;
     panX: number;
     panY: number;
+    projection: 'perspective' | 'orthographic';
   }>;
 
   export type FuberlinSettingsPatch = Partial<{

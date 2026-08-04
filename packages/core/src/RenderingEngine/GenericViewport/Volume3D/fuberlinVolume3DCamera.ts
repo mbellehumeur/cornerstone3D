@@ -8,7 +8,27 @@ export type FuberlinCameraConvertOptions = {
    * Required to map CS LPS/world camera axes into mview's IJK-aligned volume space.
    */
   direction?: ArrayLike<number> | number[];
+  /**
+   * max(dims × spacing) in mm — mview normalizes the volume box by this length.
+   * When set with `parallelScale` and orthographic projection, framing matches
+   * VTK half-height (guarded to a safe range).
+   */
+  volumePhysicalMax?: number;
+  /** Volume center in world/LPS (same frame as camera.focalPoint). */
+  volumeCenter?: Point3;
+  /**
+   * When true, also map parallelScale → zoom and focal offset → pan.
+   * Perspective mode should leave mview zoom/pan alone.
+   */
+  includeFraming?: boolean;
 };
+
+/** Safe mview orthographic half-height (volume-normalized). */
+export const FUBERLIN_ORTHO_DEFAULT_HALF_HEIGHT = 0.55;
+
+const ORTHO_HALF_HEIGHT_MIN = 0.05;
+const ORTHO_HALF_HEIGHT_MAX = 2;
+const ORTHO_PAN_MAX = 2;
 
 /**
  * Pitch a CS / VTK Volume3D camera +90° about screen-right.
@@ -60,20 +80,78 @@ export function pitchVolume3DCameraUp90<
 }
 
 /**
- * Map a CS / VTK Volume3D camera into an mview orientation patch.
+ * Longest physical volume edge (mm). Matches mview's box normalization divisor.
+ */
+export function getVolumePhysicalMax(args: {
+  dimensions?: ArrayLike<number> | number[];
+  spacing?: ArrayLike<number> | number[];
+}): number | undefined {
+  const { dimensions, spacing } = args;
+
+  if (!dimensions || dimensions.length < 3 || !spacing || spacing.length < 3) {
+    return undefined;
+  }
+
+  const physical = [
+    Number(dimensions[0]) * Number(spacing[0]),
+    Number(dimensions[1]) * Number(spacing[1]),
+    Number(dimensions[2]) * Number(spacing[2]),
+  ];
+
+  if (!physical.every((value) => Number.isFinite(value) && value > 0)) {
+    return undefined;
+  }
+
+  return Math.max(...physical);
+}
+
+/**
+ * World-space center of volume bounds (or origin fallback).
+ */
+export function getVolumeCenterWorld(imageData: {
+  getBounds?: () => number[];
+  getOrigin?: () => number[];
+  getDimensions?: () => number[];
+  getSpacing?: () => number[];
+}): Point3 | undefined {
+  const bounds = imageData.getBounds?.();
+
+  if (bounds && bounds.length >= 6) {
+    return [
+      (bounds[0] + bounds[1]) * 0.5,
+      (bounds[2] + bounds[3]) * 0.5,
+      (bounds[4] + bounds[5]) * 0.5,
+    ];
+  }
+
+  const origin = imageData.getOrigin?.();
+  const dimensions = imageData.getDimensions?.();
+  const spacing = imageData.getSpacing?.();
+
+  if (
+    origin &&
+    origin.length >= 3 &&
+    dimensions &&
+    dimensions.length >= 3 &&
+    spacing &&
+    spacing.length >= 3
+  ) {
+    return [
+      origin[0] + dimensions[0] * spacing[0] * 0.5,
+      origin[1] + dimensions[1] * spacing[1] * 0.5,
+      origin[2] + dimensions[2] * spacing[2] * 0.5,
+    ];
+  }
+
+  return undefined;
+}
+
+/**
+ * Map a CS / VTK Volume3D camera into an mview camera patch.
  *
- * mview raymarches an IJK-aligned box (no patient-direction actor transform),
- * so viewPlaneNormal / viewUp must be converted from world → volume axes.
- *
- * The mview fragment shader flips screen-Y (`-(uv.y*2-1)`), so camera +Y is
- * screen-down. Mapping CS viewUp onto -Y keeps superior at the top of the
- * canvas. Look stays along -viewPlaneNormal so TrackballRotate yaw/pitch map
- * to screen left-right / up-down.
- *
- * Callers that need the fuberlin present offset should pitch the CS camera with
- * {@link pitchVolume3DCameraUp90} before syncing — do not bake that pitch here.
- *
- * Zoom/pan are omitted — those bridges blanked the present earlier.
+ * Orientation is always mapped. Framing (zoom/pan) is included only when
+ * `includeFraming` is true and values fall in a safe range — bad framing
+ * previously blanked the present.
  */
 export function iCameraToFuberlinCamera(
   camera: Partial<Volume3DCamera | ICamera>,
@@ -111,7 +189,7 @@ export function iCameraToFuberlinCamera(
 
   const yFinal = length(yOrtho) > 1e-6 ? yOrtho : yAxis;
 
-  return {
+  const patch: FuberlinCameraPatch = {
     orientation: [
       xAxis[0],
       yFinal[0],
@@ -124,6 +202,67 @@ export function iCameraToFuberlinCamera(
       zAxis[2],
     ],
   };
+
+  if (!options.includeFraming) {
+    return patch;
+  }
+
+  const parallelScale = camera.parallelScale;
+  const physicalMax = options.volumePhysicalMax;
+
+  if (
+    typeof parallelScale === 'number' &&
+    Number.isFinite(parallelScale) &&
+    parallelScale > 0 &&
+    typeof physicalMax === 'number' &&
+    Number.isFinite(physicalMax) &&
+    physicalMax > 0
+  ) {
+    const halfHeight = parallelScale / physicalMax;
+    if (
+      halfHeight >= ORTHO_HALF_HEIGHT_MIN &&
+      halfHeight <= ORTHO_HALF_HEIGHT_MAX
+    ) {
+      patch.zoom = halfHeight;
+    }
+  }
+
+  const focalPoint = camera.focalPoint as Point3 | undefined;
+  const volumeCenter = options.volumeCenter;
+
+  if (
+    focalPoint &&
+    volumeCenter &&
+    typeof parallelScale === 'number' &&
+    Number.isFinite(parallelScale) &&
+    parallelScale > 0
+  ) {
+    const vpn = normalize(viewPlaneNormal);
+    const up = normalize(viewUp);
+    const right = normalize(cross(up, vpn));
+    const offset: Point3 = [
+      focalPoint[0] - volumeCenter[0],
+      focalPoint[1] - volumeCenter[1],
+      focalPoint[2] - volumeCenter[2],
+    ];
+    const panX = -dot(offset, right) / parallelScale;
+    const panY = dot(offset, up) / parallelScale;
+
+    if (
+      Number.isFinite(panX) &&
+      Number.isFinite(panY) &&
+      Math.abs(panX) <= ORTHO_PAN_MAX &&
+      Math.abs(panY) <= ORTHO_PAN_MAX
+    ) {
+      patch.panX = panX;
+      patch.panY = panY;
+    } else {
+      patch.panX = 0;
+      patch.panY = 0;
+    }
+  }
+
+  return patch;
 }
 
 /**
