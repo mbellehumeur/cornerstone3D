@@ -20,8 +20,10 @@ import {
 import {
   applyFuberlinVolume3DPreset,
   flushFuberlinVolume3DPendingPreset,
+  getFuberlinVolume3DPresentQuality,
   getFuberlinVolume3DProjection,
   registerFuberlinVolume3D,
+  setFuberlinVolume3DPresentQuality,
   setFuberlinVolume3DValueRange,
   unregisterFuberlinVolume3D,
 } from './fuberlinVolume3DRegistry';
@@ -42,6 +44,14 @@ import { getWebGPUViewportWindow } from '../Planar/webgpuViewportRenderWindow';
 export const FUBERLIN_VOLUME_3D_RENDER_MODE = 'fuberlinVolume3D';
 
 const DEFAULT_FUBERLIN_PRESET_NAME = 'CT-Bone';
+
+/**
+ * When true: apply +90° pitch about screen-right once after scalars upload
+ * (same camera update path TrackballRotate uses via setViewState sync).
+ * When false: keep the previous mount-time pitch in addData.
+ * Flip to false to revert if this causes orientation problems.
+ */
+const APPLY_FUBERLIN_POST_LOAD_PITCH_UP_90 = true;
 
 /** @internal */
 export class FuberlinVolume3DRenderPath
@@ -109,6 +119,8 @@ export class FuberlinVolume3DRenderPath
       volumePhysicalMax: this.volumePhysicalMax,
       volumeCenter: this.volumeCenter,
     });
+    // Full-res / OHIF-like still quality by default; UI slider can blend toward mview.
+    setFuberlinVolume3DPresentQuality(ctx.viewportId, 1);
 
     // Seed CT-Bone until OHIF/HP applies a specific preset (or after upload).
     const defaultPreset = VIEWPORT_PRESETS.find(
@@ -138,11 +150,13 @@ export class FuberlinVolume3DRenderPath
     );
 
     if (initialCamera) {
-      // Pitch VTK into the fuberlin present frame so CS↔mview stay aligned and
-      // TrackballRotate left/right remains yaw (not roll about the view).
-      const fuberlinCamera = pitchVolume3DCameraUp90(initialCamera);
-      applyVolume3DCamera(ctx, fuberlinCamera, { resetClippingRange: true });
-      this.baselineParallelScale = fuberlinCamera.parallelScale;
+      // Pitch once after upload when APPLY_FUBERLIN_POST_LOAD_PITCH_UP_90;
+      // otherwise pitch here at mount (legacy).
+      const cameraToApply = APPLY_FUBERLIN_POST_LOAD_PITCH_UP_90
+        ? initialCamera
+        : pitchVolume3DCameraUp90(initialCamera);
+      applyVolume3DCamera(ctx, cameraToApply, { resetClippingRange: true });
+      this.baselineParallelScale = cameraToApply.parallelScale;
       registerFuberlinVolume3D(ctx.viewportId, {
         canvas,
         renderer,
@@ -150,7 +164,7 @@ export class FuberlinVolume3DRenderPath
         volumePhysicalMax: this.volumePhysicalMax,
         volumeCenter: this.volumeCenter,
       });
-      this.applyFuberlinCamera(fuberlinCamera);
+      this.applyFuberlinCamera(cameraToApply);
     } else {
       setVtkCameraClippingRange(ctx.vtk.renderer.getActiveCamera());
       ctx.vtk.renderer.resetCameraClippingRange();
@@ -201,9 +215,46 @@ export class FuberlinVolume3DRenderPath
 
       const uploaded = await uploadInFlight;
 
+      // Re-check after await: load-callback and load-completed can both enter
+      // before either finishes — without this, pitch runs twice (+180°).
+      if (refreshedAfterLoad) {
+        return;
+      }
+
       if (uploaded) {
         this.volumeUploaded = true;
         refreshedAfterLoad = true;
+
+        // Same +90° screen-right pitch TrackballRotate would apply about view-right.
+        // Gated by APPLY_FUBERLIN_POST_LOAD_PITCH_UP_90 for easy revert.
+        if (APPLY_FUBERLIN_POST_LOAD_PITCH_UP_90) {
+          // Read live VTK camera (ctx.viewport has no getViewState).
+          const vtkCam = ctx.vtk.renderer.getActiveCamera();
+          const current = {
+            clippingRange: vtkCam.getClippingRange() as [number, number],
+            focalPoint: [...vtkCam.getFocalPoint()] as [number, number, number],
+            parallelProjection: vtkCam.getParallelProjection(),
+            parallelScale: vtkCam.getParallelScale(),
+            position: [...vtkCam.getPosition()] as [number, number, number],
+            viewAngle: vtkCam.getViewAngle(),
+            viewPlaneNormal: [...vtkCam.getViewPlaneNormal()] as [
+              number,
+              number,
+              number,
+            ],
+            viewUp: [...vtkCam.getViewUp()] as [number, number, number],
+          };
+          const pitched = pitchVolume3DCameraUp90(current);
+          applyVolume3DCamera(ctx, pitched, { resetClippingRange: true });
+          this.applyFuberlinCamera(pitched);
+          if (
+            typeof pitched.parallelScale === 'number' &&
+            Number.isFinite(pitched.parallelScale)
+          ) {
+            this.baselineParallelScale = pitched.parallelScale;
+          }
+        }
+
         revealCanvas();
         this.renderer.requestRender();
         ctx.display.renderNow();
@@ -440,6 +491,13 @@ export class FuberlinVolume3DRenderPath
       if (this.viewportId && range && range.length === 2) {
         setFuberlinVolume3DValueRange(this.viewportId, [range[0], range[1]]);
         flushFuberlinVolume3DPendingPreset(this.viewportId);
+      }
+
+      // Re-apply present quality now that volume dims/spacing exist so OHIF
+      // still steps can match createVolumeMapper sample density.
+      if (this.viewportId) {
+        const quality = getFuberlinVolume3DPresentQuality(this.viewportId) ?? 1;
+        setFuberlinVolume3DPresentQuality(this.viewportId, quality);
       }
 
       return true;

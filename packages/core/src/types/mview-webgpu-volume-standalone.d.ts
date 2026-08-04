@@ -49,6 +49,18 @@ declare module '@mview/webgpu-volume-standalone' {
     setSettings(settings: FuberlinSettingsPatch): void;
     setCamera(camera?: FuberlinCameraPatch): void;
     getCamera(): FuberlinCameraState;
+    setQualityProfiles(quality?: {
+      interactive?: {
+        pixelBudget?: number;
+        minimumScale?: number;
+        steps?: number;
+      };
+      still?: {
+        pixelBudget?: number;
+        minimumScale?: number;
+        steps?: number;
+      };
+    }): void;
     rotateTrackball(
       deltaX: number,
       deltaY: number,

@@ -9,6 +9,9 @@ export type FuberlinVolume3DRenderMode = 'surface' | 'composite' | 'mip';
 /** Mview camera projection (orthographic default for OHIF Volume3D parity). */
 export type FuberlinVolume3DProjection = 'perspective' | 'orthographic';
 
+/** 0 = mview (adaptive still), 1 = OHIF (native still + dense samples). Default 1. */
+export type FuberlinVolume3DPresentQuality = number;
+
 const FUBERLIN_RENDER_MODES: ReadonlySet<string> = new Set([
   'surface',
   'composite',
@@ -29,6 +32,8 @@ export type FuberlinVolume3DEntry = {
   volumePhysicalMax?: number;
   /** Volume center in world/LPS for pan bridge */
   volumeCenter?: [number, number, number];
+  /** Present quality blend: 0 = mview, 1 = OHIF (default). */
+  presentQuality?: FuberlinVolume3DPresentQuality;
   /** Volume scalar range used to normalize VIEWPORT_PRESET HU curves. */
   valueRange?: [number, number];
   /** Preset applied before scalars were ready; flushed after upload. */
@@ -50,6 +55,7 @@ export function registerFuberlinVolume3D(
     pendingPreset: entry.pendingPreset ?? existing?.pendingPreset,
     volumePhysicalMax: entry.volumePhysicalMax ?? existing?.volumePhysicalMax,
     volumeCenter: entry.volumeCenter ?? existing?.volumeCenter,
+    presentQuality: entry.presentQuality ?? existing?.presentQuality,
     baselineParallelScale:
       entry.baselineParallelScale ?? existing?.baselineParallelScale,
   });
@@ -294,6 +300,137 @@ export function setFuberlinVolume3DThreshold(
   entry.renderer.setSettings({
     threshold: Math.max(0, Math.min(1, threshold)),
   });
+  return true;
+}
+
+/** @internal */
+export function isFuberlinVolume3DPresentQuality(
+  quality: unknown
+): quality is FuberlinVolume3DPresentQuality {
+  return typeof quality === 'number' && Number.isFinite(quality);
+}
+
+/**
+ * Current present-quality blend for a fuberlin present (0 = mview, 1 = OHIF).
+ *
+ * @internal
+ */
+export function getFuberlinVolume3DPresentQuality(
+  viewportId: string
+): FuberlinVolume3DPresentQuality | undefined {
+  const entry = entries.get(viewportId);
+
+  if (!entry) {
+    return undefined;
+  }
+
+  return isFuberlinVolume3DPresentQuality(entry.presentQuality)
+    ? Math.min(1, Math.max(0, entry.presentQuality))
+    : 1;
+}
+
+/** Stock mview ray budgets (VolumeRenderer defaults). */
+const MVIEW_INTERACTIVE_STEPS = 136;
+const MVIEW_STILL_STEPS = 224;
+const MVIEW_STILL_PIXEL_BUDGET = 2_400_000;
+const MVIEW_STILL_MINIMUM_SCALE = 0.52;
+const OHIF_STILL_PIXEL_BUDGET = 64_000_000;
+const OHIF_STILL_MINIMUM_SCALE = 1;
+/** WGSL raymarch loops are hard-capped at this (see shaders.js). */
+const FUBERLIN_MAX_RAY_STEPS = 2048;
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+/**
+ * Approximate OHIF createVolumeMapper samples along the volume diagonal:
+ * sampleDistance = (sx+sy+sz)/6, max 4000 — clamped to shader hard cap.
+ */
+function ohifLikeStillSteps(renderer: VolumeRenderer): number {
+  const volume = (
+    renderer as VolumeRenderer & {
+      volume?: {
+        dimensions?: number[];
+        spacing?: number[];
+      };
+    }
+  ).volume;
+  const dimensions = volume?.dimensions;
+  const spacing = volume?.spacing;
+
+  if (!dimensions || dimensions.length < 3 || !spacing || spacing.length < 3) {
+    // Pre-upload fallback; re-applied after setVolume with real dims.
+    return 1024;
+  }
+
+  const sx = Number(spacing[0]) || 1;
+  const sy = Number(spacing[1]) || 1;
+  const sz = Number(spacing[2]) || 1;
+  const dx = (Number(dimensions[0]) || 1) * sx;
+  const dy = (Number(dimensions[1]) || 1) * sy;
+  const dz = (Number(dimensions[2]) || 1) * sz;
+  const diagonal = Math.hypot(dx, dy, dz);
+  const sampleDistance = (sx + sy + sz) / 6;
+  const steps = Math.ceil(diagonal / Math.max(sampleDistance, 1e-6));
+
+  return Math.min(FUBERLIN_MAX_RAY_STEPS, Math.max(16, steps));
+}
+
+/**
+ * At-rest quality blend: t=0 mview, t=1 OHIF (native present + dense samples).
+ * Interactive (rotate) stays cheap either way.
+ *
+ * @internal
+ */
+export function setFuberlinVolume3DPresentQuality(
+  viewportId: string,
+  quality: FuberlinVolume3DPresentQuality
+): boolean {
+  const entry = entries.get(viewportId);
+
+  if (!entry || !isFuberlinVolume3DPresentQuality(quality)) {
+    return false;
+  }
+
+  const t = Math.min(1, Math.max(0, quality));
+  entry.presentQuality = t;
+
+  // Always keep interactive cheap — only still (settle) differs by blend.
+  const interactive = {
+    pixelBudget: 760_000,
+    minimumScale: 0.38,
+    steps: MVIEW_INTERACTIVE_STEPS,
+  };
+
+  // Log-lerp pixel budget so mid-slider values are usable.
+  const pixelBudget = Math.round(
+    Math.exp(
+      lerp(
+        Math.log(MVIEW_STILL_PIXEL_BUDGET),
+        Math.log(OHIF_STILL_PIXEL_BUDGET),
+        t
+      )
+    )
+  );
+  const minimumScale = lerp(
+    MVIEW_STILL_MINIMUM_SCALE,
+    OHIF_STILL_MINIMUM_SCALE,
+    t
+  );
+  const steps = Math.round(
+    lerp(MVIEW_STILL_STEPS, ohifLikeStillSteps(entry.renderer), t)
+  );
+
+  entry.renderer.setQualityProfiles({
+    interactive,
+    still: {
+      pixelBudget,
+      minimumScale,
+      steps,
+    },
+  });
+
   return true;
 }
 

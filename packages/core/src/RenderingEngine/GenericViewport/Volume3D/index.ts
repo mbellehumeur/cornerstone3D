@@ -16,18 +16,22 @@ export {
   endFuberlinVolume3DInteraction,
   flushFuberlinVolume3DPendingPreset,
   getFuberlinVolume3D,
+  getFuberlinVolume3DPresentQuality,
   getFuberlinVolume3DProjection,
   getFuberlinVolume3DRenderMode,
   getFuberlinVolume3DThreshold,
+  isFuberlinVolume3DPresentQuality,
   isFuberlinVolume3DProjection,
   isFuberlinVolume3DRenderMode,
   rotateFuberlinVolume3D,
+  setFuberlinVolume3DPresentQuality,
   setFuberlinVolume3DProjection,
   setFuberlinVolume3DRenderMode,
   setFuberlinVolume3DThreshold,
   setFuberlinVolume3DValueRange,
 } from './fuberlinVolume3DRegistry';
 export type {
+  FuberlinVolume3DPresentQuality,
   FuberlinVolume3DProjection,
   FuberlinVolume3DRenderMode,
 } from './fuberlinVolume3DRegistry';
