@@ -20,6 +20,7 @@ import {
 import {
   applyFuberlinVolume3DPreset,
   flushFuberlinVolume3DPendingPreset,
+  FUBERLIN_DEFAULT_PRESENT_QUALITY,
   getFuberlinVolume3DPresentQuality,
   getFuberlinVolume3DProjection,
   registerFuberlinVolume3D,
@@ -119,8 +120,11 @@ export class FuberlinVolume3DRenderPath
       volumePhysicalMax: this.volumePhysicalMax,
       volumeCenter: this.volumeCenter,
     });
-    // Full-res / OHIF-like still quality by default; UI slider can blend toward mview.
-    setFuberlinVolume3DPresentQuality(ctx.viewportId, 1);
+    // ~0.25 matches webgpuVolume3d default look; slider max (1) is denser than OHIF.
+    setFuberlinVolume3DPresentQuality(
+      ctx.viewportId,
+      FUBERLIN_DEFAULT_PRESENT_QUALITY
+    );
 
     // Seed CT-Bone until OHIF/HP applies a specific preset (or after upload).
     const defaultPreset = VIEWPORT_PRESETS.find(
@@ -496,7 +500,9 @@ export class FuberlinVolume3DRenderPath
       // Re-apply present quality now that volume dims/spacing exist so OHIF
       // still steps can match createVolumeMapper sample density.
       if (this.viewportId) {
-        const quality = getFuberlinVolume3DPresentQuality(this.viewportId) ?? 1;
+        const quality =
+          getFuberlinVolume3DPresentQuality(this.viewportId) ??
+          FUBERLIN_DEFAULT_PRESENT_QUALITY;
         setFuberlinVolume3DPresentQuality(this.viewportId, quality);
       }
 

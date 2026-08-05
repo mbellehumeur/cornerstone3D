@@ -9,8 +9,11 @@ export type FuberlinVolume3DRenderMode = 'surface' | 'composite' | 'mip';
 /** Mview camera projection (orthographic default for OHIF Volume3D parity). */
 export type FuberlinVolume3DProjection = 'perspective' | 'orthographic';
 
-/** 0 = mview (adaptive still), 1 = OHIF (native still + dense samples). Default 1. */
+/** 0 = mview (adaptive), 1 = max density. Default 0.18 matches webgpuVolume3d look. */
 export type FuberlinVolume3DPresentQuality = number;
+
+/** Slider default: visually matches OHIF/webgpuVolume3d (not slider max). */
+export const FUBERLIN_DEFAULT_PRESENT_QUALITY = 0.18;
 
 const FUBERLIN_RENDER_MODES: ReadonlySet<string> = new Set([
   'surface',
@@ -183,6 +186,7 @@ export function getFuberlinVolume3DRenderMode(
 
 /**
  * Set mview raymarch mode (surface / composite / mip).
+ * Surface gets a default threshold 20% below the composite seed (0.36 → 0.288).
  * Returns false when this viewport is not a fuberlin Volume3D.
  *
  * @internal
@@ -197,7 +201,16 @@ export function setFuberlinVolume3DRenderMode(
     return false;
   }
 
-  entry.renderer.setSettings({ mode });
+  if (mode === 'surface') {
+    entry.renderer.setSettings({
+      mode,
+      // 20% below composite default 0.36 — surface-only; composite/MIP unchanged.
+      threshold: 0.288,
+    });
+  } else {
+    entry.renderer.setSettings({ mode });
+  }
+
   return true;
 }
 
@@ -326,21 +339,33 @@ export function getFuberlinVolume3DPresentQuality(
 
   return isFuberlinVolume3DPresentQuality(entry.presentQuality)
     ? Math.min(1, Math.max(0, entry.presentQuality))
-    : 1;
+    : FUBERLIN_DEFAULT_PRESENT_QUALITY;
 }
 
 /** Stock mview ray budgets (VolumeRenderer defaults). */
-const MVIEW_INTERACTIVE_STEPS = 136;
 const MVIEW_STILL_STEPS = 224;
 const MVIEW_STILL_PIXEL_BUDGET = 2_400_000;
 const MVIEW_STILL_MINIMUM_SCALE = 0.52;
-const OHIF_STILL_PIXEL_BUDGET = 64_000_000;
+const MVIEW_STILL_MAXIMUM_SCALE = 1;
+/** Full-res still present budget (webgpuVolume3d settle). */
+const OHIF_PIXEL_BUDGET = 64_000_000;
 const OHIF_STILL_MINIMUM_SCALE = 1;
+const OHIF_STILL_MAXIMUM_SCALE = 1;
+/**
+ * webgpuVolume3d drag: initialInteractionScale 4 → half-res per axis,
+ * plus TrackballRotateTool rotateSampleDistanceFactor 2 → half the samples.
+ */
+const OHIF_INTERACTIVE_SCALE = 0.5;
+const OHIF_INTERACTIVE_SAMPLE_FACTOR = 2;
 /** WGSL raymarch loops are hard-capped at this (see shaders.js). */
-const FUBERLIN_MAX_RAY_STEPS = 2048;
+const FUBERLIN_MAX_RAY_STEPS = 4000;
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
+}
+
+function logLerp(a: number, b: number, t: number): number {
+  return Math.exp(lerp(Math.log(a), Math.log(b), t));
 }
 
 /**
@@ -378,8 +403,8 @@ function ohifLikeStillSteps(renderer: VolumeRenderer): number {
 }
 
 /**
- * At-rest quality blend: t=0 mview, t=1 OHIF (native present + dense samples).
- * Interactive (rotate) stays cheap either way.
+ * Quality blend for settled frames: t=0 mview, t=1 max density.
+ * Interactive always matches webgpuVolume3d drag (half-res + half steps).
  *
  * @internal
  */
@@ -396,42 +421,98 @@ export function setFuberlinVolume3DPresentQuality(
   const t = Math.min(1, Math.max(0, quality));
   entry.presentQuality = t;
 
-  // Always keep interactive cheap — only still (settle) differs by blend.
-  const interactive = {
-    pixelBudget: 760_000,
-    minimumScale: 0.38,
-    steps: MVIEW_INTERACTIVE_STEPS,
-  };
-
-  // Log-lerp pixel budget so mid-slider values are usable.
-  const pixelBudget = Math.round(
-    Math.exp(
-      lerp(
-        Math.log(MVIEW_STILL_PIXEL_BUDGET),
-        Math.log(OHIF_STILL_PIXEL_BUDGET),
-        t
-      )
-    )
-  );
-  const minimumScale = lerp(
-    MVIEW_STILL_MINIMUM_SCALE,
-    OHIF_STILL_MINIMUM_SCALE,
-    t
-  );
-  const steps = Math.round(
-    lerp(MVIEW_STILL_STEPS, ohifLikeStillSteps(entry.renderer), t)
+  const ohifSteps = ohifLikeStillSteps(entry.renderer);
+  const stillSteps = Math.round(lerp(MVIEW_STILL_STEPS, ohifSteps, t));
+  const interactiveSteps = Math.max(
+    16,
+    Math.round(stillSteps / OHIF_INTERACTIVE_SAMPLE_FACTOR)
   );
 
   entry.renderer.setQualityProfiles({
-    interactive,
+    // Always OHIF TrackballRotate drag parity — not blended with Resolution t.
+    interactive: {
+      pixelBudget: OHIF_PIXEL_BUDGET,
+      minimumScale: OHIF_INTERACTIVE_SCALE,
+      maximumScale: OHIF_INTERACTIVE_SCALE,
+      steps: interactiveSteps,
+    },
     still: {
-      pixelBudget,
-      minimumScale,
-      steps,
+      pixelBudget: Math.round(
+        logLerp(MVIEW_STILL_PIXEL_BUDGET, OHIF_PIXEL_BUDGET, t)
+      ),
+      minimumScale: lerp(
+        MVIEW_STILL_MINIMUM_SCALE,
+        OHIF_STILL_MINIMUM_SCALE,
+        t
+      ),
+      maximumScale: lerp(
+        MVIEW_STILL_MAXIMUM_SCALE,
+        OHIF_STILL_MAXIMUM_SCALE,
+        t
+      ),
+      steps: stillSteps,
     },
   });
 
   return true;
+}
+
+export type FuberlinVolume3DQualityProfileSnapshot = {
+  pixelBudget: number;
+  minimumScale: number;
+  maximumScale: number;
+  steps: number;
+};
+
+export type FuberlinVolume3DPresentQualityProfiles = {
+  still: FuberlinVolume3DQualityProfileSnapshot;
+  interactive: FuberlinVolume3DQualityProfileSnapshot;
+};
+
+/**
+ * Applied still/interactive quality profiles for the Resolution slider readout.
+ *
+ * @internal
+ */
+export function getFuberlinVolume3DPresentQualityProfiles(
+  viewportId: string
+): FuberlinVolume3DPresentQualityProfiles | undefined {
+  const entry = entries.get(viewportId);
+
+  if (!entry) {
+    return undefined;
+  }
+
+  const quality = (
+    entry.renderer as VolumeRenderer & {
+      quality?: {
+        still?: Partial<FuberlinVolume3DQualityProfileSnapshot>;
+        interactive?: Partial<FuberlinVolume3DQualityProfileSnapshot>;
+      };
+    }
+  ).quality;
+
+  const still = quality?.still;
+  const interactive = quality?.interactive;
+
+  if (!still || !interactive) {
+    return undefined;
+  }
+
+  return {
+    still: {
+      pixelBudget: Number(still.pixelBudget) || 0,
+      minimumScale: Number(still.minimumScale) || 0,
+      maximumScale: Number(still.maximumScale) || 1,
+      steps: Number(still.steps) || 0,
+    },
+    interactive: {
+      pixelBudget: Number(interactive.pixelBudget) || 0,
+      minimumScale: Number(interactive.minimumScale) || 0,
+      maximumScale: Number(interactive.maximumScale) || 1,
+      steps: Number(interactive.steps) || 0,
+    },
+  };
 }
 
 /**

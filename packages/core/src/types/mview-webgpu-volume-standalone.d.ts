@@ -53,11 +53,13 @@ declare module '@mview/webgpu-volume-standalone' {
       interactive?: {
         pixelBudget?: number;
         minimumScale?: number;
+        maximumScale?: number;
         steps?: number;
       };
       still?: {
         pixelBudget?: number;
         minimumScale?: number;
+        maximumScale?: number;
         steps?: number;
       };
     }): void;
