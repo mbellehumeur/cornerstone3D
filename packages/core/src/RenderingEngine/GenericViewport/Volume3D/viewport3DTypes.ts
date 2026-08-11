@@ -143,6 +143,8 @@ export type Volume3DVolumeRendering = MountedRendering<{
   defaultVOIRange?: VOIRange;
   imageVolume: IImageVolume;
   mapper: vtkVolumeMapper;
+  /** Renderer that owns `actor` — must be used for removeVolume (mode switches pin ctx.vtk). */
+  hostRenderer?: vtkRenderer;
   removeStreamingSubscriptions?: () => void;
 }>;
 

@@ -87,7 +87,7 @@ export class FuberlinVolume3DRenderPath
     const renderer = new VolumeRenderer(canvas, {
       // Match OHIF Volume3D defaults (CT-Bone composite DVR).
       mode: 'composite',
-      threshold: 0.36,
+      threshold: 0.35,
       opacity: 1,
       shade: true,
       background: [0, 0, 0],

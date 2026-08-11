@@ -9,9 +9,28 @@ type MapperImageDataEntry = {
   refreshedAfterLoad: boolean;
   /** Set when IMAGE_VOLUME_LOADING_COMPLETED has been observed at least once. */
   loadCompletedSeen: boolean;
+  /** Cheap fingerprint of last uploaded scalars; skip GPU dirty when unchanged. */
+  scalarFingerprint?: string;
 };
 
 const mapperImageDataByVolumeId = new Map<string, MapperImageDataEntry>();
+
+/**
+ * Cheap content fingerprint (length + sparse samples). Avoids full-buffer
+ * compares when getCompleteScalarDataArray allocates a new TypedArray each call.
+ */
+function fingerprintScalars(values: ArrayLike<number>): string {
+  const n = values.length;
+  if (n === 0) {
+    return '0';
+  }
+  let sum = 0;
+  const stride = Math.max(1, Math.floor(n / 32));
+  for (let i = 0; i < n; i += stride) {
+    sum = (sum + (Number(values[i]) | 0)) | 0;
+  }
+  return `${n}:${Number(values[0])}:${Number(values[n >> 1])}:${Number(values[n - 1])}:${sum}`;
+}
 
 /**
  * Shared mapper-input imageData per volume. Materializing voxel data is a full
@@ -25,11 +44,32 @@ export function acquireWebGPUMapperImageData(
   let entry = mapperImageDataByVolumeId.get(volumeId);
 
   if (!entry) {
+    const imageData = createMapperImageData(imageVolume);
+    const scalars = imageData.getPointData().getScalars()?.getData?.();
+    const dims =
+      imageVolume.dimensions ?? imageVolume.imageData?.getDimensions?.();
+    const expectedVoxels =
+      dims && dims.length >= 3 ? Math.max(1, dims[0] * dims[1] * dims[2]) : 0;
+    const componentsMeta = imageVolume.imageData?.get?.(
+      'numberOfComponents'
+    ) as { numberOfComponents?: number } | undefined;
+    const components = Math.max(1, componentsMeta?.numberOfComponents ?? 1);
+    const expectedLength = expectedVoxels * components;
+    const complete =
+      Boolean(scalars) &&
+      expectedLength > 0 &&
+      (scalars as ArrayLike<number>).length >= expectedLength;
+
     entry = {
-      imageData: createMapperImageData(imageVolume),
+      imageData,
       refCount: 0,
-      refreshedAfterLoad: false,
-      loadCompletedSeen: false,
+      // Skip post-load rematerialize when create already has a full buffer.
+      refreshedAfterLoad: complete,
+      loadCompletedSeen: complete,
+      scalarFingerprint:
+        scalars && (scalars as ArrayLike<number>).length > 0
+          ? fingerprintScalars(scalars as ArrayLike<number>)
+          : undefined,
     };
     mapperImageDataByVolumeId.set(volumeId, entry);
   }
@@ -57,7 +97,7 @@ export function releaseWebGPUMapperImageData(volumeId: string): void {
  * Re-materializes voxel data into the mapper scalar array, invalidating the
  * cached GPU texture after progressive load completion.
  *
- * @returns `true` when scalars were successfully updated.
+ * @returns `true` when scalars were successfully updated (GPU dirty).
  */
 export function refreshWebGPUMapperScalars(
   imageData: ReturnType<typeof vtkImageData.newInstance>,
@@ -77,12 +117,36 @@ export function refreshWebGPUMapperScalars(
     return false;
   }
 
+  const nextFingerprint = fingerprintScalars(values);
+  let entry =
+    (imageVolume as { volumeId?: string }).volumeId != null
+      ? mapperImageDataByVolumeId.get(
+          (imageVolume as { volumeId?: string }).volumeId as string
+        )
+      : undefined;
+  if (!entry) {
+    for (const candidate of mapperImageDataByVolumeId.values()) {
+      if (candidate.imageData === imageData) {
+        entry = candidate;
+        break;
+      }
+    }
+  }
+
+  if (entry?.scalarFingerprint === nextFingerprint) {
+    // Same content as last upload — do not call modified() (avoids GPU rebuild).
+    return false;
+  }
+
   if (scalars.getData() !== values) {
     scalars.setData(values as never);
   }
 
   scalars.modified();
   imageData.modified();
+  if (entry) {
+    entry.scalarFingerprint = nextFingerprint;
+  }
   return true;
 }
 

@@ -80,8 +80,8 @@ class VolumeRotateTool extends BaseTool {
       viewUp: newViewUp,
       focalPoint: newFocalPoint,
     });
-
-    viewport.render();
+    // Generic Volume3D setViewState → modified() already presents; do not
+    // viewport.render() again (was a second full WebGPU/OpenGL raycast).
   }
 }
 

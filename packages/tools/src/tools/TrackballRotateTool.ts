@@ -158,7 +158,7 @@ class TrackballRotateTool extends BaseTool {
             resetViewportCamera(viewport);
 
             applyViewportPresentation(viewport, viewPresentation);
-            viewport.render();
+            // resetViewState / setViewState already present on Volume3D NEXT.
           });
 
           resizeObserver.observe(element);
@@ -229,6 +229,51 @@ class TrackballRotateTool extends BaseTool {
     });
   };
 
+  /**
+   * Apply yaw then pitch in one camera write so Volume3D NEXT presents once
+   * (setViewState → modified → render), not twice.
+   */
+  rotateCameraAxes = (viewport, centerWorld, axisX, angleX, axisY, angleY) => {
+    const vtkCamera = viewport.getVtkActiveCamera();
+    let viewUp = vtkCamera.getViewUp() as Types.Point3;
+    let focalPoint = vtkCamera.getFocalPoint() as Types.Point3;
+    let position = vtkCamera.getPosition() as Types.Point3;
+
+    const apply = (axis: Types.Point3, angle: number) => {
+      if (!Number.isFinite(angle) || Math.abs(angle) < 1e-12) {
+        return;
+      }
+      const newPosition: Types.Point3 = [0, 0, 0];
+      const newFocalPoint: Types.Point3 = [0, 0, 0];
+      const newViewUp: Types.Point3 = [0, 0, 0];
+      const transform = mat4.identity(new Float32Array(16));
+      mat4.translate(transform, transform, centerWorld);
+      mat4.rotate(transform, transform, angle, axis);
+      mat4.translate(transform, transform, [
+        -centerWorld[0],
+        -centerWorld[1],
+        -centerWorld[2],
+      ]);
+      vec3.transformMat4(newPosition, position, transform);
+      vec3.transformMat4(newFocalPoint, focalPoint, transform);
+      mat4.identity(transform);
+      mat4.rotate(transform, transform, angle, axis);
+      vec3.transformMat4(newViewUp, viewUp, transform);
+      position = newPosition;
+      focalPoint = newFocalPoint;
+      viewUp = newViewUp;
+    };
+
+    apply(axisX, angleX);
+    apply(axisY, angleY);
+
+    setViewportCamera(viewport, {
+      position,
+      viewUp,
+      focalPoint,
+    });
+  };
+
   _dragCallback(evt: EventTypes.InteractionEventType): void {
     const { element, currentPoints, lastPoints } = evt.detail;
     const currentPointsCanvas = currentPoints.canvas;
@@ -291,15 +336,18 @@ class TrackballRotateTool extends BaseTool {
       vtkMath.normalize(forwardV);
       vtkMath.normalize(upVec);
 
-      this.rotateCamera(viewport, centerWorld, forwardV, angleX);
-
       const angleY =
         (normalizedPreviousPosition[1] - normalizedPosition[1]) *
         rotateIncrementDegrees;
 
-      this.rotateCamera(viewport, centerWorld, rightV, angleY);
-
-      viewport.render();
+      this.rotateCameraAxes(
+        viewport,
+        centerWorld,
+        forwardV,
+        angleX,
+        rightV,
+        angleY
+      );
     }
   }
 }

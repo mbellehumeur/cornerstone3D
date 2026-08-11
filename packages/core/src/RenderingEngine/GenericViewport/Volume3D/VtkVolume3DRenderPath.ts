@@ -42,7 +42,11 @@ export class VtkVolume3DRenderPath
   ): Promise<RenderPathAttachment<Volume3DDataPresentation>> {
     const payload: Volume3DVolumePayload =
       data as unknown as LoadedData<Volume3DVolumePayload>;
-    const hadVolume = ctx.vtk.renderer.getVolumes().length > 0;
+    // Ensure OpenGL/default renderer is the camera host before addVolume
+    // (WebGPU path may have pinned ctx.vtk.renderer to the GPU window).
+    ctx.display.activateRenderMode('vtkVolume3d');
+    const hostRenderer = ctx.vtk.renderer;
+    const hadVolume = hostRenderer.getVolumes().length > 0;
     const actor = await createVolumeActor(
       {
         volumeId: payload.volumeId,
@@ -53,7 +57,7 @@ export class VtkVolume3DRenderPath
     );
     const mapper = actor.getMapper() as vtkVolumeMapper;
 
-    ctx.vtk.renderer.addVolume(actor);
+    hostRenderer.addVolume(actor);
     if (!hadVolume) {
       const initialCamera = getInitialVolume3DCamera(ctx, payload.imageVolume);
 
@@ -77,6 +81,7 @@ export class VtkVolume3DRenderPath
         : undefined,
       imageVolume: payload.imageVolume,
       mapper,
+      hostRenderer,
       removeStreamingSubscriptions: subscribeToVolumeEvents(
         payload.volumeId,
         () => {
@@ -174,10 +179,10 @@ export class VtkVolume3DRenderPath
     ctx: Volume3DVtkVolumeAdapterContext,
     rendering: Volume3DVolumeRendering
   ): void {
-    const { actor, removeStreamingSubscriptions } = rendering;
+    const { actor, hostRenderer, removeStreamingSubscriptions } = rendering;
 
     removeStreamingSubscriptions?.();
-    ctx.vtk.renderer.removeVolume(actor);
+    (hostRenderer ?? ctx.vtk.renderer).removeVolume(actor);
   }
 }
 
@@ -312,12 +317,13 @@ function applySampleDistanceMultiplier(
 }
 
 function setCameraClippingRange(ctx: Volume3DVtkVolumeAdapterContext): void {
+  // When volumes are already on this renderer, tighten to prop bounds only.
+  // Wide ±1e6 is only a fallback before reset when the scene is empty.
+  if (ctx.vtk.renderer.getVolumes().length > 0) {
+    ctx.vtk.renderer.resetCameraClippingRange();
+    return;
+  }
   setVtkCameraClippingRange(ctx.vtk.renderer.getActiveCamera());
-  // Match legacy VolumeViewport3D: the wide default range above is only a
-  // fallback; resetCameraClippingRange() then pulls the near/far planes tight
-  // around the visible bounds. Volume ray casting derives its sampling from
-  // the clipping range, so leaving it at +/-1e6 quantizes the ray steps and
-  // renders visible banding/streaks.
   ctx.vtk.renderer.resetCameraClippingRange();
 }
 

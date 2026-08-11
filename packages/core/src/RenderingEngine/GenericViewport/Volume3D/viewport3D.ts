@@ -86,11 +86,29 @@ class VolumeViewport3D extends GenericViewport<
   private initialCamera?: Volume3DCamera & ICamera;
 
   static get useCustomRenderingPipeline(): boolean {
+    // Enable-time routing still uses VTK offscreen for vtkVolume3d. Instance
+    // method below opts webgpu/fuberlin presents out of OpenGL engine frames.
     return false;
   }
 
+  /**
+   * Binding-owned presents (WebGPU / fuberlin) must not run ContextPool OpenGL
+   * offscreen work — that canvas is hidden and the volume actor lives on the
+   * WebGPU/fuberlin renderer.
+   */
   getUseCustomRenderingPipeline(): boolean {
-    return false;
+    return (
+      this.isWebGPUVolumeRenderModeActive() ||
+      this.isFuberlinVolumeRenderModeActive()
+    );
+  }
+
+  /**
+   * Engine render loop entry for custom-pipeline Volume3D modes.
+   * Delegates to binding present (WebGPU traverse / fuberlin draw).
+   */
+  customRenderViewportToCanvas(): void {
+    this.render();
   }
 
   setRendered(): void {

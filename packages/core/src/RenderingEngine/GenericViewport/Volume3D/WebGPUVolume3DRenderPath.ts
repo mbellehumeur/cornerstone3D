@@ -64,10 +64,19 @@ export class WebGPUVolume3DRenderPath
       renderingEngineId: ctx.renderingEngineId,
     });
     this.window = window;
+    // Strip leftover OpenGL volumes before pin — VTK removeData after a prior
+    // WebGPU pin can miss its host renderer and leave actors on defaultVtk.
+    const previousRenderer = ctx.vtk.renderer;
+    if (previousRenderer && previousRenderer !== window.renderer) {
+      for (const volume of [...previousRenderer.getVolumes()]) {
+        previousRenderer.removeVolume(volume);
+      }
+    }
     // Pin the shared viewport vtk handle to the live WebGPU renderer/canvas so
     // getViewState/setViewState/resetCamera and path helpers all share one camera.
     this.pinContextToWindow(ctx);
-    const hadVolume = window.renderer.getVolumes().length > 0;
+    const hostRenderer = window.renderer;
+    const hadVolume = hostRenderer.getVolumes().length > 0;
 
     const mapperImageDataEntry = acquireWebGPUMapperImageData(
       payload.volumeId,
@@ -84,7 +93,7 @@ export class WebGPUVolume3DRenderPath
     initializeDefaultTransferFunction(actor, imageVolume);
 
     ctx.display.activateRenderMode(WEBGPU_VOLUME_3D_RENDER_MODE);
-    window.renderer.addVolume(actor);
+    hostRenderer.addVolume(actor);
     if (!hadVolume) {
       const initialCamera = getInitialVolume3DCamera(ctx, imageVolume);
 
@@ -108,6 +117,7 @@ export class WebGPUVolume3DRenderPath
         : undefined,
       imageVolume,
       mapper,
+      hostRenderer,
       removeStreamingSubscriptions: subscribeToVolumeEvents(
         payload.volumeId,
         (eventType) => {
@@ -264,14 +274,16 @@ export class WebGPUVolume3DRenderPath
     ctx: Volume3DVtkVolumeAdapterContext,
     rendering: Volume3DVolumeRendering
   ): void {
-    const { actor, removeStreamingSubscriptions } = rendering;
+    const { actor, hostRenderer, removeStreamingSubscriptions } = rendering;
 
     removeStreamingSubscriptions?.();
+    (hostRenderer ?? this.window?.renderer)?.removeVolume(actor);
     if (this.window) {
-      this.window.renderer.removeVolume(actor);
       this.window = undefined;
       releaseWebGPUViewportWindow(ctx.viewportId);
     }
+    // Unpin so a following vtkVolume3d path adds to the default OpenGL renderer.
+    ctx.display.activateRenderMode('vtkVolume3d');
     releaseWebGPUMapperImageData(rendering.imageVolume.volumeId);
   }
 }
@@ -440,6 +452,12 @@ function applySampleDistanceMultiplier(
 }
 
 function setCameraClippingRange(ctx: Volume3DVtkVolumeAdapterContext): void {
+  // Prefer bounds-tight reset when volumes are present (same visible result as
+  // wide±1e6 then reset; avoids leaving absurd near/far if reset were skipped).
+  if (ctx.vtk.renderer.getVolumes().length > 0) {
+    ctx.vtk.renderer.resetCameraClippingRange();
+    return;
+  }
   setVtkCameraClippingRange(ctx.vtk.renderer.getActiveCamera());
   ctx.vtk.renderer.resetCameraClippingRange();
 }

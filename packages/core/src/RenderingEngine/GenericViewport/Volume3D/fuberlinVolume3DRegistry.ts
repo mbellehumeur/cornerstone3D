@@ -186,7 +186,7 @@ export function getFuberlinVolume3DRenderMode(
 
 /**
  * Set mview raymarch mode (surface / composite / mip).
- * Surface gets a default threshold 20% below the composite seed (0.36 → 0.288).
+ * Surface gets a default threshold of 0.35 (35%).
  * Returns false when this viewport is not a fuberlin Volume3D.
  *
  * @internal
@@ -204,8 +204,8 @@ export function setFuberlinVolume3DRenderMode(
   if (mode === 'surface') {
     entry.renderer.setSettings({
       mode,
-      // 20% below composite default 0.36 — surface-only; composite/MIP unchanged.
-      threshold: 0.288,
+      // Surface-only default; composite/MIP leave threshold unchanged.
+      threshold: 0.35,
     });
   } else {
     entry.renderer.setSettings({ mode });

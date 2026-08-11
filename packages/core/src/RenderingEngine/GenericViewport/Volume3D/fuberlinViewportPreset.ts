@@ -3,12 +3,12 @@ import type { ViewportPreset } from '../../../types';
 
 export type FuberlinPresetAppearance = {
   points: FuberlinTransferPoint[];
-  /** Normalized [0,1] surface/MIP threshold from first non-zero opacity. */
+  /** Normalized [0,1] surface/MIP threshold (default 0.35). */
   threshold: number;
   shade: boolean;
 };
 
-const DEFAULT_SURFACE_THRESHOLD = 0.36;
+const DEFAULT_SURFACE_THRESHOLD = 0.35;
 
 /**
  * Convert a Cornerstone VIEWPORT_PRESET (HU color/opacity curves) into mview
@@ -71,13 +71,9 @@ export function viewportPresetToFuberlinAppearance(
     points.push({ x: 1, color: [...last.color], alpha: last.alpha });
   }
 
-  let threshold = DEFAULT_SURFACE_THRESHOLD;
-  for (const [hu, value] of [...byHu.entries()].sort((a, b) => a[0] - b[0])) {
-    if (value.alpha > 0) {
-      threshold = Math.max(0, Math.min(1, (hu - min) / width));
-      break;
-    }
-  }
+  // Fixed surface/MIP default — do not derive from first non-zero TF opacity
+  // (CT-Bone and similar presets land near ~0.29 and override the UI default).
+  const threshold = DEFAULT_SURFACE_THRESHOLD;
 
   return {
     points,
