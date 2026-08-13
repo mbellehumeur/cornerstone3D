@@ -5,6 +5,12 @@ import {
   type Types,
   viewportHasPan,
   viewportHasZoom,
+  beginFuberlinVolume3DInteraction,
+  endFuberlinVolume3DInteraction,
+  beginMviewVolume3DInteraction,
+  endMviewVolume3DInteraction,
+  beginSlicerLiveVolume3DInteraction,
+  endSlicerLiveVolume3DInteraction,
 } from '@cornerstonejs/core';
 import { Enums, getEnabledElement } from '@cornerstonejs/core';
 import { BaseTool } from './base';
@@ -22,6 +28,9 @@ class ZoomTool extends BaseTool {
   mouseDragCallback: (evt: EventTypes.InteractionEventType) => void;
   initialMousePosWorld: Types.Point3;
   dirVec: Types.Point3;
+  cleanUp: (() => void) | null = null;
+  _hasVolume3DInteraction = false;
+  _wheelEndTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     toolProps: PublicToolProps = {},
@@ -52,7 +61,64 @@ class ZoomTool extends BaseTool {
     this.mouseDragCallback = this._dragCallback.bind(this);
   }
 
+  private _beginVolume3DInteraction(viewportId: string): boolean {
+    return (
+      beginFuberlinVolume3DInteraction(viewportId) ||
+      beginMviewVolume3DInteraction(viewportId) ||
+      beginSlicerLiveVolume3DInteraction(viewportId)
+    );
+  }
+
+  private _endVolume3DInteraction(viewportId: string): void {
+    endFuberlinVolume3DInteraction(viewportId);
+    endMviewVolume3DInteraction(viewportId);
+    endSlicerLiveVolume3DInteraction(viewportId);
+  }
+
+  private _armVolume3DInteractionCleanup(viewport: {
+    id: string;
+    render: () => void;
+  }): void {
+    if (!this._beginVolume3DInteraction(viewport.id)) {
+      return;
+    }
+
+    if (this._hasVolume3DInteraction) {
+      return;
+    }
+
+    this._hasVolume3DInteraction = true;
+
+    if (this.cleanUp !== null) {
+      document.removeEventListener('mouseup', this.cleanUp);
+    }
+
+    this.cleanUp = () => {
+      this._endVolume3DInteraction(viewport.id);
+      viewport.render();
+      this._hasVolume3DInteraction = false;
+      this.cleanUp = null;
+    };
+
+    document.addEventListener('mouseup', this.cleanUp, { once: true });
+  }
+
   mouseWheelCallback(evt: EventTypes.MouseWheelEventType) {
+    const { element } = evt.detail;
+    const enabledElement = getEnabledElement(element);
+    const { viewport } = enabledElement;
+
+    if (this._beginVolume3DInteraction(viewport.id)) {
+      if (this._wheelEndTimer !== null) {
+        clearTimeout(this._wheelEndTimer);
+      }
+      this._wheelEndTimer = setTimeout(() => {
+        this._endVolume3DInteraction(viewport.id);
+        viewport.render();
+        this._wheelEndTimer = null;
+      }, 120);
+    }
+
     this._zoom(evt);
   }
 
@@ -62,6 +128,8 @@ class ZoomTool extends BaseTool {
     const worldPos = currentPoints.world;
     const enabledElement = getEnabledElement(element);
     const viewport = enabledElement.viewport;
+
+    this._armVolume3DInteractionCleanup(viewport);
 
     const camera = getLegacyCamera(viewport);
 

@@ -121,51 +121,47 @@ export class WebGPUVolume3DRenderPath
       removeStreamingSubscriptions: subscribeToVolumeEvents(
         payload.volumeId,
         (eventType) => {
-          const shouldRefreshScalars =
-            !mapperImageDataEntry.refreshedAfterLoad &&
-            (eventType === Events.IMAGE_VOLUME_LOADING_COMPLETED ||
-              // Retry if an earlier completion refresh failed to materialize.
-              eventType === Events.IMAGE_VOLUME_MODIFIED);
-
-          let refreshed = false;
-          if (
-            shouldRefreshScalars &&
-            (eventType === Events.IMAGE_VOLUME_LOADING_COMPLETED ||
-              mapperImageDataEntry.loadCompletedSeen)
-          ) {
-            if (eventType === Events.IMAGE_VOLUME_LOADING_COMPLETED) {
-              mapperImageDataEntry.loadCompletedSeen = true;
-            }
-            refreshed = refreshWebGPUMapperScalars(
+          if (eventType === Events.IMAGE_VOLUME_LOADING_COMPLETED) {
+            mapperImageDataEntry.loadCompletedSeen = true;
+            const refreshed = refreshWebGPUMapperScalars(
               mapperImageData,
               imageVolume
             );
             if (refreshed) {
               mapperImageDataEntry.refreshedAfterLoad = true;
               rendering.mapper.modified();
+              ctx.display.renderNow();
             }
+            return;
           }
 
-          // Skip full raycasts on progressive IMAGE_VOLUME_MODIFIED until
-          // scalars actually rematerialize. Self-render via renderNow (like
-          // planar WebGPU paths) — requestRender blits the hidden OpenGL canvas.
-          if (refreshed) {
-            ctx.display.renderNow();
+          if (
+            !mapperImageDataEntry.refreshedAfterLoad &&
+            mapperImageDataEntry.loadCompletedSeen
+          ) {
+            const refreshed = refreshWebGPUMapperScalars(
+              mapperImageData,
+              imageVolume
+            );
+            if (refreshed) {
+              mapperImageDataEntry.refreshedAfterLoad = true;
+              rendering.mapper.modified();
+              ctx.display.renderNow();
+            }
           }
         }
       ),
     };
 
     imageVolume.load(() => {
-      if (!mapperImageDataEntry.refreshedAfterLoad) {
-        const refreshed = refreshWebGPUMapperScalars(
-          mapperImageData,
-          imageVolume
-        );
-        if (refreshed) {
-          mapperImageDataEntry.refreshedAfterLoad = true;
-          rendering.mapper.modified();
-        }
+      mapperImageDataEntry.loadCompletedSeen = true;
+      const refreshed = refreshWebGPUMapperScalars(
+        mapperImageData,
+        imageVolume
+      );
+      if (refreshed) {
+        mapperImageDataEntry.refreshedAfterLoad = true;
+        rendering.mapper.modified();
       }
       ctx.display.renderNow();
     });

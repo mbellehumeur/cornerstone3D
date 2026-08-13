@@ -1,4 +1,4 @@
-import { VolumeRenderer } from '@mview/webgpu-volume-standalone';
+import { SlicerLiveVolumeRenderer } from '@slicerlive/webgpu-render';
 import { Events, ViewportType } from '../../../enums';
 import eventTarget from '../../../eventTarget';
 import type { IImageData, IImageVolume } from '../../../types';
@@ -14,25 +14,19 @@ import { getVolumeScalarArray } from '../webgpuMapperImageData';
 import {
   getVolumeCenterWorld,
   getVolumePhysicalMax,
-  iCameraToFuberlinCamera,
-  pitchVolume3DCameraUp90,
-} from './fuberlinVolume3DCamera';
+} from './mviewVolume3DCamera';
 import {
-  applyFuberlinVolume3DPreset,
-  flushFuberlinVolume3DPendingPreset,
-  FUBERLIN_DEFAULT_PRESENT_QUALITY,
-  getFuberlinVolume3DPresentQuality,
-  getFuberlinVolume3DProjection,
-  registerFuberlinVolume3D,
-  setFuberlinVolume3DPresentQuality,
-  setFuberlinVolume3DValueRange,
-  unregisterFuberlinVolume3D,
-} from './fuberlinVolume3DRegistry';
+  applySlicerLiveVolume3DPreset,
+  flushSlicerLiveVolume3DPendingPreset,
+  registerSlicerLiveVolume3D,
+  setSlicerLiveVolume3DValueRange,
+  unregisterSlicerLiveVolume3D,
+} from './slicerLiveVolume3DRegistry';
 import { VIEWPORT_PRESETS } from '../../../constants';
 import type {
   Volume3DCamera,
   Volume3DDataPresentation,
-  Volume3DFuberlinRendering,
+  Volume3DSlicerLiveRendering,
   Volume3DViewportRenderContext,
   Volume3DVolumePayload,
 } from './viewport3DTypes';
@@ -42,29 +36,16 @@ import setVtkCameraClippingRange from '../setVtkCameraClippingRange';
 import { setWebGPUViewportCanvasVisible } from '../Planar/webgpuViewportRenderWindow';
 import { getWebGPUViewportWindow } from '../Planar/webgpuViewportRenderWindow';
 
-export const FUBERLIN_VOLUME_3D_RENDER_MODE = 'fuberlinVolume3D';
+export const SLICERLIVE_VOLUME_3D_RENDER_MODE = 'slicerLiveVolume3d';
 
-const DEFAULT_FUBERLIN_PRESET_NAME = 'CT-Bone';
-
-/**
- * When true: apply +90° pitch about screen-right once after scalars upload
- * (same camera update path TrackballRotate uses via setViewState sync).
- * When false: keep the previous mount-time pitch in addData.
- * Flip to false to revert if this causes orientation problems.
- */
-/**
- * When true, pitch the camera +90° about screen-right after volume upload so
- * mview IJK yaw matches TrackballRotate. Leave false to match OHIF /
- * webgpuVolume3d load orientation.
- */
-const APPLY_FUBERLIN_POST_LOAD_PITCH_UP_90 = false;
+const DEFAULT_SLICERLIVE_PRESET_NAME = 'CT-Bone';
 
 /** @internal */
-export class FuberlinVolume3DRenderPath
+export class SlicerLiveVolume3DRenderPath
   implements RenderPath<Volume3DViewportRenderContext>
 {
   private canvas?: HTMLCanvasElement;
-  private renderer?: VolumeRenderer;
+  private renderer?: SlicerLiveVolumeRenderer;
   private baselineParallelScale?: number;
   private volumePhysicalMax?: number;
   private volumeCenter?: [number, number, number];
@@ -77,9 +58,9 @@ export class FuberlinVolume3DRenderPath
     data: LoadedData,
     _options: DataAddOptions
   ): Promise<RenderPathAttachment<Volume3DDataPresentation>> {
-    if (!VolumeRenderer.isSupported()) {
+    if (!SlicerLiveVolumeRenderer.isSupported()) {
       throw new Error(
-        '[FuberlinVolume3D] WebGPU is not available in this browser'
+        '[SlicerLiveVolume3D] WebGPU is not available in this browser'
       );
     }
 
@@ -89,18 +70,7 @@ export class FuberlinVolume3DRenderPath
     const canvas = this.ensureCanvas(ctx.viewport.element);
     this.resizeCanvas(canvas, ctx.viewport.element);
 
-    const renderer = new VolumeRenderer(canvas, {
-      // Match OHIF Volume3D defaults (CT-Bone composite DVR).
-      mode: 'composite',
-      threshold: 0.35,
-      opacity: 1,
-      shade: true,
-      background: [0, 0, 0],
-      camera: {
-        projection: 'orthographic',
-        zoom: 0.55,
-      },
-    });
+    const renderer = new SlicerLiveVolumeRenderer(canvas);
     await renderer.initialize();
     this.canvas = canvas;
     this.renderer = renderer;
@@ -119,35 +89,26 @@ export class FuberlinVolume3DRenderPath
       }
     ) as [number, number, number] | undefined;
 
-    registerFuberlinVolume3D(ctx.viewportId, {
+    registerSlicerLiveVolume3D(ctx.viewportId, {
       canvas,
       renderer,
       volumePhysicalMax: this.volumePhysicalMax,
       volumeCenter: this.volumeCenter,
     });
-    // ~0.25 matches webgpuVolume3d default look; slider max (1) is denser than OHIF.
-    setFuberlinVolume3DPresentQuality(
-      ctx.viewportId,
-      FUBERLIN_DEFAULT_PRESENT_QUALITY
-    );
 
-    // Seed CT-Bone until OHIF/HP applies a specific preset (or after upload).
     const defaultPreset = VIEWPORT_PRESETS.find(
-      (entry) => entry.name === DEFAULT_FUBERLIN_PRESET_NAME
+      (entry) => entry.name === DEFAULT_SLICERLIVE_PRESET_NAME
     );
     if (defaultPreset) {
-      applyFuberlinVolume3DPreset(ctx.viewportId, defaultPreset);
+      applySlicerLiveVolume3DPreset(ctx.viewportId, defaultPreset);
     }
-    // Hide any leftover vtk-WebGPU present canvas that could cover ours.
+
     const webgpuWindow = getWebGPUViewportWindow(ctx.viewportId);
     if (webgpuWindow) {
       setWebGPUViewportCanvasVisible(webgpuWindow, false);
     }
 
-    ctx.display.activateRenderMode(FUBERLIN_VOLUME_3D_RENDER_MODE);
-    // Keep block — empty display string reverts to inline and blanks mview.
-    // Stay hidden until a full post-load upload; partial scalars look like a
-    // solid AABB cube in surface mode.
+    ctx.display.activateRenderMode(SLICERLIVE_VOLUME_3D_RENDER_MODE);
     canvas.style.display = 'block';
     canvas.style.visibility = 'hidden';
     canvas.style.zIndex = '1';
@@ -159,20 +120,16 @@ export class FuberlinVolume3DRenderPath
     );
 
     if (initialCamera) {
-      // Optional +90° pitch runs once after upload when
-      // APPLY_FUBERLIN_POST_LOAD_PITCH_UP_90 (see refreshScalars). Default is off
-      // so load orientation matches OHIF / webgpuVolume3d.
-      const cameraToApply = initialCamera;
-      applyVolume3DCamera(ctx, cameraToApply, { resetClippingRange: true });
-      this.baselineParallelScale = cameraToApply.parallelScale;
-      registerFuberlinVolume3D(ctx.viewportId, {
+      applyVolume3DCamera(ctx, initialCamera, { resetClippingRange: true });
+      this.baselineParallelScale = initialCamera.parallelScale;
+      registerSlicerLiveVolume3D(ctx.viewportId, {
         canvas,
         renderer,
         baselineParallelScale: this.baselineParallelScale,
         volumePhysicalMax: this.volumePhysicalMax,
         volumeCenter: this.volumeCenter,
       });
-      this.applyFuberlinCamera(cameraToApply);
+      this.applySlicerLiveCamera(initialCamera);
     } else {
       setVtkCameraClippingRange(ctx.vtk.renderer.getActiveCamera());
       ctx.vtk.renderer.resetCameraClippingRange();
@@ -188,8 +145,6 @@ export class FuberlinVolume3DRenderPath
         : undefined;
 
     let uploadInFlight: Promise<boolean> | undefined;
-    // Match WebGPUVolume3D: full materialize+upload is expensive — do it once
-    // after load completes, not on every progressive IMAGE_VOLUME_MODIFIED.
     let loadCompletedSeen = false;
     let refreshedAfterLoad = false;
 
@@ -205,8 +160,6 @@ export class FuberlinVolume3DRenderPath
         return;
       }
 
-      // Progressive MODIFIED fires before slice 0 is cached; only warn on the
-      // milestones where scalars are expected to exist.
       const warnIfEmpty =
         options.warnIfEmpty ??
         (reason === 'load-callback' || reason === 'load-completed');
@@ -222,9 +175,6 @@ export class FuberlinVolume3DRenderPath
       }
 
       const uploaded = await uploadInFlight;
-
-      // Re-check after await: load-callback and load-completed can both enter
-      // before either finishes — without this, pitch runs twice (+180°).
       if (refreshedAfterLoad) {
         return;
       }
@@ -232,49 +182,18 @@ export class FuberlinVolume3DRenderPath
       if (uploaded) {
         this.volumeUploaded = true;
         refreshedAfterLoad = true;
-
-        // Same +90° screen-right pitch TrackballRotate would apply about view-right.
-        // Gated by APPLY_FUBERLIN_POST_LOAD_PITCH_UP_90 for easy revert.
-        if (APPLY_FUBERLIN_POST_LOAD_PITCH_UP_90) {
-          // Read live VTK camera (ctx.viewport has no getViewState).
-          const vtkCam = ctx.vtk.renderer.getActiveCamera();
-          const current = {
-            clippingRange: vtkCam.getClippingRange() as [number, number],
-            focalPoint: [...vtkCam.getFocalPoint()] as [number, number, number],
-            parallelProjection: vtkCam.getParallelProjection(),
-            parallelScale: vtkCam.getParallelScale(),
-            position: [...vtkCam.getPosition()] as [number, number, number],
-            viewAngle: vtkCam.getViewAngle(),
-            viewPlaneNormal: [...vtkCam.getViewPlaneNormal()] as [
-              number,
-              number,
-              number,
-            ],
-            viewUp: [...vtkCam.getViewUp()] as [number, number, number],
-          };
-          const pitched = pitchVolume3DCameraUp90(current);
-          applyVolume3DCamera(ctx, pitched, { resetClippingRange: true });
-          this.applyFuberlinCamera(pitched);
-          if (
-            typeof pitched.parallelScale === 'number' &&
-            Number.isFinite(pitched.parallelScale)
-          ) {
-            this.baselineParallelScale = pitched.parallelScale;
-          }
-        }
-
         revealCanvas();
         this.renderer.requestRender();
         ctx.display.renderNow();
       } else if (warnIfEmpty) {
         console.warn(
-          `[FuberlinVolume3D] No scalars yet (${reason}); waiting for volume events`
+          `[SlicerLiveVolume3D] No scalars yet (${reason}); waiting for volume events`
         );
       }
     };
 
-    const rendering: Volume3DFuberlinRendering = {
-      renderMode: FUBERLIN_VOLUME_3D_RENDER_MODE,
+    const rendering: Volume3DSlicerLiveRendering = {
+      renderMode: SLICERLIVE_VOLUME_3D_RENDER_MODE,
       actorEntryUID: uuidv4(),
       defaultVOIRange,
       imageVolume,
@@ -288,9 +207,6 @@ export class FuberlinVolume3DRenderPath
             return;
           }
 
-          // After completion only: retry if the first materialize failed.
-          // Ignore progressive MODIFIED — each upload copies+converts the
-          // full volume to r16float and was ~100x slower than WebGPU.
           if (loadCompletedSeen && !refreshedAfterLoad) {
             void refreshScalars('volume-modified', { warnIfEmpty: false });
           }
@@ -298,11 +214,6 @@ export class FuberlinVolume3DRenderPath
       ),
     };
 
-    // StreamingImageVolume.load() ignores new callbacks while already loading
-    // (DefaultVolume3DDataProvider starts load first). Hook the in-flight
-    // callback list when possible, otherwise call load() normally.
-    // Upload only here / on LOADING_COMPLETED — never from partial cache
-    // (zero-padded slices → opaque surface cube).
     attachVolumeLoadCallback(imageVolume, () => {
       loadCompletedSeen = true;
       void refreshScalars('load-callback');
@@ -335,11 +246,10 @@ export class FuberlinVolume3DRenderPath
   }
 
   private updateDataPresentation(
-    rendering: Volume3DFuberlinRendering,
+    _rendering: Volume3DSlicerLiveRendering,
     props: unknown
   ): void {
     const presentation = props as Volume3DDataPresentation | undefined;
-    const { renderer } = rendering;
 
     if (!presentation) {
       return;
@@ -352,13 +262,8 @@ export class FuberlinVolume3DRenderPath
       return;
     }
 
-    // Don't flash the zero-padded cube before the real volume is up.
     if (this.canvas) {
       this.canvas.style.visibility = this.volumeUploaded ? '' : 'hidden';
-    }
-
-    if (presentation.opacity !== undefined) {
-      renderer.setSettings({ opacity: Math.max(presentation.opacity, 0.001) });
     }
   }
 
@@ -370,28 +275,35 @@ export class FuberlinVolume3DRenderPath
     applyVolume3DCamera(ctx, viewState, {
       resetClippingRange: true,
     });
-    this.applyFuberlinCamera(viewState);
+    this.applySlicerLiveCamera(viewState);
   }
 
-  private applyFuberlinCamera(
+  private applySlicerLiveCamera(
     camera: Partial<Volume3DCamera> | undefined
   ): void {
-    if (!this.renderer || !camera || !this.viewportId) {
+    if (!this.renderer || !camera) {
       return;
     }
 
-    const projection = getFuberlinVolume3DProjection(this.viewportId);
-    const patch = iCameraToFuberlinCamera(camera, {
-      direction: this.volumeDirection,
-      volumePhysicalMax: this.volumePhysicalMax,
-      volumeCenter: this.volumeCenter,
-      baselineParallelScale: this.baselineParallelScale,
-      includeFraming: projection === 'orthographic',
-    });
+    const position = camera.position as [number, number, number] | undefined;
+    const focalPoint = camera.focalPoint as
+      | [number, number, number]
+      | undefined;
+    const viewUp = camera.viewUp as [number, number, number] | undefined;
 
-    if (patch) {
-      this.renderer.setCamera(patch);
+    if (!position || !focalPoint || !viewUp) {
+      return;
     }
+
+    // Pose/framing from CS/VTK only — keep SlicerLive projection mode owned by
+    // setSlicerLiveVolume3DProjection (VTK sync would otherwise force ortho).
+    this.renderer.setCamera({
+      position,
+      focalPoint,
+      viewUp,
+      parallelScale: camera.parallelScale,
+      viewAngle: camera.viewAngle,
+    });
   }
 
   private render(): void {
@@ -421,10 +333,10 @@ export class FuberlinVolume3DRenderPath
 
   private removeData(
     ctx: Volume3DViewportRenderContext,
-    rendering: Volume3DFuberlinRendering
+    rendering: Volume3DSlicerLiveRendering
   ): void {
     rendering.removeStreamingSubscriptions?.();
-    unregisterFuberlinVolume3D(ctx.viewportId);
+    unregisterSlicerLiveVolume3D(ctx.viewportId);
     rendering.renderer.dispose();
     this.renderer = undefined;
     this.viewportId = undefined;
@@ -442,7 +354,7 @@ export class FuberlinVolume3DRenderPath
     }
 
     const canvas = document.createElement('canvas');
-    canvas.dataset.fuberlinVolume3d = 'true';
+    canvas.dataset.slicerLiveVolume3d = 'true';
     canvas.style.display = 'block';
     canvas.style.height = '100%';
     canvas.style.inset = '0';
@@ -456,7 +368,7 @@ export class FuberlinVolume3DRenderPath
   }
 
   private async uploadVolume(
-    renderer: VolumeRenderer,
+    renderer: SlicerLiveVolumeRenderer,
     imageVolume: IImageVolume
   ): Promise<boolean> {
     const scalarData = getVolumeScalarArray(imageVolume);
@@ -464,6 +376,7 @@ export class FuberlinVolume3DRenderPath
       imageVolume.dimensions ?? imageVolume.imageData?.getDimensions?.();
     const spacing =
       imageVolume.spacing ?? imageVolume.imageData?.getSpacing?.();
+    const origin = imageVolume.origin ?? imageVolume.imageData?.getOrigin?.();
 
     if (!scalarData || !dimensions || !spacing) {
       return false;
@@ -475,7 +388,7 @@ export class FuberlinVolume3DRenderPath
 
     if (!ArrayBuffer.isView(scalarData)) {
       console.warn(
-        '[FuberlinVolume3D] Scalar buffer is not a TypedArray; skipping upload'
+        '[SlicerLiveVolume3D] Scalar buffer is not a TypedArray; skipping upload'
       );
       return false;
     }
@@ -490,6 +403,8 @@ export class FuberlinVolume3DRenderPath
         data: scalarData as unknown as ArrayBufferView,
         dimensions: dimensions as [number, number, number],
         spacing: spacing as [number, number, number],
+        origin: origin as [number, number, number] | undefined,
+        direction: this.volumeDirection,
         valueRange:
           range && range.length === 2
             ? ([range[0], range[1]] as [number, number])
@@ -498,47 +413,38 @@ export class FuberlinVolume3DRenderPath
       });
 
       if (this.viewportId && range && range.length === 2) {
-        setFuberlinVolume3DValueRange(this.viewportId, [range[0], range[1]]);
-        flushFuberlinVolume3DPendingPreset(this.viewportId);
-      }
-
-      // Re-apply present quality now that volume dims/spacing exist so OHIF
-      // still steps can match createVolumeMapper sample density.
-      if (this.viewportId) {
-        const quality =
-          getFuberlinVolume3DPresentQuality(this.viewportId) ??
-          FUBERLIN_DEFAULT_PRESENT_QUALITY;
-        setFuberlinVolume3DPresentQuality(this.viewportId, quality);
+        setSlicerLiveVolume3DValueRange(this.viewportId, [range[0], range[1]]);
+        flushSlicerLiveVolume3DPendingPreset(this.viewportId);
       }
 
       return true;
     } catch (error) {
-      console.error('[FuberlinVolume3D] setVolume failed', error);
+      console.error('[SlicerLiveVolume3D] setVolume failed', error);
       return false;
     }
   }
 }
 
 /** @internal */
-export class FuberlinVolume3DPath
+export class SlicerLiveVolume3DPath
   implements
     RenderPathDefinition<
       Volume3DViewportRenderContext,
       Volume3DViewportRenderContext
     >
 {
-  readonly id = 'volume3d:fuberlin-volume';
+  readonly id = 'volume3d:slicerlive-volume';
   readonly type = ViewportType.VOLUME_3D_NEXT;
 
   matches(data: LoadedData, options: DataAddOptions): boolean {
     return (
       data.type === 'image' &&
-      options.renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE
+      options.renderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE
     );
   }
 
   createRenderPath() {
-    return new FuberlinVolume3DRenderPath();
+    return new SlicerLiveVolume3DRenderPath();
   }
 
   selectContext(

@@ -106,7 +106,7 @@ export class WebGPUVolumeSliceRenderPath
   async addData(
     ctx: PlanarWebGPUImageAdapterContext,
     data: LoadedData,
-    options: DataAddOptions
+    _options: DataAddOptions
   ): Promise<RenderPathAttachment<PlanarDataPresentation>> {
     const payload: PlanarPayload = data as unknown as LoadedData<PlanarPayload>;
     const imageVolume = payload.imageVolume;
@@ -173,13 +173,13 @@ export class WebGPUVolumeSliceRenderPath
       removeStreamingSubscriptions: subscribeToVolumeEvents(
         payload.volumeId,
         (eventType) => {
-          if (
-            eventType === Events.IMAGE_VOLUME_LOADING_COMPLETED &&
-            !mapperImageDataEntry.refreshedAfterLoad
-          ) {
+          if (eventType === Events.IMAGE_VOLUME_LOADING_COMPLETED) {
+            mapperImageDataEntry.loadCompletedSeen = true;
             if (refreshMapperScalars(rendering)) {
               mapperImageDataEntry.refreshedAfterLoad = true;
             }
+            ctx.display.renderNow();
+            return;
           }
 
           ctx.display.renderNow();
@@ -187,6 +187,10 @@ export class WebGPUVolumeSliceRenderPath
       ),
     };
     imageVolume.load(() => {
+      mapperImageDataEntry.loadCompletedSeen = true;
+      if (refreshMapperScalars(rendering)) {
+        mapperImageDataEntry.refreshedAfterLoad = true;
+      }
       ctx.display.renderNow();
     });
 

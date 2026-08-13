@@ -6,6 +6,7 @@ import type {
   ActorEntry,
   ICamera,
   IImageData,
+  Point2,
   Point3,
   ViewReference,
   ViewReferenceSpecifier,
@@ -39,6 +40,7 @@ import type {
   Volume3DPayload,
   Volume3DDataPresentation,
   Volume3DFuberlinRendering,
+  Volume3DMviewRendering,
   Volume3DRenderMode,
   Volume3DRegisteredDataSet,
   Volume3DRendering,
@@ -55,11 +57,25 @@ import {
 } from '../Planar/webgpuViewportRenderWindow';
 import { WEBGPU_VOLUME_3D_RENDER_MODE } from './WebGPUVolume3DRenderPath';
 import { FUBERLIN_VOLUME_3D_RENDER_MODE } from './FuberlinVolume3DRenderPath';
+import { MVIEW_VOLUME_3D_RENDER_MODE } from './MviewVolume3DRenderPath';
+import { SLICERLIVE_VOLUME_3D_RENDER_MODE } from './SlicerLiveVolume3DRenderPath';
 import { iCameraToFuberlinCamera } from './fuberlinVolume3DCamera';
+import {
+  iCameraToMviewCamera,
+  parallelScaleToMviewOrthoZoom,
+} from './mviewVolume3DCamera';
 import {
   getFuberlinVolume3D,
   setFuberlinVolume3DCanvasVisible,
 } from './fuberlinVolume3DRegistry';
+import {
+  getMviewVolume3D,
+  setMviewVolume3DCanvasVisible,
+} from './mviewVolume3DRegistry';
+import {
+  getSlicerLiveVolume3D,
+  setSlicerLiveVolume3DCanvasVisible,
+} from './slicerLiveVolume3DRegistry';
 
 class VolumeViewport3D extends GenericViewport<
   Volume3DCamera,
@@ -84,6 +100,12 @@ class VolumeViewport3D extends GenericViewport<
    * matching legacy `Viewport.getZoom` / `setZoom` for OHIF overlays/tools.
    */
   private initialCamera?: Volume3DCamera & ICamera;
+  /**
+   * Canvas-pixel pan accumulated by {@link setPan} relative to the last
+   * {@link captureInitialCamera} / fit. Avoids deriving pan from world→canvas
+   * after rotations (which would jump under PanTool's get+delta pattern).
+   */
+  private panOffset: Point2 = [0, 0];
 
   static get useCustomRenderingPipeline(): boolean {
     // Enable-time routing still uses VTK offscreen for vtkVolume3d. Instance
@@ -99,7 +121,9 @@ class VolumeViewport3D extends GenericViewport<
   getUseCustomRenderingPipeline(): boolean {
     return (
       this.isWebGPUVolumeRenderModeActive() ||
-      this.isFuberlinVolumeRenderModeActive()
+      this.isFuberlinVolumeRenderModeActive() ||
+      this.isMviewVolumeRenderModeActive() ||
+      this.isSlicerLiveVolumeRenderModeActive()
     );
   }
 
@@ -269,6 +293,7 @@ class VolumeViewport3D extends GenericViewport<
       visible: true,
       opacity: 1,
     });
+    this.alignSpecializedVolumeFitCamera();
     this.viewState = this.getViewState();
     this.captureInitialCamera();
   }
@@ -302,7 +327,8 @@ class VolumeViewport3D extends GenericViewport<
       !isVolume3DVolumePayload(data) ||
       !(
         isVolume3DVolumeRendering(rendering) ||
-        isVolume3DFuberlinRendering(rendering)
+        isVolume3DFuberlinRendering(rendering) ||
+        isVolume3DMviewRendering(rendering)
       )
     ) {
       return [];
@@ -332,6 +358,20 @@ class VolumeViewport3D extends GenericViewport<
       }
     }
 
+    if (this.isMviewVolumeRenderModeActive()) {
+      const entry = getMviewVolume3D(this.id);
+      if (entry) {
+        return entry.canvas;
+      }
+    }
+
+    if (this.isSlicerLiveVolumeRenderModeActive()) {
+      const entry = getSlicerLiveVolume3D(this.id);
+      if (entry) {
+        return entry.canvas;
+      }
+    }
+
     if (this.isWebGPUVolumeRenderModeActive()) {
       const window = getWebGPUViewportWindow(this.id);
       if (window) {
@@ -356,6 +396,8 @@ class VolumeViewport3D extends GenericViewport<
       mountedMode === 'vtkVolume3d' ||
       mountedMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
       mountedMode === FUBERLIN_VOLUME_3D_RENDER_MODE ||
+      mountedMode === MVIEW_VOLUME_3D_RENDER_MODE ||
+      mountedMode === SLICERLIVE_VOLUME_3D_RENDER_MODE ||
       mountedMode === 'vtkGeometry3d'
     ) {
       return mountedMode;
@@ -394,15 +436,17 @@ class VolumeViewport3D extends GenericViewport<
     });
     this.viewState = this.getRuntimeCamera();
     this.syncFuberlinCameraFromViewState();
+    this.syncMviewCameraFromViewState();
+    this.syncSlicerLiveCameraFromViewState();
     this.modified(previousCamera);
   }
 
   /**
-   * Zoom relative to the initial parallel scale (1 = fit / baseline camera).
+   * Zoom relative to the fit parallel scale (1 = fit / baseline camera).
    * Matches legacy `Viewport.getZoom` for OHIF overlay and tool consumers.
    */
   getZoom(compareCamera = this.initialCamera): number {
-    const baseline = compareCamera?.parallelScale;
+    const baseline = this.getFitParallelScale() ?? compareCamera?.parallelScale;
 
     if (!baseline) {
       return 1;
@@ -418,33 +462,256 @@ class VolumeViewport3D extends GenericViewport<
   }
 
   /**
-   * Sets zoom via parallel scale relative to {@link initialCamera}.
-   * Matches legacy `Viewport.setZoom`.
+   * Sets zoom via parallel scale relative to the fit baseline.
+   * Matches Planar / ZoomTool: optional `canvasPoint` is accepted for API
+   * compatibility but ignored (no zoom-about-point yet). A Point2 must never
+   * be treated as `storeAsInitialCamera`.
    */
-  setZoom(value: number, storeAsInitialCamera = false): void {
+  setZoom(value: number, canvasPointOrStore?: Point2 | boolean): void {
     if (!Number.isFinite(value) || value === 0) {
       return;
     }
 
-    if (!this.initialCamera?.parallelScale) {
-      this.captureInitialCamera();
+    if (!this.getFitParallelScale()) {
+      this.alignSpecializedVolumeFitCamera();
+      if (!this.initialCamera?.parallelScale) {
+        this.captureInitialCamera();
+      }
     }
 
-    const initialParallelScale = this.initialCamera?.parallelScale;
+    const initialParallelScale = this.getFitParallelScale();
 
     if (!initialParallelScale) {
       return;
     }
 
-    this.setViewState({ parallelScale: initialParallelScale / value });
+    const nextParallelScale = initialParallelScale / value;
+    this.setViewState({ parallelScale: nextParallelScale });
+    this.applySpecializedVolumeFraming({
+      parallelScale: nextParallelScale,
+    });
 
-    if (storeAsInitialCamera) {
+    if (canvasPointOrStore === true) {
       this.captureInitialCamera();
+    }
+  }
+
+  /**
+   * Canvas-pixel pan relative to the last fit / {@link captureInitialCamera}.
+   * Required so PanTool works on native `volume3dNext` (no getCamera).
+   */
+  getPan(): Point2 {
+    return [this.panOffset[0], this.panOffset[1]];
+  }
+
+  /**
+   * Sets absolute canvas-pixel pan.
+   * For mview/fuberlin: screen-space pan only (do not move VTK focal/position —
+   * that made TrackballRotate orbit a different center and jump on click).
+   * For vtk/webgpu volume: translate focalPoint + position in the view plane.
+   */
+  setPan(nextPan: Point2): void {
+    if (
+      !Array.isArray(nextPan) ||
+      !Number.isFinite(nextPan[0]) ||
+      !Number.isFinite(nextPan[1])
+    ) {
+      return;
+    }
+
+    const deltaCanvas: Point2 = [
+      nextPan[0] - this.panOffset[0],
+      nextPan[1] - this.panOffset[1],
+    ];
+
+    if (Math.abs(deltaCanvas[0]) < 1e-6 && Math.abs(deltaCanvas[1]) < 1e-6) {
+      this.panOffset = [nextPan[0], nextPan[1]];
+      return;
+    }
+
+    this.panOffset = [nextPan[0], nextPan[1]];
+
+    const canvasHeight =
+      this.element.clientHeight || this.canvas?.clientHeight || 1;
+
+    const specialized =
+      getMviewVolume3D(this.id) || getFuberlinVolume3D(this.id);
+
+    if (specialized) {
+      this.applySpecializedVolumeFraming({
+        panCanvasAbsolute: this.panOffset,
+        canvasHeight,
+      });
+      this.render();
+      return;
+    }
+
+    const viewState = this.getViewState();
+    const { focalPoint, position, viewPlaneNormal, viewUp, parallelScale } =
+      viewState;
+
+    if (
+      !focalPoint ||
+      !position ||
+      !viewPlaneNormal ||
+      !viewUp ||
+      typeof parallelScale !== 'number' ||
+      !Number.isFinite(parallelScale) ||
+      parallelScale <= 0
+    ) {
+      return;
+    }
+
+    const worldPerPixel = (2 * parallelScale) / Math.max(canvasHeight, 1);
+
+    const vpn = vec3.fromValues(
+      viewPlaneNormal[0],
+      viewPlaneNormal[1],
+      viewPlaneNormal[2]
+    );
+    const up = vec3.fromValues(viewUp[0], viewUp[1], viewUp[2]);
+    vec3.normalize(vpn, vpn);
+    vec3.normalize(up, up);
+    const right = vec3.create();
+    vec3.cross(right, up, vpn);
+    vec3.normalize(right, right);
+
+    // Match PanTool: camera moves opposite to canvas drag (content follows pointer).
+    const worldDelta = vec3.create();
+    vec3.scaleAndAdd(
+      worldDelta,
+      worldDelta,
+      right,
+      deltaCanvas[0] * worldPerPixel
+    );
+    vec3.scaleAndAdd(
+      worldDelta,
+      worldDelta,
+      up,
+      -deltaCanvas[1] * worldPerPixel
+    );
+
+    this.setViewState({
+      focalPoint: [
+        focalPoint[0] - worldDelta[0],
+        focalPoint[1] - worldDelta[1],
+        focalPoint[2] - worldDelta[2],
+      ],
+      position: [
+        position[0] - worldDelta[0],
+        position[1] - worldDelta[1],
+        position[2] - worldDelta[2],
+      ],
+    });
+  }
+
+  /**
+   * Fit-time parallelScale for zoom=1: specialized present baseline, else
+   * {@link initialCamera}.
+   */
+  private getFitParallelScale(): number | undefined {
+    const specialized =
+      getMviewVolume3D(this.id)?.baselineParallelScale ??
+      getFuberlinVolume3D(this.id)?.baselineParallelScale ??
+      getSlicerLiveVolume3D(this.id)?.baselineParallelScale;
+
+    if (
+      typeof specialized === 'number' &&
+      Number.isFinite(specialized) &&
+      specialized > 0
+    ) {
+      return specialized;
+    }
+
+    const initial = this.initialCamera?.parallelScale;
+    if (
+      typeof initial === 'number' &&
+      Number.isFinite(initial) &&
+      initial > 0
+    ) {
+      return initial;
+    }
+
+    return undefined;
+  }
+
+  /**
+   * After mview/fuberlin/slicerLive mount, VTK may still hold an empty-scene parallelScale
+   * (~1). Force the mount-time fit baseline onto the VTK camera so getZoom/setZoom
+   * and framing sync share one scale.
+   */
+  private alignSpecializedVolumeFitCamera(): void {
+    const specialized =
+      getMviewVolume3D(this.id) ||
+      getFuberlinVolume3D(this.id) ||
+      getSlicerLiveVolume3D(this.id);
+    const baseline = specialized?.baselineParallelScale;
+    if (
+      typeof baseline !== 'number' ||
+      !Number.isFinite(baseline) ||
+      baseline <= 0
+    ) {
+      return;
+    }
+
+    this.getVtkActiveCamera().setParallelScale(baseline);
+  }
+
+  /**
+   * Write zoom/pan straight into the specialized VolumeRenderer when active.
+   * setViewState sync can miss framing if VTK scale is stale; this keeps the
+   * present matched to tool updates.
+   */
+  private applySpecializedVolumeFraming(options: {
+    parallelScale?: number;
+    panCanvasAbsolute?: Point2;
+    canvasHeight?: number;
+  }): void {
+    const entry = getMviewVolume3D(this.id) || getFuberlinVolume3D(this.id);
+    if (!entry) {
+      return;
+    }
+
+    const projection = entry.renderer.getCamera()?.projection;
+    if (projection && projection !== 'orthographic') {
+      return;
+    }
+
+    const patch: { zoom?: number; panX?: number; panY?: number } = {};
+    const physicalMax = entry.volumePhysicalMax;
+    const parallelScale =
+      options.parallelScale ?? this.getVtkActiveCamera().getParallelScale();
+
+    if (
+      typeof parallelScale === 'number' &&
+      Number.isFinite(parallelScale) &&
+      parallelScale > 0 &&
+      typeof physicalMax === 'number' &&
+      Number.isFinite(physicalMax) &&
+      physicalMax > 0
+    ) {
+      patch.zoom = parallelScaleToMviewOrthoZoom(
+        parallelScale,
+        physicalMax,
+        entry.baselineParallelScale
+      );
+    }
+
+    if (options.panCanvasAbsolute) {
+      const height = Math.max(options.canvasHeight ?? 1, 1);
+      // NDC-like units: full canvas height ⇒ pan range of 2 (mview shader).
+      patch.panX = (options.panCanvasAbsolute[0] * 2) / height;
+      patch.panY = (options.panCanvasAbsolute[1] * 2) / height;
+    }
+
+    if (Object.keys(patch).length) {
+      entry.renderer.setCamera(patch);
     }
   }
 
   private captureInitialCamera(): void {
     this.initialCamera = { ...this.getViewState() };
+    this.panOffset = [0, 0];
   }
 
   protected getRuntimeCamera(): Volume3DCamera & ICamera {
@@ -534,7 +801,8 @@ class VolumeViewport3D extends GenericViewport<
       !isVolume3DVolumePayload(data) ||
       !(
         isVolume3DVolumeRendering(rendering) ||
-        isVolume3DFuberlinRendering(rendering)
+        isVolume3DFuberlinRendering(rendering) ||
+        isVolume3DMviewRendering(rendering)
       )
     ) {
       return;
@@ -673,6 +941,21 @@ class VolumeViewport3D extends GenericViewport<
     // bounds; restore the previous zoom when the caller opts out.
     if (!resetZoom) {
       camera.setParallelScale(previousParallelScale);
+    } else {
+      // mview/fuberlin have no VTK volume actor — resetCamera fits empty
+      // bounds (~parallelScale 1) and would sync as ~10× over-zoom. Restore
+      // the fit baseline captured at mount instead.
+      const specializedBaseline =
+        getMviewVolume3D(this.id)?.baselineParallelScale ??
+        getFuberlinVolume3D(this.id)?.baselineParallelScale ??
+        getSlicerLiveVolume3D(this.id)?.baselineParallelScale;
+      if (
+        typeof specializedBaseline === 'number' &&
+        Number.isFinite(specializedBaseline) &&
+        specializedBaseline > 0
+      ) {
+        camera.setParallelScale(specializedBaseline);
+      }
     }
 
     // resetCamera() recenters the focal point on the bounds; restore the
@@ -686,8 +969,12 @@ class VolumeViewport3D extends GenericViewport<
     this.viewState = this.getViewState();
     if (resetZoom) {
       this.captureInitialCamera();
+    } else if (resetPan && resetToCenter) {
+      this.panOffset = [0, 0];
     }
     this.syncFuberlinCameraFromViewState();
+    this.syncMviewCameraFromViewState();
+    this.syncSlicerLiveCameraFromViewState();
     this.render();
     this.triggerCameraModifiedEvent(previousCamera);
     this.triggerCameraResetEvent();
@@ -931,12 +1218,17 @@ class VolumeViewport3D extends GenericViewport<
     this.activeRenderMode = renderMode;
     const useWebGPU = renderMode === WEBGPU_VOLUME_3D_RENDER_MODE;
     const useFuberlin = renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE;
+    const useMview = renderMode === MVIEW_VOLUME_3D_RENDER_MODE;
+    const useSlicerLive = renderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE;
     // cpuCanvas is unused for direct WebGPU present; keep it hidden.
     this.cpuCanvas.style.display = 'none';
     this.cpuCanvas.style.pointerEvents = 'none';
-    this.canvas.style.display = useWebGPU || useFuberlin ? 'none' : '';
+    this.canvas.style.display =
+      useWebGPU || useFuberlin || useMview || useSlicerLive ? 'none' : '';
 
     setFuberlinVolume3DCanvasVisible(this.id, useFuberlin);
+    setMviewVolume3DCanvasVisible(this.id, useMview);
+    setSlicerLiveVolume3DCanvasVisible(this.id, useSlicerLive);
 
     const webgpuWindow = getWebGPUViewportWindow(this.id);
 
@@ -960,9 +1252,13 @@ class VolumeViewport3D extends GenericViewport<
       setWebGPUViewportCanvasVisible(webgpuWindow, false);
     }
 
-    if (useFuberlin) {
+    if (useFuberlin || useMview || useSlicerLive) {
       this.syncPresentSize();
-      const entry = getFuberlinVolume3D(this.id);
+      const entry = useSlicerLive
+        ? getSlicerLiveVolume3D(this.id)
+        : useMview
+          ? getMviewVolume3D(this.id)
+          : getFuberlinVolume3D(this.id);
       if (entry) {
         this.renderContext.vtk.canvas = entry.canvas;
       }
@@ -1024,12 +1320,145 @@ class VolumeViewport3D extends GenericViewport<
       direction,
       volumePhysicalMax: entry.volumePhysicalMax,
       volumeCenter: entry.volumeCenter,
-      includeFraming: entry.renderer.getCamera()?.projection === 'orthographic',
+      baselineParallelScale: entry.baselineParallelScale,
+      // Orientation only — zoom/pan applied below from VTK scale + panOffset so
+      // rotate does not fight absolute canvas pan set by PanTool.
+      includeFraming: false,
     });
 
-    if (patch) {
-      entry.renderer.setCamera(patch);
+    if (!patch) {
+      return;
     }
+
+    this.applySpecializedFramingToPatch(patch, entry);
+    entry.renderer.setCamera(patch);
+  }
+
+  private isMviewVolumeRenderModeActive(): boolean {
+    return this.activeRenderMode === MVIEW_VOLUME_3D_RENDER_MODE;
+  }
+
+  private isSlicerLiveVolumeRenderModeActive(): boolean {
+    return this.activeRenderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE;
+  }
+
+  private syncSlicerLiveCameraFromViewState(): void {
+    if (!this.isSlicerLiveVolumeRenderModeActive()) {
+      return;
+    }
+
+    const entry = getSlicerLiveVolume3D(this.id);
+    if (!entry) {
+      return;
+    }
+
+    const viewState = this.getViewState();
+    const position = viewState.position as [number, number, number] | undefined;
+    const focalPoint = viewState.focalPoint as
+      | [number, number, number]
+      | undefined;
+    const viewUp = viewState.viewUp as [number, number, number] | undefined;
+
+    if (!position || !focalPoint || !viewUp) {
+      return;
+    }
+
+    // Pose/framing from CS/VTK only — projection mode is owned by the SlicerLive
+    // renderer (menu / setSlicerLiveVolume3DProjection), not VTK's parallel flag.
+    entry.renderer.setCamera({
+      position,
+      focalPoint,
+      viewUp,
+      parallelScale: viewState.parallelScale,
+      viewAngle: viewState.viewAngle,
+    });
+  }
+
+  private syncMviewCameraFromViewState(): void {
+    if (!this.isMviewVolumeRenderModeActive()) {
+      return;
+    }
+
+    const entry = getMviewVolume3D(this.id);
+
+    if (!entry) {
+      return;
+    }
+
+    const binding = this.getCurrentBinding();
+
+    if (!binding) {
+      return;
+    }
+
+    let direction: ArrayLike<number> | number[] | undefined;
+
+    try {
+      const rendering = this.getVolume3DRendering(binding);
+
+      if (isVolume3DMviewRendering(rendering)) {
+        direction =
+          rendering.imageVolume.direction ??
+          rendering.imageVolume.imageData?.getDirection?.();
+      }
+    } catch {
+      // Binding not ready yet — still sync with identity volume axes.
+    }
+
+    const patch = iCameraToMviewCamera(this.getViewState(), {
+      direction,
+      volumePhysicalMax: entry.volumePhysicalMax,
+      volumeCenter: entry.volumeCenter,
+      baselineParallelScale: entry.baselineParallelScale,
+      includeFraming: false,
+    });
+
+    if (!patch) {
+      return;
+    }
+
+    this.applySpecializedFramingToPatch(patch, entry);
+    entry.renderer.setCamera(patch);
+  }
+
+  /**
+   * Ortho zoom from VTK parallelScale; pan from canvas panOffset (not focal
+   * offset). Keeps rotate/zoom/pan from fighting each other on mview/fuberlin.
+   */
+  private applySpecializedFramingToPatch(
+    patch: { zoom?: number; panX?: number; panY?: number },
+    entry: {
+      volumePhysicalMax?: number;
+      baselineParallelScale?: number;
+      renderer: { getCamera: () => { projection?: string } | undefined };
+    }
+  ): void {
+    if (entry.renderer.getCamera()?.projection === 'perspective') {
+      return;
+    }
+
+    const viewState = this.getViewState();
+    const physicalMax = entry.volumePhysicalMax;
+    const parallelScale = viewState.parallelScale;
+
+    if (
+      typeof parallelScale === 'number' &&
+      Number.isFinite(parallelScale) &&
+      parallelScale > 0 &&
+      typeof physicalMax === 'number' &&
+      Number.isFinite(physicalMax) &&
+      physicalMax > 0
+    ) {
+      patch.zoom = parallelScaleToMviewOrthoZoom(
+        parallelScale,
+        physicalMax,
+        entry.baselineParallelScale
+      );
+    }
+
+    const height = Math.max(this.element.clientHeight || 1, 1);
+    patch.panX = (this.panOffset[0] * 2) / height;
+    patch.panY = (this.panOffset[1] * 2) / height;
   }
 
   /**
@@ -1074,6 +1503,28 @@ class VolumeViewport3D extends GenericViewport<
         fuberlin.canvas.height = targetHeight;
       }
     }
+
+    const mview = getMviewVolume3D(this.id);
+    if (mview) {
+      if (
+        mview.canvas.width !== targetWidth ||
+        mview.canvas.height !== targetHeight
+      ) {
+        mview.canvas.width = targetWidth;
+        mview.canvas.height = targetHeight;
+      }
+    }
+
+    const slicerLive = getSlicerLiveVolume3D(this.id);
+    if (slicerLive) {
+      if (
+        slicerLive.canvas.width !== targetWidth ||
+        slicerLive.canvas.height !== targetHeight
+      ) {
+        slicerLive.canvas.width = targetWidth;
+        slicerLive.canvas.height = targetHeight;
+      }
+    }
   }
 }
 
@@ -1090,7 +1541,9 @@ function isVolume3DData(data: LoadedData): data is LoadedData<Volume3DPayload> {
     (payload.type === 'image' &&
       (payload.renderMode === 'vtkVolume3d' ||
         payload.renderMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
-        payload.renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE)) ||
+        payload.renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE ||
+        payload.renderMode === MVIEW_VOLUME_3D_RENDER_MODE ||
+        payload.renderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE)) ||
     (payload.type === 'geometry' && payload.renderMode === 'vtkGeometry3d')
   );
 }
@@ -1102,6 +1555,8 @@ function isVolume3DRendering(rendering: {
     rendering.renderMode === 'vtkVolume3d' ||
     rendering.renderMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
     rendering.renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE ||
+    rendering.renderMode === MVIEW_VOLUME_3D_RENDER_MODE ||
+    rendering.renderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE ||
     rendering.renderMode === 'vtkGeometry3d'
   );
 }
@@ -1111,11 +1566,15 @@ function isVolume3DVolumeRenderMode(
 ): renderMode is
   | 'vtkVolume3d'
   | typeof WEBGPU_VOLUME_3D_RENDER_MODE
-  | typeof FUBERLIN_VOLUME_3D_RENDER_MODE {
+  | typeof FUBERLIN_VOLUME_3D_RENDER_MODE
+  | typeof MVIEW_VOLUME_3D_RENDER_MODE
+  | typeof SLICERLIVE_VOLUME_3D_RENDER_MODE {
   return (
     renderMode === 'vtkVolume3d' ||
     renderMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
-    renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE
+    renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE ||
+    renderMode === MVIEW_VOLUME_3D_RENDER_MODE ||
+    renderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE
   );
 }
 
@@ -1138,6 +1597,12 @@ function isVolume3DFuberlinRendering(
   rendering: Volume3DRendering
 ): rendering is Volume3DFuberlinRendering {
   return rendering.renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE;
+}
+
+function isVolume3DMviewRendering(
+  rendering: Volume3DRendering
+): rendering is Volume3DMviewRendering {
+  return rendering.renderMode === MVIEW_VOLUME_3D_RENDER_MODE;
 }
 
 function isVolume3DRegisteredDataSet(

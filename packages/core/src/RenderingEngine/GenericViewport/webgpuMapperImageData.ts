@@ -3,6 +3,8 @@ import vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
 import cache from '../../cache/cache';
 import type { IImageVolume } from '../../types';
 
+type ScalarReadiness = 'placeholder' | 'partial' | 'complete';
+
 type MapperImageDataEntry = {
   imageData: ReturnType<typeof vtkImageData.newInstance>;
   refCount: number;
@@ -32,6 +34,40 @@ function fingerprintScalars(values: ArrayLike<number>): string {
   return `${n}:${Number(values[0])}:${Number(values[n >> 1])}:${Number(values[n - 1])}:${sum}`;
 }
 
+function getExpectedScalarLength(imageVolume: IImageVolume): number {
+  const dims =
+    imageVolume.dimensions ?? imageVolume.imageData?.getDimensions?.();
+  const expectedVoxels =
+    dims && dims.length >= 3 ? Math.max(1, dims[0] * dims[1] * dims[2]) : 0;
+  const componentsMeta = imageVolume.imageData?.get?.('numberOfComponents') as
+    | { numberOfComponents?: number }
+    | undefined;
+  const components = Math.max(1, componentsMeta?.numberOfComponents ?? 1);
+  return expectedVoxels * components;
+}
+
+/**
+ * True when mapper scalars are safe to treat as final at acquire time.
+ * Streaming volumes require loadStatus.loaded; static volumes require fully
+ * materialized scalars (not placeholder or partial cache assembly).
+ */
+export function isVolumeScalarsReadyForUpload(
+  imageVolume: IImageVolume,
+  scalarReadiness: ScalarReadiness
+): boolean {
+  if (scalarReadiness !== 'complete') {
+    return false;
+  }
+
+  const loadStatus = imageVolume.loadStatus as { loaded?: boolean } | undefined;
+
+  if (loadStatus !== undefined) {
+    return loadStatus.loaded === true;
+  }
+
+  return true;
+}
+
 /**
  * Shared mapper-input imageData per volume. Materializing voxel data is a full
  * copy (cornerstone volumes are image-backed and own no contiguous array), so
@@ -44,28 +80,15 @@ export function acquireWebGPUMapperImageData(
   let entry = mapperImageDataByVolumeId.get(volumeId);
 
   if (!entry) {
-    const imageData = createMapperImageData(imageVolume);
+    const { imageData, scalarReadiness } = createMapperImageData(imageVolume);
     const scalars = imageData.getPointData().getScalars()?.getData?.();
-    const dims =
-      imageVolume.dimensions ?? imageVolume.imageData?.getDimensions?.();
-    const expectedVoxels =
-      dims && dims.length >= 3 ? Math.max(1, dims[0] * dims[1] * dims[2]) : 0;
-    const componentsMeta = imageVolume.imageData?.get?.(
-      'numberOfComponents'
-    ) as { numberOfComponents?: number } | undefined;
-    const components = Math.max(1, componentsMeta?.numberOfComponents ?? 1);
-    const expectedLength = expectedVoxels * components;
-    const complete =
-      Boolean(scalars) &&
-      expectedLength > 0 &&
-      (scalars as ArrayLike<number>).length >= expectedLength;
+    const ready = isVolumeScalarsReadyForUpload(imageVolume, scalarReadiness);
 
     entry = {
       imageData,
       refCount: 0,
-      // Skip post-load rematerialize when create already has a full buffer.
-      refreshedAfterLoad: complete,
-      loadCompletedSeen: complete,
+      refreshedAfterLoad: ready,
+      loadCompletedSeen: ready,
       scalarFingerprint:
         scalars && (scalars as ArrayLike<number>).length > 0
           ? fingerprintScalars(scalars as ArrayLike<number>)
@@ -150,7 +173,10 @@ export function refreshWebGPUMapperScalars(
   return true;
 }
 
-function createMapperImageData(imageVolume: IImageVolume) {
+function createMapperImageData(imageVolume: IImageVolume): {
+  imageData: ReturnType<typeof vtkImageData.newInstance>;
+  scalarReadiness: ScalarReadiness;
+} {
   const sourceImageData = imageVolume.imageData;
 
   if (!sourceImageData) {
@@ -163,9 +189,11 @@ function createMapperImageData(imageVolume: IImageVolume) {
     | { numberOfComponents?: number }
     | undefined;
   const numberOfComponents = imageDataMetadata?.numberOfComponents ?? 1;
-  const values =
-    getVolumeScalarArray(imageVolume) ??
-    createEmptyScalarArray(sourceImageData, numberOfComponents);
+  const { values, scalarReadiness } = resolveMapperScalars(
+    imageVolume,
+    sourceImageData,
+    numberOfComponents
+  );
   const scalars = vtkDataArray.newInstance({
     name: 'Pixels',
     numberOfComponents,
@@ -208,7 +236,37 @@ function createMapperImageData(imageVolume: IImageVolume) {
     );
   }
 
-  return mapperImageData;
+  return { imageData: mapperImageData, scalarReadiness };
+}
+
+function resolveMapperScalars(
+  imageVolume: IImageVolume,
+  sourceImageData: ReturnType<typeof vtkImageData.newInstance>,
+  numberOfComponents: number
+): { values: ArrayLike<number>; scalarReadiness: ScalarReadiness } {
+  const fromCache = materializeFromCachedImages(imageVolume);
+
+  if (fromCache) {
+    const readiness: ScalarReadiness =
+      fromCache.loadedSlices >= fromCache.depth ? 'complete' : 'partial';
+    return { values: fromCache.data, scalarReadiness: readiness };
+  }
+
+  const values = getVolumeScalarArray(imageVolume);
+
+  if (values) {
+    const expectedLength = getExpectedScalarLength(imageVolume);
+    const readiness: ScalarReadiness =
+      expectedLength > 0 && values.length >= expectedLength
+        ? 'complete'
+        : 'partial';
+    return { values, scalarReadiness: readiness };
+  }
+
+  return {
+    values: createEmptyScalarArray(sourceImageData, numberOfComponents),
+    scalarReadiness: 'placeholder',
+  };
 }
 
 /**
@@ -242,7 +300,7 @@ export function getVolumeScalarArray(
 
   const fromCache = materializeFromCachedImages(imageVolume);
   if (fromCache) {
-    return fromCache;
+    return fromCache.data;
   }
 
   const sourceScalars = imageVolume.imageData
@@ -266,6 +324,12 @@ export function getVolumeScalarArray(
   return undefined;
 }
 
+type MaterializedFromCacheResult = {
+  data: ArrayLike<number>;
+  loadedSlices: number;
+  depth: number;
+};
+
 /**
  * Build a contiguous TypedArray from whichever volume slices are already in
  * the image cache (order-independent). Returns undefined until at least one
@@ -273,7 +337,7 @@ export function getVolumeScalarArray(
  */
 function materializeFromCachedImages(
   imageVolume: IImageVolume
-): ArrayLike<number> | undefined {
+): MaterializedFromCacheResult | undefined {
   const imageIds = imageVolume.imageIds;
   const dimensions =
     imageVolume.dimensions ?? imageVolume.imageData?.getDimensions?.();
@@ -362,7 +426,11 @@ function materializeFromCachedImages(
     }
   }
 
-  return loadedSlices > 0 ? scalarData : undefined;
+  if (loadedSlices <= 0) {
+    return undefined;
+  }
+
+  return { data: scalarData, loadedSlices, depth };
 }
 
 function createEmptyScalarArray(

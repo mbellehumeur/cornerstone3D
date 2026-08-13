@@ -22,6 +22,8 @@ export class DefaultVolume3DDataProvider implements Volume3DDataProvider {
         | 'vtkVolume3d'
         | 'webgpuVolume3d'
         | 'fuberlinVolume3D'
+        | 'mviewVolume3d'
+        | 'slicerLiveVolume3d'
         | 'vtkGeometry3d';
     }
   ): Promise<LoadedData<Volume3DVolumePayload | Volume3DGeometryPayload>> {
@@ -36,7 +38,9 @@ export class DefaultVolume3DDataProvider implements Volume3DDataProvider {
     if (
       options.renderMode === 'vtkVolume3d' ||
       options.renderMode === 'webgpuVolume3d' ||
-      options.renderMode === 'fuberlinVolume3D'
+      options.renderMode === 'fuberlinVolume3D' ||
+      options.renderMode === 'mviewVolume3d' ||
+      options.renderMode === 'slicerLiveVolume3d'
     ) {
       if (!dataSet?.imageIds?.length) {
         throw new Error(

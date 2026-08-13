@@ -2,7 +2,7 @@ import type { FuberlinCameraPatch } from '@mview/webgpu-volume-standalone';
 import type { ICamera, Point3 } from '../../../types';
 import type { Volume3DCamera } from './viewport3DTypes';
 
-export type FuberlinCameraConvertOptions = {
+export type MviewCameraConvertOptions = {
   /**
    * Volume direction cosines (9 floats: I, J, K axis directions in world).
    * Required to map CS LPS/world camera axes into mview's IJK-aligned volume space.
@@ -29,7 +29,7 @@ export type FuberlinCameraConvertOptions = {
 };
 
 /** Safe mview orthographic half-height (volume-normalized). */
-export const FUBERLIN_ORTHO_DEFAULT_HALF_HEIGHT = 0.55;
+export const MVIEW_ORTHO_DEFAULT_HALF_HEIGHT = 0.55;
 
 const ORTHO_HALF_HEIGHT_MIN = 0.05;
 const ORTHO_HALF_HEIGHT_MAX = 2;
@@ -38,9 +38,10 @@ const ORTHO_PAN_MAX = 2;
 /**
  * Map VTK parallelScale (mm half-height) → mview ortho zoom (volume-normalized).
  * Empty-scene resetCamera leaves parallelScale ≈ 1; only then fall back to the
- * mount-time baseline. Do not treat intentional zoom-in as bogus.
+ * mount-time baseline. Do not treat intentional zoom-in (small halfHeight) as
+ * bogus or the present will ignore ZoomTool while the overlay still updates.
  */
-export function parallelScaleToFuberlinOrthoZoom(
+export function parallelScaleToMviewOrthoZoom(
   parallelScale: number,
   physicalMax: number,
   baselineParallelScale?: number
@@ -184,9 +185,9 @@ export function getVolumeCenterWorld(imageData: {
  * `includeFraming` is true and values fall in a safe range — bad framing
  * previously blanked the present.
  */
-export function iCameraToFuberlinCamera(
+export function iCameraToMviewCamera(
   camera: Partial<Volume3DCamera | ICamera>,
-  options: FuberlinCameraConvertOptions = {}
+  options: MviewCameraConvertOptions = {}
 ): FuberlinCameraPatch | undefined {
   const viewPlaneNormal = camera.viewPlaneNormal as Point3 | undefined;
   const viewUp = camera.viewUp as Point3 | undefined;
@@ -249,7 +250,7 @@ export function iCameraToFuberlinCamera(
     Number.isFinite(physicalMax) &&
     physicalMax > 0
   ) {
-    patch.zoom = parallelScaleToFuberlinOrthoZoom(
+    patch.zoom = parallelScaleToMviewOrthoZoom(
       parallelScale,
       physicalMax,
       options.baselineParallelScale

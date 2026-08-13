@@ -1,4 +1,5 @@
 import type { VolumeRenderer } from '@mview/webgpu-volume-standalone';
+import type { SlicerLiveVolumeRenderer } from '@slicerlive/webgpu-render';
 import type vtkRenderer from '@kitware/vtk.js/Rendering/Core/Renderer';
 import type vtkVolume from '@kitware/vtk.js/Rendering/Core/Volume';
 import type vtkVolumeMapper from '@kitware/vtk.js/Rendering/Core/VolumeMapper';
@@ -31,6 +32,8 @@ export type Volume3DRenderMode =
   | 'vtkVolume3d'
   | 'webgpuVolume3d'
   | 'fuberlinVolume3D'
+  | 'mviewVolume3d'
+  | 'slicerLiveVolume3d'
   | 'vtkGeometry3d';
 export type Volume3DRequestedRenderMode = Volume3DRenderMode | 'auto';
 
@@ -51,7 +54,12 @@ export interface Volume3DSetDataOptions {
 export interface Volume3DVolumePayload {
   imageIds: string[];
   imageVolume: IImageVolume;
-  renderMode: 'vtkVolume3d' | 'webgpuVolume3d' | 'fuberlinVolume3D';
+  renderMode:
+    | 'vtkVolume3d'
+    | 'webgpuVolume3d'
+    | 'fuberlinVolume3D'
+    | 'mviewVolume3d'
+    | 'slicerLiveVolume3d';
   volumeId: string;
 }
 
@@ -159,6 +167,26 @@ export type Volume3DFuberlinRendering = MountedRendering<{
 }>;
 
 /** @internal */
+export type Volume3DMviewRendering = MountedRendering<{
+  renderMode: 'mviewVolume3d';
+  actorEntryUID: string;
+  defaultVOIRange?: VOIRange;
+  imageVolume: IImageVolume;
+  renderer: VolumeRenderer;
+  removeStreamingSubscriptions?: () => void;
+}>;
+
+/** @internal */
+export type Volume3DSlicerLiveRendering = MountedRendering<{
+  renderMode: 'slicerLiveVolume3d';
+  actorEntryUID: string;
+  defaultVOIRange?: VOIRange;
+  imageVolume: IImageVolume;
+  renderer: SlicerLiveVolumeRenderer;
+  removeStreamingSubscriptions?: () => void;
+}>;
+
+/** @internal */
 export type Volume3DGeometryRendering = MountedRendering<{
   renderMode: 'vtkGeometry3d';
   actors: ActorEntry[];
@@ -169,4 +197,6 @@ export type Volume3DGeometryRendering = MountedRendering<{
 export type Volume3DRendering =
   | Volume3DVolumeRendering
   | Volume3DFuberlinRendering
+  | Volume3DMviewRendering
+  | Volume3DSlicerLiveRendering
   | Volume3DGeometryRendering;
