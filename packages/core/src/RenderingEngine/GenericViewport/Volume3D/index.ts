@@ -107,6 +107,8 @@ export {
   setSlicerLiveVolume3DShadeCoeffs,
   setSlicerLiveVolume3DTargetMs,
   setSlicerLiveVolume3DValueRange,
+  setSlicerLiveVolume3DSegmentation,
+  clearSlicerLiveVolume3DSegmentation,
 } from './slicerLiveVolume3DRegistry';
 export type {
   SlicerLiveVolume3DLighting,

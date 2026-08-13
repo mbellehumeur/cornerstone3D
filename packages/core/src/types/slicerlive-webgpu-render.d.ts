@@ -36,6 +36,10 @@ declare module '@slicerlive/webgpu-render' {
     constructor(canvas: HTMLCanvasElement);
     initialize(): Promise<SlicerLiveVolumeRenderer>;
     setVolume(volume: SlicerLiveVolumeDescriptor): Promise<void>;
+    setSegmentation(
+      seg: SlicerLiveSegmentationDescriptor | null
+    ): Promise<void>;
+    clearSegmentation(): void;
     setTransferFunctions(tf: SlicerLiveTransferFunctions): void;
     setCamera(camera: Partial<SlicerLiveCameraState>): void;
     getParallelProjection(): boolean;
@@ -98,6 +102,14 @@ declare module '@slicerlive/webgpu-render' {
   export type SlicerLiveCropBox = {
     lo: [number, number, number];
     hi: [number, number, number];
+  };
+
+  export type SlicerLiveSegmentationDescriptor = {
+    lab: Uint8Array;
+    dimensions: [number, number, number];
+    ijkToWorld: number[] | ArrayLike<number>;
+    colors: Array<[number, number, number, number]>;
+    names?: Record<number, string>;
   };
 
   export function lutFromTransferFunctions(

@@ -319,11 +319,20 @@ class LabelmapImageReferenceResolver {
       labelmapImageIds: string[]
     ) => void
   ): string | undefined {
+    // Volume3D / SlicerLive / other non-stack viewports have no current imageId.
+    // Image-reference mapping is stack-only; callers treat undefined as "no mapping".
+    if (typeof viewport?.getCurrentImageId !== 'function') {
+      return;
+    }
+
     const referenceImageId = viewport.getCurrentImageId();
+    if (!referenceImageId) {
+      return;
+    }
 
     let viewableLabelmapImageIdFound = false;
     for (const labelmapImageId of labelmapImageIds) {
-      const viewableImageId = viewport.isReferenceViewable(
+      const viewableImageId = viewport.isReferenceViewable?.(
         { referencedImageId: labelmapImageId },
         { asOverlay: true }
       );

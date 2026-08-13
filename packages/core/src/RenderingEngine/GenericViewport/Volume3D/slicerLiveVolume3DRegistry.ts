@@ -1,4 +1,7 @@
-import type { SlicerLiveVolumeRenderer } from '@slicerlive/webgpu-render';
+import type {
+  SlicerLiveSegmentationDescriptor,
+  SlicerLiveVolumeRenderer,
+} from '@slicerlive/webgpu-render';
 import type { ViewportPreset } from '../../../types';
 import { viewportPresetToSlicerLiveAppearance } from './slicerLiveViewportPreset';
 
@@ -457,4 +460,24 @@ export function setSlicerLiveVolume3DCropEnabled(
   }
   entry.renderer.setCropEnabled(Boolean(enabled));
   return true;
+}
+
+/** @internal */
+export async function setSlicerLiveVolume3DSegmentation(
+  viewportId: string,
+  seg: SlicerLiveSegmentationDescriptor | null
+): Promise<boolean> {
+  const entry = entries.get(viewportId);
+  if (!entry) {
+    return false;
+  }
+  await entry.renderer.setSegmentation(seg);
+  return true;
+}
+
+/** @internal */
+export async function clearSlicerLiveVolume3DSegmentation(
+  viewportId: string
+): Promise<boolean> {
+  return setSlicerLiveVolume3DSegmentation(viewportId, null);
 }

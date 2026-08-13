@@ -126,6 +126,8 @@ import GenericVolumeViewport3D, {
   setSlicerLiveVolume3DShadeCoeffs,
   setSlicerLiveVolume3DTargetMs,
   setSlicerLiveVolume3DValueRange,
+  setSlicerLiveVolume3DSegmentation,
+  clearSlicerLiveVolume3DSegmentation,
   SLICERLIVE_VOLUME_3D_RENDER_MODE,
   WEBGPU_VOLUME_3D_RENDER_MODE,
 } from './RenderingEngine/GenericViewport/Volume3D';
@@ -574,6 +576,8 @@ export {
   setSlicerLiveVolume3DShadeCoeffs,
   setSlicerLiveVolume3DTargetMs,
   setSlicerLiveVolume3DValueRange,
+  setSlicerLiveVolume3DSegmentation,
+  clearSlicerLiveVolume3DSegmentation,
   SLICERLIVE_VOLUME_3D_RENDER_MODE,
   WEBGPU_VOLUME_3D_RENDER_MODE,
   isStatsOverlayVisible,
