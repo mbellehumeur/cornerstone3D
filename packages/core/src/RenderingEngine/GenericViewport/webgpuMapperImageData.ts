@@ -325,10 +325,31 @@ export function getVolumeScalarArray(
 }
 
 type MaterializedFromCacheResult = {
-  data: ArrayLike<number>;
+  data: ArrayLike<number> & {
+    set?: (array: ArrayLike<number>, offset?: number) => void;
+  };
   loadedSlices: number;
   depth: number;
+  loadedSliceIndices: number[];
+  dimensions: [number, number, number];
 };
+
+/**
+ * Progressive volume scalars from whatever slices are already in the image
+ * cache (order-independent). Prefer this over getCompleteScalarDataArray during
+ * streaming — that API often returns empty until slice 0 lands.
+ */
+export function materializeVolumeScalarsProgressive(imageVolume: IImageVolume):
+  | {
+      data: ArrayLike<number>;
+      dimensions: [number, number, number];
+      loadedSliceIndices: number[];
+      loadedSlices: number;
+      depth: number;
+    }
+  | undefined {
+  return materializeFromCachedImages(imageVolume);
+}
 
 /**
  * Build a contiguous TypedArray from whichever volume slices are already in
@@ -394,7 +415,7 @@ function materializeFromCachedImages(
   }
 
   const scalarData = new ScalarCtor(expectedLength);
-  let loadedSlices = 0;
+  const loadedSliceIndices: number[] = [];
 
   for (let sliceIndex = 0; sliceIndex < depth; sliceIndex++) {
     const imageId = imageIds[sliceIndex];
@@ -420,17 +441,23 @@ function materializeFromCachedImages(
       }
 
       scalarData.set(pixelData, sliceIndex * sliceSize);
-      loadedSlices += 1;
+      loadedSliceIndices.push(sliceIndex);
     } catch {
       // Skip unloaded / errored slices.
     }
   }
 
-  if (loadedSlices <= 0) {
+  if (loadedSliceIndices.length <= 0) {
     return undefined;
   }
 
-  return { data: scalarData, loadedSlices, depth };
+  return {
+    data: scalarData,
+    loadedSlices: loadedSliceIndices.length,
+    depth,
+    loadedSliceIndices,
+    dimensions: [width, height, depth],
+  };
 }
 
 function createEmptyScalarArray(

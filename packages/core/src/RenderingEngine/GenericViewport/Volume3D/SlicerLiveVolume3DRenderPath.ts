@@ -10,7 +10,10 @@ import type {
   RenderPathDefinition,
   RenderPath,
 } from '../ViewportArchitectureTypes';
-import { getVolumeScalarArray } from '../webgpuMapperImageData';
+import {
+  getVolumeScalarArray,
+  materializeVolumeScalarsProgressive,
+} from '../webgpuMapperImageData';
 import {
   getVolumeCenterWorld,
   getVolumePhysicalMax,
@@ -144,50 +147,140 @@ export class SlicerLiveVolume3DRenderPath
         ? { lower: scalarRange[0], upper: scalarRange[1] }
         : undefined;
 
-    let uploadInFlight: Promise<boolean> | undefined;
-    let loadCompletedSeen = false;
-    let refreshedAfterLoad = false;
+    let uploadQueue: Promise<unknown> = Promise.resolve();
+    /** Stops progressive scheduling / duplicate finish; set at start of finish. */
+    let streamingClosed = false;
+    let progressiveRaf = 0;
+    const dimensions =
+      imageVolume.dimensions ?? imageVolume.imageData?.getDimensions?.();
+    const depth = dimensions && dimensions.length >= 3 ? dimensions[2] : 0;
+    const uploadedSlices =
+      depth > 0 ? new Uint8Array(depth) : new Uint8Array(0);
 
     const revealCanvas = () => {
       canvas.style.visibility = '';
     };
 
-    const refreshScalars = async (
-      reason: string,
-      options: { warnIfEmpty?: boolean } = {}
-    ) => {
-      if (!this.renderer || refreshedAfterLoad) {
+    const syncValueRange = () => {
+      const voxelManager = imageVolume.voxelManager as
+        | { getRange?: () => number[] }
+        | undefined;
+      const range = voxelManager?.getRange?.();
+      if (this.viewportId && range && range.length === 2) {
+        setSlicerLiveVolume3DValueRange(this.viewportId, [range[0], range[1]]);
+        flushSlicerLiveVolume3DPendingPreset(this.viewportId);
+      }
+      return range && range.length === 2
+        ? ([range[0], range[1]] as [number, number])
+        : undefined;
+    };
+
+    const runUpload = <T>(task: () => Promise<T>): Promise<T> => {
+      const next = uploadQueue.then(task, task);
+      uploadQueue = next.then(
+        () => undefined,
+        () => undefined
+      );
+      return next;
+    };
+
+    const revealIfUploaded = (uploaded: boolean) => {
+      if (!uploaded || !this.renderer) {
         return;
       }
+      this.volumeUploaded = true;
+      revealCanvas();
+      this.renderer.requestRender();
+      ctx.display.renderNow();
+    };
 
-      const warnIfEmpty =
-        options.warnIfEmpty ??
-        (reason === 'load-callback' || reason === 'load-completed');
+    // Allocate a zero-filled GPU volume immediately so progressive slice
+    // patches have a texture to write into (geometry/camera ready).
+    void runUpload(async () => {
+      this.resizeCanvas(canvas, ctx.viewport.element);
+      await this.allocateEmptyVolume(renderer, imageVolume);
+      return false;
+    });
+
+    const uploadNewSlices = async (): Promise<boolean> => {
+      if (!this.renderer) {
+        return false;
+      }
 
       this.resizeCanvas(canvas, ctx.viewport.element);
 
-      if (!uploadInFlight) {
-        uploadInFlight = this.uploadVolume(this.renderer, imageVolume).finally(
-          () => {
-            uploadInFlight = undefined;
-          }
-        );
+      const progressive = materializeVolumeScalarsProgressive(imageVolume);
+      if (!progressive || !ArrayBuffer.isView(progressive.data)) {
+        return false;
       }
 
-      const uploaded = await uploadInFlight;
-      if (refreshedAfterLoad) {
+      const newIndices: number[] = [];
+      for (const z of progressive.loadedSliceIndices) {
+        if (!uploadedSlices[z]) {
+          newIndices.push(z);
+        }
+      }
+
+      if (newIndices.length === 0) {
+        return this.volumeUploaded || progressive.loadedSliceIndices.length > 0;
+      }
+
+      const valueRange = syncValueRange();
+      try {
+        await this.renderer.updateVolumeSlices({
+          data: progressive.data as unknown as ArrayBufferView,
+          dimensions: progressive.dimensions,
+          sliceIndices: newIndices,
+          valueRange,
+        });
+        for (const z of newIndices) {
+          uploadedSlices[z] = 1;
+        }
+        return true;
+      } catch (error) {
+        console.error('[SlicerLiveVolume3D] updateVolumeSlices failed', error);
+        return false;
+      }
+    };
+
+    const scheduleProgressiveRefresh = () => {
+      if (streamingClosed || progressiveRaf) {
         return;
       }
+      progressiveRaf = requestAnimationFrame(() => {
+        progressiveRaf = 0;
+        if (streamingClosed) {
+          return;
+        }
+        void runUpload(async () => uploadNewSlices()).then(revealIfUploaded);
+      });
+    };
+
+    const finishStreaming = async (reason: string) => {
+      if (streamingClosed) {
+        return;
+      }
+      streamingClosed = true;
+      if (progressiveRaf) {
+        cancelAnimationFrame(progressiveRaf);
+        progressiveRaf = 0;
+      }
+
+      const uploaded = await runUpload(async () => {
+        // Prefer slice patches for anything still missing; fall back to a full
+        // setVolume so non-imageId volumes still land.
+        const patched = await uploadNewSlices();
+        if (patched) {
+          return true;
+        }
+        return this.uploadVolume(this.renderer!, imageVolume);
+      });
 
       if (uploaded) {
-        this.volumeUploaded = true;
-        refreshedAfterLoad = true;
-        revealCanvas();
-        this.renderer.requestRender();
-        ctx.display.renderNow();
-      } else if (warnIfEmpty) {
+        revealIfUploaded(true);
+      } else {
         console.warn(
-          `[SlicerLiveVolume3D] No scalars yet (${reason}); waiting for volume events`
+          `[SlicerLiveVolume3D] No scalars after ${reason}; volume may be empty`
         );
       }
     };
@@ -202,22 +295,29 @@ export class SlicerLiveVolume3DRenderPath
         payload.volumeId,
         (eventType) => {
           if (eventType === Events.IMAGE_VOLUME_LOADING_COMPLETED) {
-            loadCompletedSeen = true;
-            void refreshScalars('load-completed');
+            void finishStreaming('load-completed');
             return;
           }
 
-          if (loadCompletedSeen && !refreshedAfterLoad) {
-            void refreshScalars('volume-modified', { warnIfEmpty: false });
-          }
+          // Progressive per-slice patches (coalesced to one rAF).
+          scheduleProgressiveRefresh();
         }
       ),
     };
 
     attachVolumeLoadCallback(imageVolume, () => {
-      loadCompletedSeen = true;
-      void refreshScalars('load-callback');
+      void finishStreaming('load-callback');
     });
+
+    // If some frames already arrived before we subscribed, upload them now.
+    scheduleProgressiveRefresh();
+
+    // Volume already fully loaded (cached) — finish immediately.
+    const loadStatus = (imageVolume as { loadStatus?: { loaded?: boolean } })
+      .loadStatus;
+    if (loadStatus?.loaded) {
+      void finishStreaming('already-loaded');
+    }
 
     return {
       rendering,
@@ -240,6 +340,9 @@ export class SlicerLiveVolume3DRenderPath
         this.resize(ctx);
       },
       removeData: () => {
+        if (progressiveRaf) {
+          cancelAnimationFrame(progressiveRaf);
+        }
         this.removeData(ctx, rendering);
       },
     };
@@ -365,6 +468,40 @@ export class SlicerLiveVolume3DRenderPath
     container.appendChild(canvas);
     this.canvas = canvas;
     return canvas;
+  }
+
+  private async allocateEmptyVolume(
+    renderer: SlicerLiveVolumeRenderer,
+    imageVolume: IImageVolume
+  ): Promise<boolean> {
+    const dimensions =
+      imageVolume.dimensions ?? imageVolume.imageData?.getDimensions?.();
+    const spacing =
+      imageVolume.spacing ?? imageVolume.imageData?.getSpacing?.();
+    const origin = imageVolume.origin ?? imageVolume.imageData?.getOrigin?.();
+
+    if (!dimensions || !spacing || dimensions.length < 3) {
+      return false;
+    }
+
+    const [dx, dy, dz] = dimensions;
+    const total = Math.max(1, dx * dy * dz);
+
+    try {
+      await renderer.setVolume({
+        data: new Float32Array(total),
+        dimensions: dimensions as [number, number, number],
+        spacing: spacing as [number, number, number],
+        origin: origin as [number, number, number] | undefined,
+        direction: this.volumeDirection,
+        valueRange: [0, 1],
+        label: imageVolume.volumeId,
+      });
+      return true;
+    } catch (error) {
+      console.error('[SlicerLiveVolume3D] allocateEmptyVolume failed', error);
+      return false;
+    }
   }
 
   private async uploadVolume(

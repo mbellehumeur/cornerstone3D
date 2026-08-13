@@ -740,6 +740,8 @@ async function createLabelmapsFromSegImageIds(
     // providers (notably OHIF's) short-circuit `get('instance', ...)` before
     // consulting custom metadata, so a synthetic SEG imageId is not retrievable.
     multiframe: providedMultiframe = undefined,
+    /** Fired once empty labelmap image scaffolding exists (for progressive GPU upload). */
+    onLabelMapImagesCreated = undefined,
   } = options ?? {};
 
   let multiframe = providedMultiframe;
@@ -897,6 +899,20 @@ async function createLabelmapsFromSegImageIds(
     labelMapImages.push(labelMapImage);
   }
 
+  // Publish live scaffolding so progressive consumers can read slices as they fill.
+  try {
+    onLabelMapImagesCreated?.({
+      labelMapImages,
+      segMetadata,
+      referencedImageIds,
+    });
+  } catch (e) {
+    console.warn(
+      '[createLabelmapsFromSegImageIds] onLabelMapImagesCreated failed',
+      e
+    );
+  }
+
   // This is the centroid calculation for each segment Index, the data structure
   // is a Map with key = segmentIndex and value = {imageIdIndex: centroid, ...}
   // later on we will use this data structure to calculate the centroid of the
@@ -945,9 +961,10 @@ async function createLabelmapsFromSegImageIds(
 }
 
 const throttledTriggerLoadProgressEvent = cstUtils.throttle(
-  (percentComplete) => {
+  (percentComplete, filledSliceCount) => {
     triggerEvent(eventTarget, Events.SEGMENTATION_LOAD_PROGRESS, {
       percentComplete,
+      filledSliceCount,
     });
   },
   200
@@ -993,6 +1010,7 @@ export function insertPixelDataPlanar({
       : groupsLenFromMetadata;
 
   let overlapping = false;
+  const filledSliceIndices = new Set();
   // Below, we chunk the processing of the frames to avoid blocking the main thread
   // if the segmentation is large. We also use a promise to allow the caller to
   // wait for the processing to finish.
@@ -1156,10 +1174,14 @@ export function insertPixelDataPlanar({
         const segmentIndexObject = segmentsPixelIndices.get(segmentIndex);
         segmentIndexObject[imageIdIndex] = indexCache;
         segmentsPixelIndices.set(segmentIndex, segmentIndexObject);
+        filledSliceIndices.add(imageIdIndex);
       }
 
       const percentComplete = Math.round((firstIndex / groupsLen) * 100);
-      throttledTriggerLoadProgressEvent(percentComplete);
+      throttledTriggerLoadProgressEvent(
+        percentComplete,
+        filledSliceIndices.size
+      );
 
       if (firstIndex < groupsLen) {
         setTimeout(() => processChunk(firstIndex + imagesPerChunk), 0);
@@ -1295,9 +1317,13 @@ export function insertPixelDataPlanar({
             segmentPixelInfo[imageIdIndex].push(k);
           }
         }
+        filledSliceIndices.add(imageIdIndex);
       }
       const percentComplete = Math.round((firstIndex / groupsLen) * 100);
-      throttledTriggerLoadProgressEvent(percentComplete);
+      throttledTriggerLoadProgressEvent(
+        percentComplete,
+        filledSliceIndices.size
+      );
       if (firstIndex < groupsLen) {
         setTimeout(() => processLabelmapChunk(firstIndex + imagesPerChunk), 0);
       } else {

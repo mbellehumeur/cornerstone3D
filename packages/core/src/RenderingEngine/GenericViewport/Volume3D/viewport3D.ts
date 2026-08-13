@@ -236,7 +236,7 @@ class VolumeViewport3D extends GenericViewport<
       'data-rendering-engine-uid',
       this.renderingEngineId
     );
-    this.setRenderModeVisibility('vtkVolume3d');
+    this.setRenderModeVisibility('slicerLiveVolume3d');
   }
 
   /**
@@ -386,7 +386,7 @@ class VolumeViewport3D extends GenericViewport<
    * Active Volume3D render mode (`vtkVolume3d` | `webgpuVolume3d` |
    * `fuberlinVolume3D` | `vtkGeometry3d`). Used by OHIF overlay badges.
    * Prefers the mounted binding's render mode so the badge is correct as soon
-   * as data is attached (not the constructor default `vtkVolume3d`).
+   * as data is attached (not the constructor default `slicerLiveVolume3d`).
    */
   getActiveRenderMode(): Volume3DRenderMode {
     const binding = this.getCurrentBinding();
@@ -1211,7 +1211,7 @@ class VolumeViewport3D extends GenericViewport<
     return [];
   }
 
-  private activeRenderMode: Volume3DRenderMode = 'vtkVolume3d';
+  private activeRenderMode: Volume3DRenderMode = 'slicerLiveVolume3d';
 
   private setRenderModeVisibility(renderMode: Volume3DRenderMode): void {
     const modeChanged = this.activeRenderMode !== renderMode;

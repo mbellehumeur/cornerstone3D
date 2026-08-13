@@ -1,5 +1,7 @@
 import type {
+  SlicerLiveSegmentationBegin,
   SlicerLiveSegmentationDescriptor,
+  SlicerLiveSegmentationSliceUpdate,
   SlicerLiveVolumeRenderer,
 } from '@slicerlive/webgpu-render';
 import type { ViewportPreset } from '../../../types';
@@ -472,6 +474,44 @@ export async function setSlicerLiveVolume3DSegmentation(
     return false;
   }
   await entry.renderer.setSegmentation(seg);
+  return true;
+}
+
+/** @internal */
+export async function beginSlicerLiveVolume3DSegmentation(
+  viewportId: string,
+  begin: SlicerLiveSegmentationBegin
+): Promise<boolean> {
+  const entry = entries.get(viewportId);
+  if (!entry) {
+    return false;
+  }
+  await entry.renderer.beginSegmentation(begin);
+  return true;
+}
+
+/** @internal */
+export async function updateSlicerLiveVolume3DSegmentationSlices(
+  viewportId: string,
+  update: SlicerLiveSegmentationSliceUpdate
+): Promise<boolean> {
+  const entry = entries.get(viewportId);
+  if (!entry) {
+    return false;
+  }
+  await entry.renderer.updateSegmentationSlices(update);
+  return true;
+}
+
+/** @internal */
+export async function finalizeSlicerLiveVolume3DSegmentation(
+  viewportId: string
+): Promise<boolean> {
+  const entry = entries.get(viewportId);
+  if (!entry) {
+    return false;
+  }
+  await entry.renderer.finalizeSegmentation();
   return true;
 }
 

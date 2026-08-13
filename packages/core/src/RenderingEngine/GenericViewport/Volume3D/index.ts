@@ -108,6 +108,9 @@ export {
   setSlicerLiveVolume3DTargetMs,
   setSlicerLiveVolume3DValueRange,
   setSlicerLiveVolume3DSegmentation,
+  beginSlicerLiveVolume3DSegmentation,
+  updateSlicerLiveVolume3DSegmentationSlices,
+  finalizeSlicerLiveVolume3DSegmentation,
   clearSlicerLiveVolume3DSegmentation,
 } from './slicerLiveVolume3DRegistry';
 export type {

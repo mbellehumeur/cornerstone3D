@@ -12,6 +12,13 @@ declare module '@slicerlive/webgpu-render' {
     label?: string;
   };
 
+  export type SlicerLiveVolumeSliceUpdate = {
+    data: ArrayBufferView;
+    dimensions: [number, number, number];
+    sliceIndices: number[];
+    valueRange?: [number, number];
+  };
+
   export type SlicerLiveCameraState = {
     position: [number, number, number];
     focalPoint: [number, number, number];
@@ -36,9 +43,15 @@ declare module '@slicerlive/webgpu-render' {
     constructor(canvas: HTMLCanvasElement);
     initialize(): Promise<SlicerLiveVolumeRenderer>;
     setVolume(volume: SlicerLiveVolumeDescriptor): Promise<void>;
+    updateVolumeSlices(update: SlicerLiveVolumeSliceUpdate): Promise<void>;
     setSegmentation(
       seg: SlicerLiveSegmentationDescriptor | null
     ): Promise<void>;
+    beginSegmentation(begin: SlicerLiveSegmentationBegin): Promise<void>;
+    updateSegmentationSlices(
+      update: SlicerLiveSegmentationSliceUpdate
+    ): Promise<void>;
+    finalizeSegmentation(): Promise<void>;
     clearSegmentation(): void;
     setTransferFunctions(tf: SlicerLiveTransferFunctions): void;
     setCamera(camera: Partial<SlicerLiveCameraState>): void;
@@ -110,6 +123,19 @@ declare module '@slicerlive/webgpu-render' {
     ijkToWorld: number[] | ArrayLike<number>;
     colors: Array<[number, number, number, number]>;
     names?: Record<number, string>;
+  };
+
+  export type SlicerLiveSegmentationBegin = {
+    dimensions: [number, number, number];
+    ijkToWorld: number[] | ArrayLike<number>;
+    colors: Array<[number, number, number, number]>;
+    names?: Record<number, string>;
+  };
+
+  export type SlicerLiveSegmentationSliceUpdate = {
+    lab: Uint8Array;
+    dimensions: [number, number, number];
+    sliceIndices: number[];
   };
 
   export function lutFromTransferFunctions(

@@ -101,6 +101,7 @@ function createFromDicomSegImageId(
     getFrameImageId = undefined,
     decodeImageData = undefined,
     concurrency = undefined,
+    onLabelMapImagesCreated = undefined,
   }
 ) {
   return createLabelmapsFromSegImageIds(
@@ -114,6 +115,7 @@ function createFromDicomSegImageId(
       getFrameImageId,
       decodeImageData,
       concurrency,
+      onLabelMapImagesCreated,
     }
   );
 }
