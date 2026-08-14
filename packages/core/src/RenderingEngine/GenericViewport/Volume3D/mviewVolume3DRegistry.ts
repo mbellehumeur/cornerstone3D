@@ -15,6 +15,9 @@ export type MviewVolume3DPresentQuality = number;
 /** Slider default: visually matches OHIF/webgpuVolume3d (not slider max). */
 export const MVIEW_DEFAULT_PRESENT_QUALITY = 0.18;
 
+/** End-of-drag FPS target. 0 = off. */
+export const MVIEW_DEFAULT_TARGET_FPS = 30;
+
 const MVIEW_RENDER_MODES: ReadonlySet<string> = new Set([
   'surface',
   'composite',
@@ -37,6 +40,10 @@ export type MviewVolume3DEntry = {
   volumeCenter?: [number, number, number];
   /** Present quality blend: 0 = mview, 1 = OHIF (default). */
   presentQuality?: MviewVolume3DPresentQuality;
+  /** End-of-drag FPS target when enabled. Default 30. */
+  targetFps?: number;
+  /** When false, FPS targeting is off. Default true. */
+  targetFpsEnabled?: boolean;
   /** Volume scalar range used to normalize VIEWPORT_PRESET HU curves. */
   valueRange?: [number, number];
   /** Preset applied before scalars were ready; flushed after upload. */
@@ -59,6 +66,8 @@ export function registerMviewVolume3D(
     volumePhysicalMax: entry.volumePhysicalMax ?? existing?.volumePhysicalMax,
     volumeCenter: entry.volumeCenter ?? existing?.volumeCenter,
     presentQuality: entry.presentQuality ?? existing?.presentQuality,
+    targetFps: entry.targetFps ?? existing?.targetFps,
+    targetFpsEnabled: entry.targetFpsEnabled ?? existing?.targetFpsEnabled,
     baselineParallelScale:
       entry.baselineParallelScale ?? existing?.baselineParallelScale,
   });
@@ -342,6 +351,109 @@ export function getMviewVolume3DPresentQuality(
     : MVIEW_DEFAULT_PRESENT_QUALITY;
 }
 
+/**
+ * Configured drag FPS target (slider value). Always >= 1; use
+ * getMviewVolume3DTargetFpsEnabled for on/off.
+ *
+ * @internal
+ */
+export function getMviewVolume3DTargetFps(
+  viewportId: string
+): number | undefined {
+  const entry = entries.get(viewportId);
+
+  if (!entry) {
+    return undefined;
+  }
+
+  const fps = Number(entry.targetFps);
+  return Number.isFinite(fps) && fps > 0
+    ? Math.min(240, Math.max(1, Math.round(fps)))
+    : MVIEW_DEFAULT_TARGET_FPS;
+}
+
+/**
+ * Whether end-of-drag FPS targeting is on. Default true.
+ *
+ * @internal
+ */
+export function getMviewVolume3DTargetFpsEnabled(
+  viewportId: string
+): boolean | undefined {
+  const entry = entries.get(viewportId);
+
+  if (!entry) {
+    return undefined;
+  }
+
+  if (entry.targetFpsEnabled === false) {
+    return false;
+  }
+  if (entry.targetFpsEnabled === true) {
+    return true;
+  }
+  // Legacy: targetFps 0 meant off.
+  return Number(entry.targetFps) !== 0;
+}
+
+function applyMviewVolume3DTargetFps(viewportId: string): void {
+  const entry = entries.get(viewportId);
+
+  if (!entry) {
+    return;
+  }
+
+  const enabled = getMviewVolume3DTargetFpsEnabled(viewportId) !== false;
+  const target =
+    getMviewVolume3DTargetFps(viewportId) ?? MVIEW_DEFAULT_TARGET_FPS;
+  entry.renderer.setTargetFps(enabled ? target : 0);
+}
+
+/**
+ * Set the drag FPS target (slider). Does not turn the feature off.
+ *
+ * @internal
+ */
+export function setMviewVolume3DTargetFps(
+  viewportId: string,
+  fps: number
+): boolean {
+  const entry = entries.get(viewportId);
+
+  if (!entry || !Number.isFinite(fps) || fps <= 0) {
+    return false;
+  }
+
+  entry.targetFps = Math.min(240, Math.max(1, Math.round(fps)));
+  applyMviewVolume3DTargetFps(viewportId);
+  return true;
+}
+
+/**
+ * Turn end-of-drag FPS targeting on or off. Off restores Resolution ceilings.
+ *
+ * @internal
+ */
+export function setMviewVolume3DTargetFpsEnabled(
+  viewportId: string,
+  enabled: boolean
+): boolean {
+  const entry = entries.get(viewportId);
+
+  if (!entry) {
+    return false;
+  }
+
+  entry.targetFpsEnabled = Boolean(enabled);
+  applyMviewVolume3DTargetFps(viewportId);
+  setMviewVolume3DPresentQuality(
+    viewportId,
+    entry.presentQuality ?? MVIEW_DEFAULT_PRESENT_QUALITY
+  );
+
+  return true;
+}
+
 /** Stock mview ray budgets (VolumeRenderer defaults). */
 const MVIEW_STILL_STEPS = 224;
 const MVIEW_STILL_PIXEL_BUDGET = 2_400_000;
@@ -356,6 +468,8 @@ const OHIF_STILL_MAXIMUM_SCALE = 1;
  * plus TrackballRotateTool rotateSampleDistanceFactor 2 → half the samples.
  */
 const OHIF_INTERACTIVE_SCALE = 0.5;
+/** Floor for Target FPS steering (full-res ceiling when targeting is on). */
+const OHIF_INTERACTIVE_MINIMUM_SCALE = 0.2;
 const OHIF_INTERACTIVE_SAMPLE_FACTOR = 2;
 /** WGSL raymarch loops are hard-capped at this (see shaders.js). */
 const MVIEW_MAX_RAY_STEPS = 4000;
@@ -403,8 +517,10 @@ function ohifLikeStillSteps(renderer: VolumeRenderer): number {
 }
 
 /**
- * Quality blend for settled frames: t=0 mview, t=1 max density.
- * Interactive always matches webgpuVolume3d drag (half-res + half steps).
+ * Quality profiles for still / interactive presents.
+ * Target FPS off: Resolution slider blends still and forces half-res drag.
+ * Target FPS on: Resolution does not apply — full-res ceilings; end-of-drag
+ * budget alone lowers interactive quality (still settles at full OHIF density).
  *
  * @internal
  */
@@ -422,19 +538,36 @@ export function setMviewVolume3DPresentQuality(
   entry.presentQuality = t;
 
   const ohifSteps = ohifLikeStillSteps(entry.renderer);
-  const stillSteps = Math.round(lerp(MVIEW_STILL_STEPS, ohifSteps, t));
-  const interactiveSteps = Math.max(
-    16,
-    Math.round(stillSteps / OHIF_INTERACTIVE_SAMPLE_FACTOR)
-  );
+  const targeting = getMviewVolume3DTargetFpsEnabled(viewportId) !== false;
 
+  if (targeting) {
+    entry.renderer.setQualityProfiles({
+      interactive: {
+        pixelBudget: OHIF_PIXEL_BUDGET,
+        minimumScale: OHIF_INTERACTIVE_MINIMUM_SCALE,
+        maximumScale: OHIF_STILL_MAXIMUM_SCALE,
+        steps: ohifSteps,
+      },
+      still: {
+        pixelBudget: OHIF_PIXEL_BUDGET,
+        minimumScale: OHIF_STILL_MINIMUM_SCALE,
+        maximumScale: OHIF_STILL_MAXIMUM_SCALE,
+        steps: ohifSteps,
+      },
+    });
+    return true;
+  }
+
+  const stillSteps = Math.round(lerp(MVIEW_STILL_STEPS, ohifSteps, t));
   entry.renderer.setQualityProfiles({
-    // Always OHIF TrackballRotate drag parity — not blended with Resolution t.
     interactive: {
       pixelBudget: OHIF_PIXEL_BUDGET,
       minimumScale: OHIF_INTERACTIVE_SCALE,
       maximumScale: OHIF_INTERACTIVE_SCALE,
-      steps: interactiveSteps,
+      steps: Math.max(
+        16,
+        Math.round(stillSteps / OHIF_INTERACTIVE_SAMPLE_FACTOR)
+      ),
     },
     still: {
       pixelBudget: Math.round(

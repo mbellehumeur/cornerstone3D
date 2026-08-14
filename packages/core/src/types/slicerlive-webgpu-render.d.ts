@@ -53,12 +53,15 @@ declare module '@slicerlive/webgpu-render' {
     ): Promise<void>;
     finalizeSegmentation(): Promise<void>;
     clearSegmentation(): void;
+    setSegmentAppearance(appearances: SlicerLiveSegmentAppearance[]): boolean;
     setTransferFunctions(tf: SlicerLiveTransferFunctions): void;
     setCamera(camera: Partial<SlicerLiveCameraState>): void;
     getParallelProjection(): boolean;
     setParallelProjection(parallel: boolean): void;
     getShade(): boolean;
     setShade(enabled: boolean): void;
+    getVolumeOpacity(): number;
+    setVolumeOpacity(opacity: number): void;
     getShadeCoeffs(): [number, number, number, number];
     setShadeCoeffs(coeffs: [number, number, number, number]): void;
     getInteractionQuality(): number;
@@ -115,6 +118,12 @@ declare module '@slicerlive/webgpu-render' {
   export type SlicerLiveCropBox = {
     lo: [number, number, number];
     hi: [number, number, number];
+  };
+
+  export type SlicerLiveSegmentAppearance = {
+    num: number;
+    color?: [number, number, number];
+    opacity: number;
   };
 
   export type SlicerLiveSegmentationDescriptor = {

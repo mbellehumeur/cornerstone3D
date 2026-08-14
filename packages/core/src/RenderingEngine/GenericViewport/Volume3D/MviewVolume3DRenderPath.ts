@@ -21,10 +21,15 @@ import {
   applyMviewVolume3DPreset,
   flushMviewVolume3DPendingPreset,
   MVIEW_DEFAULT_PRESENT_QUALITY,
+  MVIEW_DEFAULT_TARGET_FPS,
   getMviewVolume3DPresentQuality,
   getMviewVolume3DProjection,
+  getMviewVolume3DTargetFps,
+  getMviewVolume3DTargetFpsEnabled,
   registerMviewVolume3D,
   setMviewVolume3DPresentQuality,
+  setMviewVolume3DTargetFps,
+  setMviewVolume3DTargetFpsEnabled,
   setMviewVolume3DValueRange,
   unregisterMviewVolume3D,
 } from './mviewVolume3DRegistry';
@@ -96,6 +101,7 @@ export class MviewVolume3DRenderPath
       opacity: 1,
       shade: true,
       background: [0, 0, 0],
+      targetFps: MVIEW_DEFAULT_TARGET_FPS,
       camera: {
         projection: 'orthographic',
         zoom: 0.55,
@@ -128,7 +134,16 @@ export class MviewVolume3DRenderPath
     // ~0.25 matches webgpuVolume3d default look; slider max (1) is denser than OHIF.
     setMviewVolume3DPresentQuality(
       ctx.viewportId,
-      MVIEW_DEFAULT_PRESENT_QUALITY
+      getMviewVolume3DPresentQuality(ctx.viewportId) ??
+        MVIEW_DEFAULT_PRESENT_QUALITY
+    );
+    setMviewVolume3DTargetFps(
+      ctx.viewportId,
+      getMviewVolume3DTargetFps(ctx.viewportId) ?? MVIEW_DEFAULT_TARGET_FPS
+    );
+    setMviewVolume3DTargetFpsEnabled(
+      ctx.viewportId,
+      getMviewVolume3DTargetFpsEnabled(ctx.viewportId) ?? true
     );
 
     // Seed CT-Bone until OHIF/HP applies a specific preset (or after upload).

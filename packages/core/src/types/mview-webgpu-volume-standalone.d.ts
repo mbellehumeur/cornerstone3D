@@ -63,6 +63,27 @@ declare module '@mview/webgpu-volume-standalone' {
         steps?: number;
       };
     }): void;
+    setTargetFps(fps: number): void;
+    getTargetFps(): number;
+    getStats(): {
+      fps: number;
+      frameMs: number;
+      gpuWaitMs: number;
+      width: number;
+      height: number;
+      steps: number;
+      scale: number;
+      mode: string;
+      interacting: boolean;
+      targetFps: number;
+      budgetPx: number;
+      lastDragAvgFps: number;
+      lastDragFrames: number;
+      lastDragBudgetFrom: number;
+      lastDragBudgetTo: number;
+      lastDragScale: number;
+      lastDragSteps: number;
+    };
     rotateTrackball(
       deltaX: number,
       deltaY: number,

@@ -193,6 +193,30 @@ export function getSlicerLiveVolume3DShade(
 }
 
 /** @internal */
+export function getSlicerLiveVolume3DVolumeOpacity(
+  viewportId: string
+): number | undefined {
+  const entry = entries.get(viewportId);
+  if (!entry) {
+    return undefined;
+  }
+  return entry.renderer.getVolumeOpacity();
+}
+
+/** @internal */
+export function setSlicerLiveVolume3DVolumeOpacity(
+  viewportId: string,
+  opacity: number
+): boolean {
+  const entry = entries.get(viewportId);
+  if (!entry) {
+    return false;
+  }
+  entry.renderer.setVolumeOpacity(opacity);
+  return true;
+}
+
+/** @internal */
 export function setSlicerLiveVolume3DShade(
   viewportId: string,
   shade: boolean
@@ -520,4 +544,20 @@ export async function clearSlicerLiveVolume3DSegmentation(
   viewportId: string
 ): Promise<boolean> {
   return setSlicerLiveVolume3DSegmentation(viewportId, null);
+}
+
+/** @internal */
+export function setSlicerLiveVolume3DSegmentAppearance(
+  viewportId: string,
+  appearances: Array<{
+    num: number;
+    color?: [number, number, number];
+    opacity: number;
+  }>
+): boolean {
+  const entry = entries.get(viewportId);
+  if (!entry) {
+    return false;
+  }
+  return entry.renderer.setSegmentAppearance(appearances);
 }

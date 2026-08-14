@@ -384,8 +384,8 @@ class VolumeViewport3D extends GenericViewport<
 
   /**
    * Active Volume3D render mode (`vtkVolume3d` | `webgpuVolume3d` |
-   * `fuberlinVolume3D` | `vtkGeometry3d`). Used by OHIF overlay badges.
-   * Prefers the mounted binding's render mode so the badge is correct as soon
+   * `fuberlinVolume3D` | `vtkGeometry3d`). Used by OHIF corner menus / tools.
+   * Prefers the mounted binding's render mode so the value is correct as soon
    * as data is attached (not the constructor default `slicerLiveVolume3d`).
    */
   getActiveRenderMode(): Volume3DRenderMode {
@@ -1504,16 +1504,8 @@ class VolumeViewport3D extends GenericViewport<
       }
     }
 
-    const mview = getMviewVolume3D(this.id);
-    if (mview) {
-      if (
-        mview.canvas.width !== targetWidth ||
-        mview.canvas.height !== targetHeight
-      ) {
-        mview.canvas.width = targetWidth;
-        mview.canvas.height = targetHeight;
-      }
-    }
+    // mview canvas backing-store size is owned by VolumeRenderer.resize()
+    // (pixel-budget / FPS target). Do not reset it to native DPR here.
 
     const slicerLive = getSlicerLiveVolume3D(this.id);
     if (slicerLive) {
