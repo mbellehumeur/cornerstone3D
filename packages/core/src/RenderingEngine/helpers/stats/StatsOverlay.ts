@@ -3,10 +3,16 @@ import {
   RenderModesPanel,
   type RenderModePanelBinding,
 } from './RenderModesPanel';
+import { MviewTargetFpsPanel } from './MviewTargetFpsPanel';
 import { StatsPanel } from './StatsPanel';
 import type { Panel, StatsInstance, PerformanceWithMemory } from './types';
 import { PanelType } from './enums';
 import { STATS_CONFIG, PANEL_CONFIGS, CONVERSION } from './constants';
+import {
+  getMviewVolume3D,
+  getMviewVolume3DTargetFps,
+  getMviewVolume3DTargetFpsEnabled,
+} from '../../GenericViewport/Volume3D/mviewVolume3DRegistry';
 
 /**
  * Singleton class for managing the stats overlay.
@@ -155,6 +161,7 @@ export class StatsOverlay implements StatsInstance {
     }
 
     this.addPanel(PanelType.RENDER_MODES, new RenderModesPanel());
+    this.addPanel(PanelType.MVIEW_TARGET_FPS, new MviewTargetFpsPanel());
   }
 
   private initializePanelColumns(): void {
@@ -190,7 +197,7 @@ export class StatsOverlay implements StatsInstance {
    */
   private addPanel(type: PanelType, panel: Panel): void {
     const column =
-      type === PanelType.RENDER_MODES
+      type === PanelType.RENDER_MODES || type === PanelType.MVIEW_TARGET_FPS
         ? this.bindingsColumn
         : this.metricsColumn;
 
@@ -252,7 +259,70 @@ export class StatsOverlay implements StatsInstance {
       this.updateRenderModesPanel();
     }
 
+    // Refresh mview Target FPS every frame so budget steering is visible live.
+    this.updateMviewTargetFpsPanel();
+
     return currentTime;
+  }
+
+  /**
+   * Pushes mview Target FPS / budget stats for each mview Volume3D viewport.
+   */
+  private updateMviewTargetFpsPanel(): void {
+    const panel = this.panels.get(PanelType.MVIEW_TARGET_FPS);
+
+    if (!(panel instanceof MviewTargetFpsPanel)) {
+      return;
+    }
+
+    const entries = [];
+
+    for (const renderingEngine of renderingEngineCache.getAll()) {
+      if (!renderingEngine || renderingEngine.hasBeenDestroyed) {
+        continue;
+      }
+
+      for (const viewport of renderingEngine.getViewports()) {
+        const entry = getMviewVolume3D(viewport.id);
+        if (!entry?.renderer) {
+          continue;
+        }
+
+        const stats = (entry.renderer.getStats?.() ?? {}) as Partial<{
+          targetFps: number;
+          budgetPx: number;
+          lastDragAvgFps: number;
+          fps: number;
+          lastDragScale: number;
+          scale: number;
+          lastDragSteps: number;
+          steps: number;
+          interacting: boolean;
+        }>;
+        const targeting =
+          getMviewVolume3DTargetFpsEnabled(viewport.id) !== false;
+        const configured =
+          getMviewVolume3DTargetFps(viewport.id) ?? Number(stats.targetFps);
+        const targetFps = Number(configured) || 0;
+        const budgetPx = Number(stats.budgetPx) || 0;
+        const emaFps = Number(stats.lastDragAvgFps) || Number(stats.fps) || 0;
+        const scale = Number(stats.lastDragScale) || Number(stats.scale) || 0;
+        const steps = Number(stats.lastDragSteps) || Number(stats.steps) || 0;
+
+        entries.push({
+          viewportId: `${renderingEngine.id}/${viewport.id}`,
+          targetFps: targeting ? targetFps : 0,
+          targeting,
+          interacting: Boolean(stats.interacting),
+          emaFps,
+          budgetPx,
+          scale,
+          steps,
+        });
+      }
+    }
+
+    panel.setContent(entries);
   }
 
   /**

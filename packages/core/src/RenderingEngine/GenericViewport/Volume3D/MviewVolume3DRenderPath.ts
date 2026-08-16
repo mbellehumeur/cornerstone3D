@@ -33,6 +33,7 @@ import {
   setMviewVolume3DValueRange,
   unregisterMviewVolume3D,
 } from './mviewVolume3DRegistry';
+import { setStatsOverlayEnabled } from '../../helpers/stats/toggleStatsOverlay';
 import { VIEWPORT_PRESETS } from '../../../constants';
 import type {
   Volume3DCamera,
@@ -108,6 +109,8 @@ export class MviewVolume3DRenderPath
       },
     });
     await renderer.initialize();
+    // Show Cornerstone stats overlay (includes MVIEW TARGET FPS panel).
+    setStatsOverlayEnabled(true);
     this.canvas = canvas;
     this.renderer = renderer;
     this.volumeUploaded = false;

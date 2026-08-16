@@ -14,9 +14,8 @@ export class RenderModesPanel implements Panel {
     const config = PANEL_CONFIGS[PanelType.RENDER_MODES];
     this.dom = document.createElement('div');
     this.dom.style.cssText = `
-      width:min(720px, max(${PANEL_CONFIG.WIDE_WIDTH}px, calc(100vw - ${
-        PANEL_CONFIG.WIDTH + 24
-      }px)));
+      width:280px;
+      max-width:calc(100vw - ${PANEL_CONFIG.WIDTH + 24}px);
       min-width:0;
       min-height:${PANEL_CONFIG.HEIGHT}px;
       background:${config.backgroundColor};

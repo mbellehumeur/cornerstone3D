@@ -15,7 +15,7 @@ export type MviewVolume3DPresentQuality = number;
 /** Slider default: visually matches OHIF/webgpuVolume3d (not slider max). */
 export const MVIEW_DEFAULT_PRESENT_QUALITY = 0.18;
 
-/** End-of-drag FPS target. 0 = off. */
+/** 200ms-while-dragging FPS target (short drags sample on mouse-up). 0 = off. */
 export const MVIEW_DEFAULT_TARGET_FPS = 30;
 
 const MVIEW_RENDER_MODES: ReadonlySet<string> = new Set([
@@ -40,7 +40,7 @@ export type MviewVolume3DEntry = {
   volumeCenter?: [number, number, number];
   /** Present quality blend: 0 = mview, 1 = OHIF (default). */
   presentQuality?: MviewVolume3DPresentQuality;
-  /** End-of-drag FPS target when enabled. Default 30. */
+  /** 200ms-while-dragging FPS target when enabled. Default 30. */
   targetFps?: number;
   /** When false, FPS targeting is off. Default true. */
   targetFpsEnabled?: boolean;
@@ -373,7 +373,7 @@ export function getMviewVolume3DTargetFps(
 }
 
 /**
- * Whether end-of-drag FPS targeting is on. Default true.
+ * Whether 200ms-while-dragging FPS targeting is on. Default true.
  *
  * @internal
  */
@@ -430,7 +430,7 @@ export function setMviewVolume3DTargetFps(
 }
 
 /**
- * Turn end-of-drag FPS targeting on or off. Off restores Resolution ceilings.
+ * Turn 200ms-while-dragging FPS targeting on or off. Off restores Resolution ceilings.
  *
  * @internal
  */
@@ -469,7 +469,7 @@ const OHIF_STILL_MAXIMUM_SCALE = 1;
  */
 const OHIF_INTERACTIVE_SCALE = 0.5;
 /** Floor for Target FPS steering (full-res ceiling when targeting is on). */
-const OHIF_INTERACTIVE_MINIMUM_SCALE = 0.2;
+const OHIF_INTERACTIVE_MINIMUM_SCALE = 0.35;
 const OHIF_INTERACTIVE_SAMPLE_FACTOR = 2;
 /** WGSL raymarch loops are hard-capped at this (see shaders.js). */
 const MVIEW_MAX_RAY_STEPS = 4000;
@@ -519,8 +519,9 @@ function ohifLikeStillSteps(renderer: VolumeRenderer): number {
 /**
  * Quality profiles for still / interactive presents.
  * Target FPS off: Resolution slider blends still and forces half-res drag.
- * Target FPS on: Resolution does not apply — full-res ceilings; end-of-drag
- * budget alone lowers interactive quality (still settles at full OHIF density).
+ * Target FPS on: Resolution does not apply — full-res ceilings; per-frame EMA
+ * of present dt steers interactive budget (steps first, then scale; still
+ * settles at full OHIF density).
  *
  * @internal
  */

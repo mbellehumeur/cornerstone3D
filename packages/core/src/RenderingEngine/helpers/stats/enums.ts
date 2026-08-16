@@ -6,6 +6,7 @@ enum PanelType {
   MS = 1,
   MEMORY = 2,
   RENDER_MODES = 3,
+  MVIEW_TARGET_FPS = 4,
 }
 
 export { PanelType };

@@ -236,7 +236,7 @@ class VolumeViewport3D extends GenericViewport<
       'data-rendering-engine-uid',
       this.renderingEngineId
     );
-    this.setRenderModeVisibility('slicerLiveVolume3d');
+    this.setRenderModeVisibility('mviewVolume3d');
   }
 
   /**
@@ -386,7 +386,7 @@ class VolumeViewport3D extends GenericViewport<
    * Active Volume3D render mode (`vtkVolume3d` | `webgpuVolume3d` |
    * `fuberlinVolume3D` | `vtkGeometry3d`). Used by OHIF corner menus / tools.
    * Prefers the mounted binding's render mode so the value is correct as soon
-   * as data is attached (not the constructor default `slicerLiveVolume3d`).
+   * as data is attached (not the constructor default `mviewVolume3d`).
    */
   getActiveRenderMode(): Volume3DRenderMode {
     const binding = this.getCurrentBinding();
@@ -994,6 +994,11 @@ class VolumeViewport3D extends GenericViewport<
 
   /**
    * Updates cached size state and notifies active render bindings.
+   *
+   * Specialized presents (mview / fuberlin / …) own their canvas bitmap (pixel
+   * budget). VTK/OpenGL uses the element CSS size × DPR — do not read
+   * `this.canvas.width` after a custom-pipeline session, or sWidth stays stuck
+   * on the last adaptive present size / a display:none bitmap.
    */
   resize(): void {
     if (this.isDestroyed) {
@@ -1001,9 +1006,14 @@ class VolumeViewport3D extends GenericViewport<
     }
 
     this.syncPresentSize();
-    const activeCanvas = this.getCanvas();
-    this.sWidth = activeCanvas.width;
-    this.sHeight = activeCanvas.height;
+
+    if (this.getUseCustomRenderingPipeline()) {
+      const activeCanvas = this.getCanvas();
+      this.sWidth = Math.max(1, activeCanvas.width);
+      this.sHeight = Math.max(1, activeCanvas.height);
+    } else {
+      this.syncVtkPresentSizeFromElement();
+    }
 
     this.resizeBindings();
   }
@@ -1211,7 +1221,7 @@ class VolumeViewport3D extends GenericViewport<
     return [];
   }
 
-  private activeRenderMode: Volume3DRenderMode = 'slicerLiveVolume3d';
+  private activeRenderMode: Volume3DRenderMode = 'mviewVolume3d';
 
   private setRenderModeVisibility(renderMode: Volume3DRenderMode): void {
     const modeChanged = this.activeRenderMode !== renderMode;
@@ -1272,8 +1282,39 @@ class VolumeViewport3D extends GenericViewport<
 
     this.renderContext.vtk.renderer = this.defaultVtkRenderer;
     this.renderContext.vtk.canvas = this.canvas;
+    // Leaving mview/webgpu: canvas was display:none and sWidth may still be the
+    // adaptive present size. Refresh from the element so the first OpenGL frame
+    // is not skipped (clientWidth===0) or drawn at a stale budget size.
     if (modeChanged) {
+      this.syncVtkPresentSizeFromElement();
       this.triggerImageRenderedEvent();
+    }
+  }
+
+  /**
+   * Match VTK on-screen canvas + sWidth/sHeight to the viewport element
+   * (CSS size × devicePixelRatio).
+   */
+  private syncVtkPresentSizeFromElement(): void {
+    const devicePixelRatio = window.devicePixelRatio || 1;
+    const targetWidth = Math.max(
+      1,
+      Math.round(Math.max(this.element.clientWidth, 1) * devicePixelRatio)
+    );
+    const targetHeight = Math.max(
+      1,
+      Math.round(Math.max(this.element.clientHeight, 1) * devicePixelRatio)
+    );
+
+    this.sWidth = targetWidth;
+    this.sHeight = targetHeight;
+
+    if (
+      this.canvas.width !== targetWidth ||
+      this.canvas.height !== targetHeight
+    ) {
+      this.canvas.width = targetWidth;
+      this.canvas.height = targetHeight;
     }
   }
 

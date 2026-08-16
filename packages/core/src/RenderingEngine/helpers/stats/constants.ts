@@ -24,7 +24,8 @@ const STATS_CONFIG = {
   MAX_FPS_VALUE: 300, // don't use 60 since no one has a 60hz monitor anynmore
   OVERLAY_STYLES: {
     position: 'fixed',
-    top: '0px',
+    top: 'auto',
+    bottom: '0px',
     right: '0px',
     left: 'auto',
     zIndex: '9999',
@@ -32,12 +33,12 @@ const STATS_CONFIG = {
     opacity: '0.9',
     display: 'flex',
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'flex-end',
     gap: '4px',
     maxWidth: 'calc(100vw - 8px)',
     userSelect: 'none',
   },
-  POSITION_STORAGE_KEY: 'cornerstone-stats-overlay-position',
+  POSITION_STORAGE_KEY: 'cornerstone-stats-overlay-position-br',
 } as const;
 
 /**
@@ -59,6 +60,11 @@ const PANEL_CONFIGS = [
     name: 'VIEWPORT BINDINGS',
     foregroundColor: '#fc0',
     backgroundColor: '#221100',
+  },
+  {
+    name: 'MVIEW TARGET FPS',
+    foregroundColor: '#f5c542',
+    backgroundColor: '#1a1400',
   },
 ] as const;
 

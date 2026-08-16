@@ -3,6 +3,12 @@ import {
   getEnabledElement,
   utilities as csUtils,
   viewportHasPan,
+  beginFuberlinVolume3DInteraction,
+  endFuberlinVolume3DInteraction,
+  beginMviewVolume3DInteraction,
+  endMviewVolume3DInteraction,
+  beginSlicerLiveVolume3DInteraction,
+  endSlicerLiveVolume3DInteraction,
 } from '@cornerstonejs/core';
 import type { Types } from '@cornerstonejs/core';
 
@@ -13,6 +19,9 @@ import type { EventTypes, PublicToolProps, ToolProps } from '../types';
  */
 class PanTool extends BaseTool {
   static toolName;
+  cleanUp: (() => void) | null = null;
+  _hasVolume3DInteraction = false;
+
   constructor(
     toolProps: PublicToolProps = {},
     defaultToolProps: ToolProps = {
@@ -27,6 +36,48 @@ class PanTool extends BaseTool {
     }
   ) {
     super(toolProps, defaultToolProps);
+  }
+
+  private _beginVolume3DInteraction(viewportId: string): boolean {
+    return (
+      beginFuberlinVolume3DInteraction(viewportId) ||
+      beginMviewVolume3DInteraction(viewportId) ||
+      beginSlicerLiveVolume3DInteraction(viewportId)
+    );
+  }
+
+  private _endVolume3DInteraction(viewportId: string): void {
+    endFuberlinVolume3DInteraction(viewportId);
+    endMviewVolume3DInteraction(viewportId);
+    endSlicerLiveVolume3DInteraction(viewportId);
+  }
+
+  private _armVolume3DInteractionCleanup(viewport: {
+    id: string;
+    render: () => void;
+  }): void {
+    if (!this._beginVolume3DInteraction(viewport.id)) {
+      return;
+    }
+
+    if (this._hasVolume3DInteraction) {
+      return;
+    }
+
+    this._hasVolume3DInteraction = true;
+
+    if (this.cleanUp !== null) {
+      document.removeEventListener('mouseup', this.cleanUp);
+    }
+
+    this.cleanUp = () => {
+      this._endVolume3DInteraction(viewport.id);
+      viewport.render();
+      this._hasVolume3DInteraction = false;
+      this.cleanUp = null;
+    };
+
+    document.addEventListener('mouseup', this.cleanUp, { once: true });
   }
 
   touchDragCallback(evt: EventTypes.InteractionEventType) {
@@ -133,6 +184,7 @@ class PanTool extends BaseTool {
       deltaPointsWorld[2] = 0;
     }
     const viewport = enabledElement.viewport;
+    this._armVolume3DInteractionCleanup(viewport);
     const camera = getLegacyCamera(viewport);
 
     if (!hasLegacyCameraPosition(camera)) {
