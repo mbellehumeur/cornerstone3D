@@ -14,6 +14,13 @@ declare module '@mview/webgpu-volume-standalone' {
     label?: string;
   };
 
+  export type FuberlinVolumeSliceUpdate = {
+    data: ArrayBufferView;
+    dimensions: [number, number, number];
+    sliceIndices: number[];
+    valueRange?: [number, number];
+  };
+
   export type FuberlinCameraState = {
     orientation: number[];
     zoom: number;
@@ -45,6 +52,7 @@ declare module '@mview/webgpu-volume-standalone' {
     constructor(canvas: HTMLCanvasElement, options?: Record<string, unknown>);
     initialize(): Promise<VolumeRenderer>;
     setVolume(volume: FuberlinVolumeDescriptor): Promise<void>;
+    updateVolumeSlices(update: FuberlinVolumeSliceUpdate): Promise<void>;
     setTransferFunction(points: FuberlinTransferPoint[]): void;
     setSettings(settings: FuberlinSettingsPatch): void;
     setCamera(camera?: FuberlinCameraPatch): void;
@@ -65,6 +73,10 @@ declare module '@mview/webgpu-volume-standalone' {
     }): void;
     setTargetFps(fps: number): void;
     getTargetFps(): number;
+    setTargetFpsProbeReady(ready: boolean): void;
+    scheduleTargetFpsProbe(): void;
+    runTargetFpsProbe(generation?: number): Promise<number | null>;
+    waitForGpuIdle(): Promise<void>;
     getStats(): {
       fps: number;
       frameMs: number;
@@ -77,6 +89,9 @@ declare module '@mview/webgpu-volume-standalone' {
       interacting: boolean;
       targetFps: number;
       budgetPx: number;
+      targetFpsPhase: 'off' | 'ready' | 'learn' | 'steer';
+      probeBudgetPx: number;
+      probeStatus: '' | 'ok' | 'fast' | 'flat' | 'slow' | 'fallback';
       lastDragAvgFps: number;
       lastDragFrames: number;
       lastDragBudgetFrom: number;

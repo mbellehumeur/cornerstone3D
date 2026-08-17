@@ -291,6 +291,7 @@ export class StatsOverlay implements StatsInstance {
         const stats = (entry.renderer.getStats?.() ?? {}) as Partial<{
           targetFps: number;
           budgetPx: number;
+          targetFpsPhase: 'off' | 'ready' | 'learn' | 'steer';
           lastDragAvgFps: number;
           fps: number;
           lastDragScale: number;
@@ -304,16 +305,28 @@ export class StatsOverlay implements StatsInstance {
         const configured =
           getMviewVolume3DTargetFps(viewport.id) ?? Number(stats.targetFps);
         const targetFps = Number(configured) || 0;
+        // Interactive controller budget only (never still profile ceiling).
         const budgetPx = Number(stats.budgetPx) || 0;
         const emaFps = Number(stats.lastDragAvgFps) || Number(stats.fps) || 0;
         const scale = Number(stats.lastDragScale) || Number(stats.scale) || 0;
         const steps = Number(stats.lastDragSteps) || Number(stats.steps) || 0;
+        const rawPhase = stats.targetFpsPhase;
+        const phase =
+          rawPhase === 'ready' ||
+          rawPhase === 'learn' ||
+          rawPhase === 'steer' ||
+          rawPhase === 'off'
+            ? rawPhase
+            : targeting
+              ? 'steer'
+              : 'off';
 
         entries.push({
           viewportId: `${renderingEngine.id}/${viewport.id}`,
           targetFps: targeting ? targetFps : 0,
           targeting,
           interacting: Boolean(stats.interacting),
+          phase: targeting ? phase : 'off',
           emaFps,
           budgetPx,
           scale,

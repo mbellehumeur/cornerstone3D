@@ -2,11 +2,15 @@ import type { Panel } from './types';
 import { PANEL_CONFIG, PANEL_CONFIGS } from './constants';
 import { PanelType } from './enums';
 
+export type MviewTargetFpsPhase = 'off' | 'ready' | 'learn' | 'steer';
+
 export type MviewTargetFpsPanelEntry = {
   viewportId: string;
   targetFps: number;
   targeting: boolean;
   interacting: boolean;
+  /** Interactive Target FPS controller phase (never still-budget). */
+  phase: MviewTargetFpsPhase;
   emaFps: number;
   budgetPx: number;
   scale: number;
@@ -95,24 +99,35 @@ export class MviewTargetFpsPanel implements Panel {
         gap:2px;
       `;
 
+      // ready waits idle; only the active learn window shows "learning" (orange).
+      const learning = entry.phase === 'learn';
+      const interactionLabel = learning
+        ? 'learning'
+        : entry.interacting
+          ? 'drag'
+          : 'idle';
       const lines = !entry.targeting
         ? [
-            'target FPS off',
-            entry.interacting ? 'drag' : 'still',
-            `budget ${formatBudget(entry.budgetPx)}`,
+            { text: 'target FPS off' },
+            { text: interactionLabel, orange: learning },
+            { text: `interact budget ${formatBudget(entry.budgetPx)}` },
           ]
         : [
-            `target ${entry.targetFps}`,
-            `ema ${entry.emaFps.toFixed(1)} fps`,
-            `budget ${formatBudget(entry.budgetPx)}`,
-            `scale ${entry.scale.toFixed(2)}`,
-            `steps ${entry.steps}`,
-            entry.interacting ? 'drag' : 'still',
+            { text: `target ${entry.targetFps}` },
+            { text: `ema ${entry.emaFps.toFixed(1)} fps` },
+            { text: `interact budget ${formatBudget(entry.budgetPx)}` },
+            { text: `scale ${entry.scale.toFixed(2)}` },
+            { text: `steps ${entry.steps}` },
+            { text: interactionLabel, orange: learning },
           ];
 
-      for (const text of lines) {
+      for (const lineSpec of lines) {
         const line = document.createElement('div');
-        line.textContent = text;
+        line.textContent = lineSpec.text;
+        if (lineSpec.orange) {
+          line.style.color = '#ff9800';
+          line.style.fontWeight = '700';
+        }
         row.appendChild(line);
       }
       this.list.appendChild(row);

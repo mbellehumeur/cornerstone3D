@@ -34,7 +34,7 @@ class TrackballRotateTool extends BaseTool {
   static toolName;
   touchDragCallback: (evt: EventTypes.InteractionEventType) => void;
   mouseDragCallback: (evt: EventTypes.InteractionEventType) => void;
-  cleanUp: () => void;
+  cleanUp: (() => void) | null = null;
   _resizeObservers = new Map();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   _viewportAddedListener: (evt: any) => void;
@@ -53,6 +53,20 @@ class TrackballRotateTool extends BaseTool {
     super(toolProps, defaultToolProps);
     this.touchDragCallback = this._dragCallback.bind(this);
     this.mouseDragCallback = this._dragCallback.bind(this);
+  }
+
+  /** Remove mouse + touch end listeners so interaction can settle on tablets. */
+  private _detachInteractionEndListeners(handler: () => void): void {
+    document.removeEventListener('mouseup', handler);
+    document.removeEventListener('touchend', handler);
+    document.removeEventListener('touchcancel', handler);
+  }
+
+  /** Arm end-of-drag cleanup for both mouse and touch (Android tablets). */
+  private _attachInteractionEndListeners(handler: () => void): void {
+    document.addEventListener('mouseup', handler);
+    document.addEventListener('touchend', handler);
+    document.addEventListener('touchcancel', handler);
   }
 
   preMouseDownCallback = (evt: EventTypes.InteractionEventType) => {
@@ -76,19 +90,23 @@ class TrackballRotateTool extends BaseTool {
       if (!this._hasResolutionChanged) {
         this._hasResolutionChanged = true;
 
-        if (this.cleanUp !== null) {
-          document.removeEventListener('mouseup', this.cleanUp);
+        if (this.cleanUp) {
+          this._detachInteractionEndListeners(this.cleanUp);
         }
 
         this.cleanUp = () => {
+          if (this.cleanUp) {
+            this._detachInteractionEndListeners(this.cleanUp);
+          }
           endFuberlinVolume3DInteraction(viewport.id);
           endMviewVolume3DInteraction(viewport.id);
           endSlicerLiveVolume3DInteraction(viewport.id);
           viewport.render();
           this._hasResolutionChanged = false;
+          this.cleanUp = null;
         };
 
-        document.addEventListener('mouseup', this.cleanUp, { once: true });
+        this._attachInteractionEndListeners(this.cleanUp);
       }
       return true;
     }
@@ -122,21 +140,29 @@ class TrackballRotateTool extends BaseTool {
       // No-op when this viewport has no WebGPU window.
       beginWebGPUViewportAnimation(viewport.id);
 
-      if (this.cleanUp !== null) {
-        // Clean up previous event listener
-        document.removeEventListener('mouseup', this.cleanUp);
+      if (this.cleanUp) {
+        this._detachInteractionEndListeners(this.cleanUp);
       }
 
       this.cleanUp = () => {
+        if (this.cleanUp) {
+          this._detachInteractionEndListeners(this.cleanUp);
+        }
         mapper.setSampleDistance(originalSampleDistance);
         endWebGPUViewportAnimation(viewport.id);
         viewport.render();
         this._hasResolutionChanged = false;
+        this.cleanUp = null;
       };
 
-      document.addEventListener('mouseup', this.cleanUp, { once: true });
+      this._attachInteractionEndListeners(this.cleanUp);
     }
     return true;
+  };
+
+  /** Touch start must arm interactive LOD / Target FPS like mouse down. */
+  preTouchStartCallback = (evt: EventTypes.InteractionEventType): boolean => {
+    return this.preMouseDownCallback(evt);
   };
 
   _getViewportsInfo = () => {

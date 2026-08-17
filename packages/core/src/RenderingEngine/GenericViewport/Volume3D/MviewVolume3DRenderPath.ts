@@ -10,7 +10,10 @@ import type {
   RenderPathDefinition,
   RenderPath,
 } from '../ViewportArchitectureTypes';
-import { getVolumeScalarArray } from '../webgpuMapperImageData';
+import {
+  getVolumeScalarArray,
+  materializeVolumeScalarsProgressive,
+} from '../webgpuMapperImageData';
 import {
   getVolumeCenterWorld,
   getVolumePhysicalMax,
@@ -111,6 +114,8 @@ export class MviewVolume3DRenderPath
     await renderer.initialize();
     // Show Cornerstone stats overlay (includes MVIEW TARGET FPS panel).
     setStatsOverlayEnabled(true);
+    // Progressive path: defer the GPU probe until the volume is fully loaded.
+    renderer.setTargetFpsProbeReady?.(false);
     this.canvas = canvas;
     this.renderer = renderer;
     this.volumeUploaded = false;
@@ -164,8 +169,7 @@ export class MviewVolume3DRenderPath
 
     ctx.display.activateRenderMode(MVIEW_VOLUME_3D_RENDER_MODE);
     // Keep block — empty display string reverts to inline and blanks mview.
-    // Stay hidden until a full post-load upload; partial scalars look like a
-    // solid AABB cube in surface mode.
+    // Stay hidden until the first progressive slice patch (or finish upload).
     canvas.style.display = 'block';
     canvas.style.visibility = 'hidden';
     canvas.style.zIndex = '1';
@@ -177,8 +181,8 @@ export class MviewVolume3DRenderPath
     );
 
     if (initialCamera) {
-      // Optional +90° pitch runs once after upload when
-      // APPLY_MVIEW_POST_LOAD_PITCH_UP_90 (see refreshScalars). Default is off
+      // Optional +90° pitch runs once after first upload when
+      // APPLY_MVIEW_POST_LOAD_PITCH_UP_90 (see revealIfUploaded). Default is off
       // so load orientation matches OHIF / webgpuVolume3d.
       const cameraToApply = initialCamera;
       applyVolume3DCamera(ctx, cameraToApply, { resetClippingRange: true });
@@ -205,90 +209,225 @@ export class MviewVolume3DRenderPath
         ? { lower: scalarRange[0], upper: scalarRange[1] }
         : undefined;
 
-    let uploadInFlight: Promise<boolean> | undefined;
-    // Match WebGPUVolume3D: full materialize+upload is expensive — do it once
-    // after load completes, not on every progressive IMAGE_VOLUME_MODIFIED.
-    let loadCompletedSeen = false;
-    let refreshedAfterLoad = false;
+    let uploadQueue: Promise<unknown> = Promise.resolve();
+    /** Stops progressive scheduling / duplicate finish; set at start of finish. */
+    let streamingClosed = false;
+    let progressiveRaf = 0;
+    let postLoadPitchApplied = false;
+    const dimensions =
+      imageVolume.dimensions ?? imageVolume.imageData?.getDimensions?.();
+    const depth = dimensions && dimensions.length >= 3 ? dimensions[2] : 0;
+    const uploadedSlices =
+      depth > 0 ? new Uint8Array(depth) : new Uint8Array(0);
+    let targetFpsProbeArmed = false;
+
+    const countUploadedSlices = () => {
+      let count = 0;
+      for (let i = 0; i < uploadedSlices.length; i++) {
+        if (uploadedSlices[i]) {
+          count += 1;
+        }
+      }
+      return count;
+    };
+
+    const isGpuVolumeComplete = () =>
+      depth > 0 && countUploadedSlices() >= depth;
+
+    const markAllSlicesUploaded = () => {
+      uploadedSlices.fill(1);
+    };
+
+    const armTargetFpsProbe = async () => {
+      if (targetFpsProbeArmed || !this.renderer) {
+        return;
+      }
+      if (!isGpuVolumeComplete()) {
+        return;
+      }
+      targetFpsProbeArmed = true;
+      streamingClosed = true;
+      if (progressiveRaf) {
+        cancelAnimationFrame(progressiveRaf);
+        progressiveRaf = 0;
+      }
+      this.applyPresentQuality();
+      await this.renderer.waitForGpuIdle?.();
+      if (!this.renderer) {
+        return;
+      }
+      this.renderer.setTargetFpsProbeReady?.(true);
+    };
 
     const revealCanvas = () => {
       canvas.style.visibility = '';
     };
 
-    const refreshScalars = async (
-      reason: string,
-      options: { warnIfEmpty?: boolean } = {}
-    ) => {
-      if (!this.renderer || refreshedAfterLoad) {
+    const syncValueRange = () => {
+      const voxelManager = imageVolume.voxelManager as
+        | { getRange?: () => number[] }
+        | undefined;
+      const range = voxelManager?.getRange?.();
+      if (this.viewportId && range && range.length === 2) {
+        setMviewVolume3DValueRange(this.viewportId, [range[0], range[1]]);
+        flushMviewVolume3DPendingPreset(this.viewportId);
+      }
+      return range && range.length === 2
+        ? ([range[0], range[1]] as [number, number])
+        : undefined;
+    };
+
+    const runUpload = <T>(task: () => Promise<T>): Promise<T> => {
+      const next = uploadQueue.then(task, task);
+      uploadQueue = next.then(
+        () => undefined,
+        () => undefined
+      );
+      return next;
+    };
+
+    const applyPostLoadPitchIfNeeded = () => {
+      if (!APPLY_MVIEW_POST_LOAD_PITCH_UP_90 || postLoadPitchApplied) {
         return;
       }
+      postLoadPitchApplied = true;
+      const vtkCam = ctx.vtk.renderer.getActiveCamera();
+      const current = {
+        clippingRange: vtkCam.getClippingRange() as [number, number],
+        focalPoint: [...vtkCam.getFocalPoint()] as [number, number, number],
+        parallelProjection: vtkCam.getParallelProjection(),
+        parallelScale: vtkCam.getParallelScale(),
+        position: [...vtkCam.getPosition()] as [number, number, number],
+        viewAngle: vtkCam.getViewAngle(),
+        viewPlaneNormal: [...vtkCam.getViewPlaneNormal()] as [
+          number,
+          number,
+          number,
+        ],
+        viewUp: [...vtkCam.getViewUp()] as [number, number, number],
+      };
+      const pitched = pitchVolume3DCameraUp90(current);
+      applyVolume3DCamera(ctx, pitched, { resetClippingRange: true });
+      this.applyMviewCamera(pitched);
+      if (
+        typeof pitched.parallelScale === 'number' &&
+        Number.isFinite(pitched.parallelScale)
+      ) {
+        this.baselineParallelScale = pitched.parallelScale;
+      }
+    };
 
-      // Progressive MODIFIED fires before slice 0 is cached; only warn on the
-      // milestones where scalars are expected to exist.
-      const warnIfEmpty =
-        options.warnIfEmpty ??
-        (reason === 'load-callback' || reason === 'load-completed');
+    const revealIfUploaded = (uploaded: boolean) => {
+      if (!uploaded || !this.renderer) {
+        return;
+      }
+      this.volumeUploaded = true;
+      applyPostLoadPitchIfNeeded();
+      revealCanvas();
+      this.renderer.requestRender();
+      ctx.display.renderNow();
+    };
+
+    // Allocate a zero-filled GPU volume immediately so progressive slice
+    // patches have a texture to write into (geometry/camera ready).
+    void runUpload(async () => {
+      this.resizeCanvas(canvas, ctx.viewport.element);
+      await this.allocateEmptyVolume(renderer, imageVolume);
+      return false;
+    });
+
+    const uploadNewSlices = async (): Promise<boolean> => {
+      if (!this.renderer) {
+        return false;
+      }
 
       this.resizeCanvas(canvas, ctx.viewport.element);
 
-      if (!uploadInFlight) {
-        uploadInFlight = this.uploadVolume(this.renderer, imageVolume).finally(
-          () => {
-            uploadInFlight = undefined;
-          }
-        );
+      const progressive = materializeVolumeScalarsProgressive(imageVolume);
+      if (!progressive || !ArrayBuffer.isView(progressive.data)) {
+        return false;
       }
 
-      const uploaded = await uploadInFlight;
+      const newIndices: number[] = [];
+      for (const z of progressive.loadedSliceIndices) {
+        if (!uploadedSlices[z]) {
+          newIndices.push(z);
+        }
+      }
 
-      // Re-check after await: load-callback and load-completed can both enter
-      // before either finishes — without this, pitch runs twice (+180°).
-      if (refreshedAfterLoad) {
+      if (newIndices.length === 0) {
+        return isGpuVolumeComplete();
+      }
+
+      const valueRange = syncValueRange();
+      try {
+        await this.renderer.updateVolumeSlices({
+          data: progressive.data as unknown as ArrayBufferView,
+          dimensions: progressive.dimensions,
+          sliceIndices: newIndices,
+          valueRange,
+        });
+        for (const z of newIndices) {
+          uploadedSlices[z] = 1;
+        }
+        return true;
+      } catch (error) {
+        console.error('[MviewVolume3D] updateVolumeSlices failed', error);
+        return false;
+      }
+    };
+
+    const scheduleProgressiveRefresh = () => {
+      if (streamingClosed || progressiveRaf) {
+        return;
+      }
+      progressiveRaf = requestAnimationFrame(() => {
+        progressiveRaf = 0;
+        if (streamingClosed) {
+          return;
+        }
+        void runUpload(async () => {
+          const uploaded = await uploadNewSlices();
+          if (isGpuVolumeComplete()) {
+            await armTargetFpsProbe();
+          }
+          return uploaded;
+        }).then(revealIfUploaded);
+      });
+    };
+
+    const finishStreaming = async (reason: string) => {
+      if (targetFpsProbeArmed) {
+        return;
+      }
+
+      const uploaded = await runUpload(async () => {
+        const patched = await uploadNewSlices();
+        if (isGpuVolumeComplete()) {
+          return true;
+        }
+        // CS3D reports complete but GPU still sparse — full scalar fallback.
+        const full = await this.uploadVolume(this.renderer!, imageVolume);
+        if (full) {
+          markAllSlicesUploaded();
+        }
+        return full || patched;
+      });
+
+      if (isGpuVolumeComplete()) {
+        revealIfUploaded(true);
+        await armTargetFpsProbe();
         return;
       }
 
       if (uploaded) {
-        this.volumeUploaded = true;
-        refreshedAfterLoad = true;
-
-        // Same +90° screen-right pitch TrackballRotate would apply about view-right.
-        // Gated by APPLY_MVIEW_POST_LOAD_PITCH_UP_90 for easy revert.
-        if (APPLY_MVIEW_POST_LOAD_PITCH_UP_90) {
-          // Read live VTK camera (ctx.viewport has no getViewState).
-          const vtkCam = ctx.vtk.renderer.getActiveCamera();
-          const current = {
-            clippingRange: vtkCam.getClippingRange() as [number, number],
-            focalPoint: [...vtkCam.getFocalPoint()] as [number, number, number],
-            parallelProjection: vtkCam.getParallelProjection(),
-            parallelScale: vtkCam.getParallelScale(),
-            position: [...vtkCam.getPosition()] as [number, number, number],
-            viewAngle: vtkCam.getViewAngle(),
-            viewPlaneNormal: [...vtkCam.getViewPlaneNormal()] as [
-              number,
-              number,
-              number,
-            ],
-            viewUp: [...vtkCam.getViewUp()] as [number, number, number],
-          };
-          const pitched = pitchVolume3DCameraUp90(current);
-          applyVolume3DCamera(ctx, pitched, { resetClippingRange: true });
-          this.applyMviewCamera(pitched);
-          if (
-            typeof pitched.parallelScale === 'number' &&
-            Number.isFinite(pitched.parallelScale)
-          ) {
-            this.baselineParallelScale = pitched.parallelScale;
-          }
-        }
-
-        revealCanvas();
-        this.renderer.requestRender();
-        ctx.display.renderNow();
-      } else if (warnIfEmpty) {
-        console.warn(
-          `[MviewVolume3D] No scalars yet (${reason}); waiting for volume events`
-        );
+        revealIfUploaded(true);
+        return;
       }
+
+      console.warn(
+        `[MviewVolume3D] No scalars after ${reason}; volume may be empty`
+      );
     };
 
     const rendering: Volume3DMviewRendering = {
@@ -301,17 +440,12 @@ export class MviewVolume3DRenderPath
         payload.volumeId,
         (eventType) => {
           if (eventType === Events.IMAGE_VOLUME_LOADING_COMPLETED) {
-            loadCompletedSeen = true;
-            void refreshScalars('load-completed');
+            void finishStreaming('load-completed');
             return;
           }
 
-          // After completion only: retry if the first materialize failed.
-          // Ignore progressive MODIFIED — each upload copies+converts the
-          // full volume to r16float and was ~100x slower than WebGPU.
-          if (loadCompletedSeen && !refreshedAfterLoad) {
-            void refreshScalars('volume-modified', { warnIfEmpty: false });
-          }
+          // Progressive per-slice patches (coalesced to one rAF).
+          scheduleProgressiveRefresh();
         }
       ),
     };
@@ -319,12 +453,19 @@ export class MviewVolume3DRenderPath
     // StreamingImageVolume.load() ignores new callbacks while already loading
     // (DefaultVolume3DDataProvider starts load first). Hook the in-flight
     // callback list when possible, otherwise call load() normally.
-    // Upload only here / on LOADING_COMPLETED — never from partial cache
-    // (zero-padded slices → opaque surface cube).
     attachVolumeLoadCallback(imageVolume, () => {
-      loadCompletedSeen = true;
-      void refreshScalars('load-callback');
+      void finishStreaming('load-callback');
     });
+
+    // If some frames already arrived before we subscribed, upload them now.
+    scheduleProgressiveRefresh();
+
+    // Volume already fully loaded (cached) — finish immediately.
+    const loadStatus = (imageVolume as { loadStatus?: { loaded?: boolean } })
+      .loadStatus;
+    if (loadStatus?.loaded) {
+      void finishStreaming('already-loaded');
+    }
 
     return {
       rendering,
@@ -347,6 +488,11 @@ export class MviewVolume3DRenderPath
         this.resize(ctx);
       },
       removeData: () => {
+        if (progressiveRaf) {
+          cancelAnimationFrame(progressiveRaf);
+          progressiveRaf = 0;
+        }
+        streamingClosed = true;
         this.removeData(ctx, rendering);
       },
     };
@@ -471,6 +617,60 @@ export class MviewVolume3DRenderPath
     return canvas;
   }
 
+  private applyPresentQuality(): void {
+    if (!this.viewportId) {
+      return;
+    }
+    const quality =
+      getMviewVolume3DPresentQuality(this.viewportId) ??
+      MVIEW_DEFAULT_PRESENT_QUALITY;
+    setMviewVolume3DPresentQuality(this.viewportId, quality);
+  }
+
+  private async allocateEmptyVolume(
+    renderer: VolumeRenderer,
+    imageVolume: IImageVolume
+  ): Promise<boolean> {
+    const dimensions =
+      imageVolume.dimensions ?? imageVolume.imageData?.getDimensions?.();
+    const spacing =
+      imageVolume.spacing ?? imageVolume.imageData?.getSpacing?.();
+
+    if (!dimensions || !spacing || dimensions.length < 3) {
+      return false;
+    }
+
+    const [dx, dy, dz] = dimensions;
+    const total = Math.max(1, dx * dy * dz);
+    const voxelManager = imageVolume.voxelManager as
+      | { getRange?: () => number[] }
+      | undefined;
+    const range = voxelManager?.getRange?.();
+
+    try {
+      // Zero r16float scaffold — skip full scalar→half convert on allocate.
+      await renderer.setVolume({
+        data: new Uint16Array(total),
+        dimensions: dimensions as [number, number, number],
+        spacing: spacing as [number, number, number],
+        valueRange:
+          range && range.length === 2
+            ? ([range[0], range[1]] as [number, number])
+            : ([0, 1] as [number, number]),
+        sourceFormat: 'r16float',
+        label: imageVolume.volumeId,
+      });
+      // setVolume arms the probe for standalone/full uploads; keep it off
+      // until every progressive slice is on the GPU.
+      renderer.setTargetFpsProbeReady?.(false);
+      this.applyPresentQuality();
+      return true;
+    } catch (error) {
+      console.error('[MviewVolume3D] allocateEmptyVolume failed', error);
+      return false;
+    }
+  }
+
   private async uploadVolume(
     renderer: VolumeRenderer,
     imageVolume: IImageVolume
@@ -520,12 +720,7 @@ export class MviewVolume3DRenderPath
 
       // Re-apply present quality now that volume dims/spacing exist so OHIF
       // still steps can match createVolumeMapper sample density.
-      if (this.viewportId) {
-        const quality =
-          getMviewVolume3DPresentQuality(this.viewportId) ??
-          MVIEW_DEFAULT_PRESENT_QUALITY;
-        setMviewVolume3DPresentQuality(this.viewportId, quality);
-      }
+      this.applyPresentQuality();
 
       return true;
     } catch (error) {
