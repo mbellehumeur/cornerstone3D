@@ -48,6 +48,7 @@ export {
   beginMviewVolume3DInteraction,
   endMviewVolume3DInteraction,
   flushMviewVolume3DPendingPreset,
+  reapplyMviewVolume3DPreset,
   MVIEW_DEFAULT_PRESENT_QUALITY,
   MVIEW_DEFAULT_TARGET_FPS,
   getMviewVolume3D,

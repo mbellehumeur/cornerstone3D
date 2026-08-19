@@ -48,6 +48,8 @@ export type MviewVolume3DEntry = {
   valueRange?: [number, number];
   /** Preset applied before scalars were ready; flushed after upload. */
   pendingPreset?: ViewportPreset;
+  /** Last preset the user/HP selected — kept so we can remap after valueRange grows. */
+  appliedPreset?: ViewportPreset;
 };
 
 const entries = new Map<string, MviewVolume3DEntry>();
@@ -63,6 +65,7 @@ export function registerMviewVolume3D(
     ...entry,
     valueRange: entry.valueRange ?? existing?.valueRange,
     pendingPreset: entry.pendingPreset ?? existing?.pendingPreset,
+    appliedPreset: entry.appliedPreset ?? existing?.appliedPreset,
     volumePhysicalMax: entry.volumePhysicalMax ?? existing?.volumePhysicalMax,
     volumeCenter: entry.volumeCenter ?? existing?.volumeCenter,
     presentQuality: entry.presentQuality ?? existing?.presentQuality,
@@ -666,6 +669,8 @@ export function applyMviewVolume3DPreset(
     return false;
   }
 
+  entry.appliedPreset = preset;
+
   if (!entry.valueRange) {
     entry.pendingPreset = preset;
     return true;
@@ -702,4 +707,21 @@ export function flushMviewVolume3DPendingPreset(viewportId: string): boolean {
   }
 
   return applyMviewVolume3DPreset(viewportId, entry.pendingPreset);
+}
+
+/**
+ * Remap the last selected preset onto the current valueRange (same as the
+ * user re-selecting the transfer function in the UI).
+ *
+ * @internal
+ */
+export function reapplyMviewVolume3DPreset(viewportId: string): boolean {
+  const entry = entries.get(viewportId);
+  const preset = entry?.appliedPreset ?? entry?.pendingPreset;
+
+  if (!preset) {
+    return false;
+  }
+
+  return applyMviewVolume3DPreset(viewportId, preset);
 }

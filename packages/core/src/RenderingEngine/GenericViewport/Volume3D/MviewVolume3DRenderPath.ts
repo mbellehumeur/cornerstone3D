@@ -23,6 +23,7 @@ import {
 import {
   applyMviewVolume3DPreset,
   flushMviewVolume3DPendingPreset,
+  reapplyMviewVolume3DPreset,
   MVIEW_DEFAULT_PRESENT_QUALITY,
   MVIEW_DEFAULT_TARGET_FPS,
   getMviewVolume3DPresentQuality,
@@ -220,6 +221,10 @@ export class MviewVolume3DRenderPath
     const uploadedSlices =
       depth > 0 ? new Uint8Array(depth) : new Uint8Array(0);
     let targetFpsProbeArmed = false;
+    /** True after a full setVolume with complete CPU scalars + final HU range. */
+    let gpuVolumeFinalized = false;
+    /** First range used for preview patches + TF; later slices keep this window. */
+    let previewValueRange: [number, number] | undefined;
 
     const countUploadedSlices = () => {
       let count = 0;
@@ -238,11 +243,17 @@ export class MviewVolume3DRenderPath
       uploadedSlices.fill(1);
     };
 
+    const isCpuVolumeComplete = () =>
+      Boolean(
+        (imageVolume as { loadStatus?: { loaded?: boolean } }).loadStatus
+          ?.loaded
+      );
+
     const armTargetFpsProbe = async () => {
       if (targetFpsProbeArmed || !this.renderer) {
         return;
       }
-      if (!isGpuVolumeComplete()) {
+      if (!gpuVolumeFinalized) {
         return;
       }
       targetFpsProbeArmed = true;
@@ -263,18 +274,26 @@ export class MviewVolume3DRenderPath
       canvas.style.visibility = '';
     };
 
-    const syncValueRange = () => {
+    const readLiveValueRange = (): [number, number] | undefined => {
       const voxelManager = imageVolume.voxelManager as
         | { getRange?: () => number[] }
         | undefined;
       const range = voxelManager?.getRange?.();
-      if (this.viewportId && range && range.length === 2) {
-        setMviewVolume3DValueRange(this.viewportId, [range[0], range[1]]);
-        flushMviewVolume3DPendingPreset(this.viewportId);
-      }
       return range && range.length === 2
         ? ([range[0], range[1]] as [number, number])
         : undefined;
+    };
+
+    const syncPreviewValueRange = () => {
+      const live = readLiveValueRange();
+      if (!previewValueRange && live) {
+        previewValueRange = live;
+        if (this.viewportId) {
+          setMviewVolume3DValueRange(this.viewportId, previewValueRange);
+          flushMviewVolume3DPendingPreset(this.viewportId);
+        }
+      }
+      return previewValueRange ?? live;
     };
 
     const runUpload = <T>(task: () => Promise<T>): Promise<T> => {
@@ -359,7 +378,7 @@ export class MviewVolume3DRenderPath
         return isGpuVolumeComplete();
       }
 
-      const valueRange = syncValueRange();
+      const valueRange = syncPreviewValueRange();
       try {
         await this.renderer.updateVolumeSlices({
           data: progressive.data as unknown as ArrayBufferView,
@@ -386,37 +405,34 @@ export class MviewVolume3DRenderPath
         if (streamingClosed) {
           return;
         }
-        void runUpload(async () => {
-          const uploaded = await uploadNewSlices();
-          if (isGpuVolumeComplete()) {
-            await armTargetFpsProbe();
-          }
-          return uploaded;
-        }).then(revealIfUploaded);
+        void runUpload(async () => uploadNewSlices()).then(revealIfUploaded);
       });
     };
 
     const finishStreaming = async (reason: string) => {
-      if (targetFpsProbeArmed) {
+      if (targetFpsProbeArmed || gpuVolumeFinalized) {
         return;
       }
 
       const uploaded = await runUpload(async () => {
-        const patched = await uploadNewSlices();
-        if (isGpuVolumeComplete()) {
+        if (gpuVolumeFinalized || targetFpsProbeArmed) {
           return true;
         }
-        // CS3D reports complete but GPU still sparse — full scalar fallback.
+        if (!isCpuVolumeComplete()) {
+          return uploadNewSlices();
+        }
         const full = await this.uploadVolume(this.renderer!, imageVolume);
         if (full) {
           markAllSlicesUploaded();
+          gpuVolumeFinalized = true;
+          this.renderer?.setTargetFpsProbeReady?.(false);
+          revealIfUploaded(true);
+          await armTargetFpsProbe();
         }
-        return full || patched;
+        return full;
       });
 
-      if (isGpuVolumeComplete()) {
-        revealIfUploaded(true);
-        await armTargetFpsProbe();
+      if (targetFpsProbeArmed || gpuVolumeFinalized) {
         return;
       }
 
@@ -715,7 +731,9 @@ export class MviewVolume3DRenderPath
 
       if (this.viewportId && range && range.length === 2) {
         setMviewVolume3DValueRange(this.viewportId, [range[0], range[1]]);
-        flushMviewVolume3DPendingPreset(this.viewportId);
+        if (!reapplyMviewVolume3DPreset(this.viewportId)) {
+          flushMviewVolume3DPendingPreset(this.viewportId);
+        }
       }
 
       // Re-apply present quality now that volume dims/spacing exist so OHIF
