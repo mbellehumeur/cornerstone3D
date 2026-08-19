@@ -62,9 +62,14 @@ const PANEL_CONFIGS = [
     backgroundColor: '#221100',
   },
   {
-    name: 'MVIEW TARGET FPS',
+    name: 'Target frames per second',
     foregroundColor: '#f5c542',
     backgroundColor: '#1a1400',
+  },
+  {
+    name: 'Max textures',
+    foregroundColor: '#9ad1ff',
+    backgroundColor: '#0b1622',
   },
 ] as const;
 

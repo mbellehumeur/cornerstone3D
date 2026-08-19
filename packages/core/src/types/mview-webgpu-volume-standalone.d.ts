@@ -12,6 +12,7 @@ declare module '@mview/webgpu-volume-standalone' {
     valueRange?: [number, number];
     sourceFormat?: 'r16float';
     label?: string;
+    originalDimensions?: [number, number, number];
   };
 
   export type FuberlinVolumeSliceUpdate = {
@@ -98,6 +99,10 @@ declare module '@mview/webgpu-volume-standalone' {
       lastDragBudgetTo: number;
       lastDragScale: number;
       lastDragSteps: number;
+      sourceDimensions?: [number, number, number] | null;
+      activeDimensions?: [number, number, number] | null;
+      downsampleScale?: number;
+      maxTextureDimension3D?: number;
     };
     rotateTrackball(
       deltaX: number,

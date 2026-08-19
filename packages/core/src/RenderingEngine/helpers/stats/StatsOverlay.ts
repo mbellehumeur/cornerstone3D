@@ -4,6 +4,7 @@ import {
   type RenderModePanelBinding,
 } from './RenderModesPanel';
 import { MviewTargetFpsPanel } from './MviewTargetFpsPanel';
+import { MaxTexturesPanel } from './MaxTexturesPanel';
 import { StatsPanel } from './StatsPanel';
 import type { Panel, StatsInstance, PerformanceWithMemory } from './types';
 import { PanelType } from './enums';
@@ -162,6 +163,7 @@ export class StatsOverlay implements StatsInstance {
 
     this.addPanel(PanelType.RENDER_MODES, new RenderModesPanel());
     this.addPanel(PanelType.MVIEW_TARGET_FPS, new MviewTargetFpsPanel());
+    this.addPanel(PanelType.MAX_TEXTURES, new MaxTexturesPanel());
   }
 
   private initializePanelColumns(): void {
@@ -197,7 +199,9 @@ export class StatsOverlay implements StatsInstance {
    */
   private addPanel(type: PanelType, panel: Panel): void {
     const column =
-      type === PanelType.RENDER_MODES || type === PanelType.MVIEW_TARGET_FPS
+      type === PanelType.RENDER_MODES ||
+      type === PanelType.MVIEW_TARGET_FPS ||
+      type === PanelType.MAX_TEXTURES
         ? this.bindingsColumn
         : this.metricsColumn;
 
@@ -261,6 +265,7 @@ export class StatsOverlay implements StatsInstance {
 
     // Refresh mview Target FPS every frame so budget steering is visible live.
     this.updateMviewTargetFpsPanel();
+    this.updateMaxTexturesPanel();
 
     return currentTime;
   }
@@ -331,6 +336,50 @@ export class StatsOverlay implements StatsInstance {
           budgetPx,
           scale,
           steps,
+        });
+      }
+    }
+
+    panel.setContent(entries);
+  }
+
+  private updateMaxTexturesPanel(): void {
+    const panel = this.panels.get(PanelType.MAX_TEXTURES);
+
+    if (!(panel instanceof MaxTexturesPanel)) {
+      return;
+    }
+
+    const entries = [];
+
+    for (const renderingEngine of renderingEngineCache.getAll()) {
+      if (!renderingEngine || renderingEngine.hasBeenDestroyed) {
+        continue;
+      }
+
+      for (const viewport of renderingEngine.getViewports()) {
+        const entry = getMviewVolume3D(viewport.id);
+        if (!entry?.renderer) {
+          continue;
+        }
+
+        const stats = (entry.renderer.getStats?.() ?? {}) as Partial<{
+          sourceDimensions: [number, number, number] | null;
+          activeDimensions: [number, number, number] | null;
+          downsampleScale: number;
+          maxTextureDimension3D: number;
+        }>;
+
+        entries.push({
+          viewportId: `${renderingEngine.id}/${viewport.id}`,
+          sourceDimensions: Array.isArray(stats.sourceDimensions)
+            ? stats.sourceDimensions
+            : null,
+          activeDimensions: Array.isArray(stats.activeDimensions)
+            ? stats.activeDimensions
+            : null,
+          downsampleScale: Number(stats.downsampleScale) || 1,
+          maxTextureDimension3D: Number(stats.maxTextureDimension3D) || 0,
         });
       }
     }
