@@ -18,6 +18,7 @@ import {
   iCameraToMviewCamera,
   pitchVolume3DCameraUp90,
 } from './mviewVolume3DCamera';
+import { computeVisibleVolumeRoi } from './mviewVolume3DRoi';
 import {
   applyMviewVolume3DPreset,
   flushMviewVolume3DPendingPreset,
@@ -208,6 +209,8 @@ export class MviewVolume3DRenderPath
   private lastViewState?: Partial<Volume3DCamera>;
   private resolveSourceScalarData?: () => ArrayLike<number> | undefined;
   private readValueRange?: () => [number, number] | undefined;
+  /** One-shot native scalar buffer for ROI refine (avoid rematerialize every settle). */
+  private cachedNativeScalars?: ArrayLike<number>;
 
   async addData(
     ctx: Volume3DViewportRenderContext,
@@ -469,15 +472,24 @@ export class MviewVolume3DRenderPath
 
     this.readValueRange = () => syncPreviewValueRange();
     this.resolveSourceScalarData = () => {
-      if (isCpuVolumeComplete()) {
-        return getVolumeScalarArray(imageVolume) ?? undefined;
-      }
+      // Prefer the progressive assembly — already complete and contiguous.
       if (
         sourceDepth > 0 &&
         countUploadedSourceSlices() >= sourceDepth &&
         srcProgressiveData
       ) {
+        this.cachedNativeScalars = srcProgressiveData;
         return srcProgressiveData;
+      }
+      if (this.cachedNativeScalars) {
+        return this.cachedNativeScalars;
+      }
+      if (isCpuVolumeComplete()) {
+        const scalars = getVolumeScalarArray(imageVolume) ?? undefined;
+        if (scalars) {
+          this.cachedNativeScalars = scalars;
+        }
+        return scalars;
       }
       return undefined;
     };
@@ -1004,6 +1016,7 @@ export class MviewVolume3DRenderPath
     this.imageVolume = undefined;
     this.resolveSourceScalarData = undefined;
     this.readValueRange = undefined;
+    this.cachedNativeScalars = undefined;
     this.lastViewState = undefined;
     this.dstScalarData = undefined;
     this.uploadedDstSlices = undefined;
@@ -1096,6 +1109,48 @@ export class MviewVolume3DRenderPath
       isCoarseComplete: () => this.isCoarseDstComplete(),
       fullVolumeCenter: this.fullVolumeCenter,
       fullVolumePhysicalMax: this.fullVolumePhysicalMax,
+      getVtkVisibleRoi: () => this.computeVtkVisibleVolumeRoi(),
+    });
+  }
+
+  /** VTK/world frustum ∩ volume AABB → native IJK visible ROI at settle. */
+  private computeVtkVisibleVolumeRoi() {
+    const plan = this.volumeResamplePlan;
+    const imageVolume = this.imageVolume;
+    const ctx = this.renderContext;
+    const imageData = imageVolume?.imageData;
+    if (!plan?.enabled || !imageVolume || !ctx?.vtk?.renderer || !imageData) {
+      return undefined;
+    }
+
+    const spacing = normalizeVolumeSpacing(
+      imageVolume.spacing ?? imageData.getSpacing?.()
+    );
+    if (!spacing) {
+      return undefined;
+    }
+
+    const canvas = this.canvas;
+    const aspect =
+      canvas && canvas.height > 0 ? canvas.width / canvas.height : 1;
+    const cam = ctx.vtk.renderer.getActiveCamera();
+    const clipping = cam.getClippingRange() as [number, number];
+
+    return computeVisibleVolumeRoi({
+      focalPoint: [...cam.getFocalPoint()] as [number, number, number],
+      position: [...cam.getPosition()] as [number, number, number],
+      viewPlaneNormal: [...cam.getViewPlaneNormal()] as [
+        number,
+        number,
+        number,
+      ],
+      viewUp: [...cam.getViewUp()] as [number, number, number],
+      parallelScale: cam.getParallelScale(),
+      clippingRange: [Number(clipping[0]), Number(clipping[1])],
+      aspect,
+      sourceDimensions: plan.originalDimensions,
+      sourceSpacing: spacing,
+      imageData,
     });
   }
 

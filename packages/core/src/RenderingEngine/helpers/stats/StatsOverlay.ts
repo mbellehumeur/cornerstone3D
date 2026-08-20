@@ -376,6 +376,8 @@ export class StatsOverlay implements StatsInstance {
           visibleSourceDimensions: [number, number, number] | null;
           visibleSourceTotal: [number, number, number] | null;
           visibleSliceRange: [number, number] | null;
+          vtkVisibleSourceDimensions: [number, number, number] | null;
+          vtkVisibleSliceRange: [number, number] | null;
           volumeWorkBusy: boolean;
           volumeWorkLabel: string;
         }>;
@@ -402,6 +404,14 @@ export class StatsOverlay implements StatsInstance {
             : null,
           visibleSliceRange: Array.isArray(stats.visibleSliceRange)
             ? stats.visibleSliceRange
+            : null,
+          vtkVisibleSourceDimensions: Array.isArray(
+            stats.vtkVisibleSourceDimensions
+          )
+            ? stats.vtkVisibleSourceDimensions
+            : null,
+          vtkVisibleSliceRange: Array.isArray(stats.vtkVisibleSliceRange)
+            ? stats.vtkVisibleSliceRange
             : null,
           volumeWorkBusy: Boolean(stats.volumeWorkBusy),
           volumeWorkLabel: stats.volumeWorkLabel || '',

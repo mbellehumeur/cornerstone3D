@@ -24,8 +24,9 @@ export type ComputeVisibleVolumeRoiParams = {
   sourceSpacing: VolumeDims3;
   imageData: {
     getBounds?: () => number[];
-    worldToIndex?: (world: Point3) => Point3;
-    indexToWorld?: (index: Point3, dest?: Point3) => Point3;
+    /** VTK/CS often return gl-matrix vec3 (Float32Array), not a tuple. */
+    worldToIndex?: (world: Point3) => Point3 | ArrayLike<number>;
+    indexToWorld?: (index: Point3, dest?: Point3) => Point3 | ArrayLike<number>;
   };
   paddingVoxels?: number;
 };
@@ -570,7 +571,12 @@ export function computeVisibleVolumeRoi(
   ];
   let roiWorldCenter: Point3 = centerIjk;
   if (typeof imageData.indexToWorld === 'function') {
-    roiWorldCenter = imageData.indexToWorld(centerIjk) as Point3;
+    const world = imageData.indexToWorld(centerIjk);
+    roiWorldCenter = [
+      Number((world as ArrayLike<number>)[0]),
+      Number((world as ArrayLike<number>)[1]),
+      Number((world as ArrayLike<number>)[2]),
+    ];
   }
 
   const coverageFraction: VolumeDims3 = [

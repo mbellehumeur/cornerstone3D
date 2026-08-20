@@ -13,6 +13,8 @@ export type MaxTexturesPanelEntry = {
   visibleSourceDimensions?: [number, number, number] | null;
   visibleSourceTotal?: [number, number, number] | null;
   visibleSliceRange?: [number, number] | null;
+  vtkVisibleSourceDimensions?: [number, number, number] | null;
+  vtkVisibleSliceRange?: [number, number] | null;
   volumeWorkBusy?: boolean;
   volumeWorkLabel?: string;
 };
@@ -190,9 +192,23 @@ function formatLines(entry: MaxTexturesPanelEntry): LineSpec[] {
       ];
     }
   }
-  const sliceLine = formatVisibleSliceLine(entry);
-  if (sliceLine) {
-    lines.push({ text: sliceLine });
+  const mviewLine = formatVisibleSliceLine(
+    entry.visibleSourceDimensions,
+    entry.visibleSourceTotal,
+    entry.visibleSliceRange,
+    'mview'
+  );
+  if (mviewLine) {
+    lines.push({ text: mviewLine });
+  }
+  const vtkLine = formatVisibleSliceLine(
+    entry.vtkVisibleSourceDimensions,
+    entry.visibleSourceTotal,
+    entry.vtkVisibleSliceRange,
+    'vtk'
+  );
+  if (vtkLine) {
+    lines.push({ text: vtkLine });
   }
   if (entry.volumeWorkBusy) {
     lines.push({
@@ -203,9 +219,12 @@ function formatLines(entry: MaxTexturesPanelEntry): LineSpec[] {
   return lines;
 }
 
-function formatVisibleSliceLine(entry: MaxTexturesPanelEntry): string | null {
-  const visible = entry.visibleSourceDimensions;
-  const total = entry.visibleSourceTotal;
+function formatVisibleSliceLine(
+  visible: [number, number, number] | null | undefined,
+  total: [number, number, number] | null | undefined,
+  range: [number, number] | null | undefined,
+  label: 'mview' | 'vtk'
+): string | null {
   if (
     !visible ||
     !total ||
@@ -216,13 +235,12 @@ function formatVisibleSliceLine(entry: MaxTexturesPanelEntry): string | null {
     return null;
   }
   const sliceFraction = (visible[2] / total[2]) * 100;
-  const range = entry.visibleSliceRange;
   const rangeNote =
     Array.isArray(range) && range.length === 2
       ? ` · K ${Math.round(range[0])}-${Math.round(range[1])}`
       : '';
   return (
-    `in frame ${Math.round(visible[2])}/${Math.round(total[2])} slices ` +
+    `in frame (${label}) ${Math.round(visible[2])}/${Math.round(total[2])} slices ` +
     `(${sliceFraction.toFixed(1)}%) · I ${Math.round(visible[0])}/${Math.round(total[0])} · ` +
     `J ${Math.round(visible[1])}/${Math.round(total[1])}${rangeNote}`
   );
