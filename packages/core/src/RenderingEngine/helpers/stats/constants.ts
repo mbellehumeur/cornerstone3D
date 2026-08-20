@@ -62,9 +62,9 @@ const PANEL_CONFIGS = [
     backgroundColor: '#221100',
   },
   {
-    name: 'Target frames per second',
-    foregroundColor: '#f5c542',
-    backgroundColor: '#1a1400',
+    name: 'Target FPS',
+    foregroundColor: '#9ad1ff',
+    backgroundColor: '#0b1622',
   },
   {
     name: 'Max textures',

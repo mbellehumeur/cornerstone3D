@@ -1,4 +1,7 @@
-import { VolumeRenderer } from '@mview/webgpu-volume-standalone';
+import {
+  VolumeRenderer,
+  convertScalarVolumeToHalfFloatChunk,
+} from '@mview/webgpu-volume-standalone';
 import { Events, ViewportType } from '../../../enums';
 import eventTarget from '../../../eventTarget';
 import type { IImageData, IImageVolume } from '../../../types';
@@ -211,6 +214,14 @@ export class MviewVolume3DRenderPath
   private readValueRange?: () => [number, number] | undefined;
   /** One-shot native scalar buffer for ROI refine (avoid rematerialize every settle). */
   private cachedNativeScalars?: ArrayLike<number>;
+  /** Full native volume as HU-normalized r16float (built once after load). */
+  private nativeR16?: Uint16Array;
+  private nativeR16Complete = false;
+  private nativeR16Z = 0;
+  private nativeR16Raf = 0;
+  private nativeR16Generation = 0;
+  /** Clears progressive scalar assembly once nativeR16 is complete. */
+  private releaseNativeScalarAssembly?: () => void;
 
   async addData(
     ctx: Volume3DViewportRenderContext,
@@ -472,6 +483,11 @@ export class MviewVolume3DRenderPath
 
     this.readValueRange = () => syncPreviewValueRange();
     this.resolveSourceScalarData = () => {
+      // After native r16float is ready, ROI refine uses getNativeR16 — drop the
+      // duplicate full-res scalar assembly from this path.
+      if (this.nativeR16Complete && this.nativeR16) {
+        return undefined;
+      }
       // Prefer the progressive assembly — already complete and contiguous.
       if (
         sourceDepth > 0 &&
@@ -493,6 +509,12 @@ export class MviewVolume3DRenderPath
       }
       return undefined;
     };
+
+    const releaseNativeScalarAssembly = () => {
+      srcProgressiveData = undefined;
+      this.cachedNativeScalars = undefined;
+    };
+    this.releaseNativeScalarAssembly = releaseNativeScalarAssembly;
 
     const runUpload = <T>(task: () => Promise<T>): Promise<T> => {
       const next = uploadQueue.then(task, task);
@@ -828,6 +850,7 @@ export class MviewVolume3DRenderPath
           gpuVolumeFinalized = true;
           this.renderer?.setTargetFpsProbeReady?.(false);
           revealIfUploaded(true);
+          kickNativeR16IfReady();
           await armTargetFpsProbe();
         }
         return full;
@@ -844,6 +867,29 @@ export class MviewVolume3DRenderPath
 
       console.warn(
         `[MviewVolume3D] No scalars after ${reason}; volume may be empty`
+      );
+    };
+
+    const kickNativeR16IfReady = () => {
+      if (this.nativeR16Complete) {
+        return;
+      }
+      const dims =
+        sourceDimensions ??
+        (this.volumeResamplePlan?.originalDimensions as
+          | [number, number, number]
+          | undefined);
+      if (!dims || dims.length !== 3) {
+        return;
+      }
+      const scalars = this.resolveSourceScalarData?.();
+      if (!scalars) {
+        return;
+      }
+      this.scheduleNativeR16Convert(
+        scalars,
+        [dims[0], dims[1], dims[2]],
+        this.readValueRange?.()
       );
     };
 
@@ -1017,6 +1063,11 @@ export class MviewVolume3DRenderPath
     this.resolveSourceScalarData = undefined;
     this.readValueRange = undefined;
     this.cachedNativeScalars = undefined;
+    this.releaseNativeScalarAssembly = undefined;
+    this.stopNativeR16Convert();
+    this.nativeR16 = undefined;
+    this.nativeR16Complete = false;
+    this.nativeR16Z = 0;
     this.lastViewState = undefined;
     this.dstScalarData = undefined;
     this.uploadedDstSlices = undefined;
@@ -1100,6 +1151,8 @@ export class MviewVolume3DRenderPath
       sourceDimensions: plan.originalDimensions,
       sourceSpacing: spacing,
       getScalars: () => this.resolveSourceScalarData?.(),
+      getNativeR16: () =>
+        this.nativeR16Complete && this.nativeR16 ? this.nativeR16 : undefined,
       getValueRange: () => this.readValueRange?.(),
       indexToWorld: (ijk: number[]) =>
         imageData.indexToWorld(ijk as [number, number, number]),
@@ -1111,6 +1164,87 @@ export class MviewVolume3DRenderPath
       fullVolumePhysicalMax: this.fullVolumePhysicalMax,
       getVtkVisibleRoi: () => this.computeVtkVisibleVolumeRoi(),
     });
+  }
+
+  private stopNativeR16Convert(): void {
+    this.nativeR16Generation += 1;
+    if (this.nativeR16Raf) {
+      cancelAnimationFrame(this.nativeR16Raf);
+      this.nativeR16Raf = 0;
+    }
+  }
+
+  /**
+   * Background-convert complete native scalars to r16float so ROI refine is memcpy.
+   * Does not block progressive coarse display or Target FPS probe.
+   */
+  private scheduleNativeR16Convert(
+    scalars: ArrayLike<number>,
+    dimensions: [number, number, number],
+    valueRange: [number, number] | undefined
+  ): void {
+    if (this.nativeR16Complete && this.nativeR16) {
+      this.releaseNativeScalarAssembly?.();
+      return;
+    }
+    const [w, h, d] = dimensions;
+    const voxelCount = w * h * d;
+    if (!(voxelCount > 0) || scalars.length < voxelCount) {
+      return;
+    }
+
+    this.stopNativeR16Convert();
+    const generation = this.nativeR16Generation;
+    if (!this.nativeR16 || this.nativeR16.length !== voxelCount) {
+      this.nativeR16 = new Uint16Array(voxelCount);
+      this.nativeR16Z = 0;
+    }
+    this.nativeR16Complete = false;
+
+    const slicesPerFrame = 12;
+    const step = () => {
+      this.nativeR16Raf = 0;
+      if (generation !== this.nativeR16Generation || !this.nativeR16) {
+        return;
+      }
+      // Pause while ROI reload or camera drag so convert does not fight uploads.
+      const renderer = this.renderer;
+      const stats = renderer?.getStats?.();
+      if (stats?.volumeWorkBusy || stats?.interacting) {
+        this.nativeR16Raf = requestAnimationFrame(step);
+        return;
+      }
+      const remaining = d - this.nativeR16Z;
+      if (remaining <= 0) {
+        this.nativeR16Complete = true;
+        this.releaseNativeScalarAssembly?.();
+        return;
+      }
+      const count = Math.min(slicesPerFrame, remaining);
+      try {
+        convertScalarVolumeToHalfFloatChunk(
+          scalars as unknown as ArrayBufferView,
+          dimensions,
+          valueRange,
+          this.nativeR16Z,
+          count,
+          this.nativeR16
+        );
+      } catch (error) {
+        console.warn('[MviewVolume3D] native r16 convert failed', error);
+        this.nativeR16 = undefined;
+        this.nativeR16Complete = false;
+        return;
+      }
+      this.nativeR16Z += count;
+      if (this.nativeR16Z >= d) {
+        this.nativeR16Complete = true;
+        this.releaseNativeScalarAssembly?.();
+        return;
+      }
+      this.nativeR16Raf = requestAnimationFrame(step);
+    };
+    this.nativeR16Raf = requestAnimationFrame(step);
   }
 
   /** VTK/world frustum ∩ volume AABB → native IJK visible ROI at settle. */

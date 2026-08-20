@@ -17,6 +17,8 @@ export type MaxTexturesPanelEntry = {
   vtkVisibleSliceRange?: [number, number] | null;
   volumeWorkBusy?: boolean;
   volumeWorkLabel?: string;
+  /** Wall time of the last completed volume reload (ms). */
+  lastVolumeReloadMs?: number;
 };
 
 type LineSpec = {
@@ -215,8 +217,19 @@ function formatLines(entry: MaxTexturesPanelEntry): LineSpec[] {
       text: entry.volumeWorkLabel?.trim() || 'reloading volume',
       busy: true,
     });
+  } else if (Number(entry.lastVolumeReloadMs) > 0) {
+    lines.push({
+      text: `last reload ${formatReloadMs(Number(entry.lastVolumeReloadMs))}`,
+    });
   }
   return lines;
+}
+
+function formatReloadMs(ms: number): string {
+  if (ms >= 1000) {
+    return `${(ms / 1000).toFixed(2)} s`;
+  }
+  return `${Math.round(ms)} ms`;
 }
 
 function formatVisibleSliceLine(

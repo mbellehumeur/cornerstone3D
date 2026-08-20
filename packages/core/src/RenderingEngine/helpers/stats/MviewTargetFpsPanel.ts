@@ -24,6 +24,7 @@ type HudLineSpec = {
 
 /**
  * Text panel for mview Target FPS / pixel-budget steering (Cornerstone stats overlay).
+ * Theme matches Max textures (blue).
  */
 export class MviewTargetFpsPanel implements Panel {
   public dom: HTMLDivElement;
@@ -45,7 +46,7 @@ export class MviewTargetFpsPanel implements Panel {
       box-sizing:border-box;
       max-height:min(320px, calc(100vh - 16px));
       overflow:auto;
-      border:1px solid rgba(245, 197, 66, 0.45);
+      border:1px solid rgba(117, 184, 255, 0.45);
       border-radius:4px;
       box-shadow:0 8px 28px rgba(0, 0, 0, 0.35);
     `;
@@ -67,7 +68,7 @@ export class MviewTargetFpsPanel implements Panel {
       gap:6px;
       line-height:1.4;
       font-weight:normal;
-      color:#ffe9a8;
+      color:#d7ebff;
     `;
     this.dom.appendChild(this.list);
   }
@@ -97,7 +98,7 @@ export class MviewTargetFpsPanel implements Panel {
       row.style.cssText = `
         padding:7px;
         background:rgba(0, 0, 0, 0.22);
-        border:1px solid rgba(245, 197, 66, 0.22);
+        border:1px solid rgba(117, 184, 255, 0.22);
         border-radius:4px;
         display:flex;
         flex-direction:column;
@@ -119,12 +120,13 @@ export class MviewTargetFpsPanel implements Panel {
             { text: `interact budget ${formatBudget(entry.budgetPx)}` },
           ]
         : [
-            { text: `target ${entry.targetFps}` },
+            { text: `target: ${entry.targetFps} fps` },
             { text: `min pixel budget: ${formatBudget(entry.minPx)}` },
-            { text: `ema ${entry.emaFps.toFixed(1)} fps` },
+            { text: `measured fps: ${entry.emaFps.toFixed(1)}` },
             { text: `interact budget ${formatBudget(entry.budgetPx)}` },
-            { text: `scale ${entry.scale.toFixed(2)}` },
-            { text: `steps ${entry.steps}` },
+            {
+              text: `scale ${entry.scale.toFixed(2)} · steps ${entry.steps}`,
+            },
             { text: interactionLabel, orange: learning },
           ];
 

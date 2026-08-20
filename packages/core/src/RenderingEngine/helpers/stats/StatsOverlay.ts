@@ -380,6 +380,7 @@ export class StatsOverlay implements StatsInstance {
           vtkVisibleSliceRange: [number, number] | null;
           volumeWorkBusy: boolean;
           volumeWorkLabel: string;
+          lastVolumeReloadMs: number;
         }>;
 
         entries.push({
@@ -415,6 +416,7 @@ export class StatsOverlay implements StatsInstance {
             : null,
           volumeWorkBusy: Boolean(stats.volumeWorkBusy),
           volumeWorkLabel: stats.volumeWorkLabel || '',
+          lastVolumeReloadMs: Number(stats.lastVolumeReloadMs) || 0,
         });
       }
     }

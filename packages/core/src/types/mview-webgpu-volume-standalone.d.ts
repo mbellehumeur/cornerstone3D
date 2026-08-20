@@ -114,6 +114,7 @@ declare module '@mview/webgpu-volume-standalone' {
       visibleSliceRange?: [number, number] | null;
       volumeWorkBusy?: boolean;
       volumeWorkLabel?: string;
+      lastVolumeReloadMs?: number;
     };
     rotateTrackball(
       deltaX: number,
@@ -128,4 +129,23 @@ declare module '@mview/webgpu-volume-standalone' {
     render(): void;
     dispose(): void;
   }
+
+  export function convertScalarVolumeToHalfFloatChunk(
+    data: ArrayBufferView,
+    dimensions: [number, number, number],
+    valueRange: [number, number] | undefined,
+    zStart: number,
+    zCount: number,
+    dst: Uint16Array
+  ): { valueRange: [number, number]; zEnd: number };
+
+  export function convertScalarVolumeToHalfFloat(
+    data: ArrayBufferView,
+    dimensions: [number, number, number],
+    valueRange?: [number, number]
+  ): {
+    data: Uint16Array;
+    valueRange: [number, number];
+    dimensions: [number, number, number];
+  };
 }
