@@ -296,6 +296,7 @@ export class StatsOverlay implements StatsInstance {
         const stats = (entry.renderer.getStats?.() ?? {}) as Partial<{
           targetFps: number;
           budgetPx: number;
+          minPx: number;
           targetFpsPhase: 'off' | 'ready' | 'learn' | 'steer';
           lastDragAvgFps: number;
           fps: number;
@@ -312,6 +313,7 @@ export class StatsOverlay implements StatsInstance {
         const targetFps = Number(configured) || 0;
         // Interactive controller budget only (never still profile ceiling).
         const budgetPx = Number(stats.budgetPx) || 0;
+        const minPx = Number(stats.minPx) || 0;
         const emaFps = Number(stats.lastDragAvgFps) || Number(stats.fps) || 0;
         const scale = Number(stats.lastDragScale) || Number(stats.scale) || 0;
         const steps = Number(stats.lastDragSteps) || Number(stats.steps) || 0;
@@ -334,6 +336,7 @@ export class StatsOverlay implements StatsInstance {
           phase: targeting ? phase : 'off',
           emaFps,
           budgetPx,
+          minPx,
           scale,
           steps,
         });
@@ -368,6 +371,13 @@ export class StatsOverlay implements StatsInstance {
           activeDimensions: [number, number, number] | null;
           downsampleScale: number;
           maxTextureDimension3D: number;
+          volumeMode: 'coarseFull' | 'roiRefined';
+          roiSourceDimensions: [number, number, number] | null;
+          visibleSourceDimensions: [number, number, number] | null;
+          visibleSourceTotal: [number, number, number] | null;
+          visibleSliceRange: [number, number] | null;
+          volumeWorkBusy: boolean;
+          volumeWorkLabel: string;
         }>;
 
         entries.push({
@@ -380,6 +390,21 @@ export class StatsOverlay implements StatsInstance {
             : null,
           downsampleScale: Number(stats.downsampleScale) || 1,
           maxTextureDimension3D: Number(stats.maxTextureDimension3D) || 0,
+          volumeMode: stats.volumeMode,
+          roiSourceDimensions: Array.isArray(stats.roiSourceDimensions)
+            ? stats.roiSourceDimensions
+            : null,
+          visibleSourceDimensions: Array.isArray(stats.visibleSourceDimensions)
+            ? stats.visibleSourceDimensions
+            : null,
+          visibleSourceTotal: Array.isArray(stats.visibleSourceTotal)
+            ? stats.visibleSourceTotal
+            : null,
+          visibleSliceRange: Array.isArray(stats.visibleSliceRange)
+            ? stats.visibleSliceRange
+            : null,
+          volumeWorkBusy: Boolean(stats.volumeWorkBusy),
+          volumeWorkLabel: stats.volumeWorkLabel || '',
         });
       }
     }

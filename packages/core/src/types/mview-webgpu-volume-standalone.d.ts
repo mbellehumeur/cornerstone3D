@@ -13,6 +13,8 @@ declare module '@mview/webgpu-volume-standalone' {
     sourceFormat?: 'r16float';
     label?: string;
     originalDimensions?: [number, number, number];
+    volumeMode?: 'coarseFull' | 'roiRefined';
+    roiSourceDimensions?: [number, number, number];
   };
 
   export type FuberlinVolumeSliceUpdate = {
@@ -90,6 +92,7 @@ declare module '@mview/webgpu-volume-standalone' {
       interacting: boolean;
       targetFps: number;
       budgetPx: number;
+      minPx: number;
       targetFpsPhase: 'off' | 'ready' | 'learn' | 'steer';
       probeBudgetPx: number;
       probeStatus: '' | 'ok' | 'fast' | 'flat' | 'slow' | 'fallback';
@@ -101,8 +104,16 @@ declare module '@mview/webgpu-volume-standalone' {
       lastDragSteps: number;
       sourceDimensions?: [number, number, number] | null;
       activeDimensions?: [number, number, number] | null;
+      activeSpacing?: [number, number, number] | null;
       downsampleScale?: number;
       maxTextureDimension3D?: number;
+      volumeMode?: 'coarseFull' | 'roiRefined';
+      roiSourceDimensions?: [number, number, number] | null;
+      visibleSourceDimensions?: [number, number, number] | null;
+      visibleSourceTotal?: [number, number, number] | null;
+      visibleSliceRange?: [number, number] | null;
+      volumeWorkBusy?: boolean;
+      volumeWorkLabel?: string;
     };
     rotateTrackball(
       deltaX: number,
@@ -112,6 +123,7 @@ declare module '@mview/webgpu-volume-standalone' {
     ): void;
     beginInteraction(): void;
     endInteraction(): void;
+    attachViewRefineSource?(source: Record<string, unknown>): void;
     requestRender(): void;
     render(): void;
     dispose(): void;

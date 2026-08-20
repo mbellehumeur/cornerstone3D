@@ -8,11 +8,19 @@ export type MaxTexturesPanelEntry = {
   activeDimensions?: [number, number, number] | null;
   downsampleScale?: number;
   maxTextureDimension3D?: number;
+  volumeMode?: 'coarseFull' | 'roiRefined';
+  roiSourceDimensions?: [number, number, number] | null;
+  visibleSourceDimensions?: [number, number, number] | null;
+  visibleSourceTotal?: [number, number, number] | null;
+  visibleSliceRange?: [number, number] | null;
+  volumeWorkBusy?: boolean;
+  volumeWorkLabel?: string;
 };
 
 type LineSpec = {
   text: string;
   lossy?: boolean;
+  busy?: boolean;
 };
 
 export class MaxTexturesPanel implements Panel {
@@ -60,6 +68,23 @@ export class MaxTexturesPanel implements Panel {
       color:#d7ebff;
     `;
     this.dom.appendChild(this.list);
+
+    if (!document.getElementById('cs3d-max-textures-busy-style')) {
+      const style = document.createElement('style');
+      style.id = 'cs3d-max-textures-busy-style';
+      style.textContent = `
+        @keyframes cs3d-max-textures-busy {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.4; }
+        }
+        .cs3d-max-textures-busy {
+          color: #ffcc66;
+          font-weight: 700;
+          animation: cs3d-max-textures-busy 0.9s ease-in-out infinite;
+        }
+      `;
+      document.head.appendChild(style);
+    }
   }
 
   public update(): void {
@@ -98,7 +123,9 @@ export class MaxTexturesPanel implements Panel {
       for (const lineSpec of lines) {
         const line = document.createElement('div');
         line.textContent = lineSpec.text;
-        if (lineSpec.lossy) {
+        if (lineSpec.busy) {
+          line.className = 'cs3d-max-textures-busy';
+        } else if (lineSpec.lossy) {
           line.style.color = '#ff6b6b';
           line.style.fontWeight = '700';
         }
@@ -116,39 +143,87 @@ function formatLines(entry: MaxTexturesPanelEntry): LineSpec[] {
     Number(entry.maxTextureDimension3D) > 0
       ? `maxTextureDimension3D ${Math.round(Number(entry.maxTextureDimension3D))}`
       : 'maxTextureDimension3D -';
+  let lines: LineSpec[];
   if (!source && !active) {
-    return [{ text: maxTextureLine }, { text: 'resolution status: unknown' }];
-  }
-  if (!source && active) {
-    return [
+    lines = [{ text: maxTextureLine }, { text: 'resolution status: unknown' }];
+  } else if (!source && active) {
+    lines = [
       { text: maxTextureLine },
       { text: `volume ${active.join('x')} · full resolution` },
     ];
-  }
-  if (!active && source) {
-    return [
+  } else if (!active && source) {
+    lines = [
       { text: maxTextureLine },
       { text: `volume ${source.join('x')} · full resolution` },
     ];
+  } else {
+    const downsized =
+      source![0] !== active![0] ||
+      source![1] !== active![1] ||
+      source![2] !== active![2];
+    if (!downsized) {
+      const roiNative =
+        entry.volumeMode === 'roiRefined' &&
+        entry.roiSourceDimensions &&
+        (entry.roiSourceDimensions[0] !== active![0] ||
+          entry.roiSourceDimensions[1] !== active![1] ||
+          entry.roiSourceDimensions[2] !== active![2]);
+      lines = [
+        { text: maxTextureLine },
+        {
+          text: roiNative
+            ? `volume ${entry.roiSourceDimensions!.join('x')} -> ${active!.join('x')} · roi lossy`
+            : `volume ${active!.join('x')} · full resolution`,
+          lossy: Boolean(roiNative),
+        },
+      ];
+    } else {
+      const scale = Number(entry.downsampleScale);
+      const scaleLabel =
+        Number.isFinite(scale) && scale > 0 ? `${scale.toFixed(3)}x` : '?';
+      lines = [
+        { text: maxTextureLine, lossy: true },
+        {
+          text: `volume ${source!.join('x')} -> ${active!.join('x')} (${scaleLabel}) · lossy`,
+          lossy: true,
+        },
+      ];
+    }
   }
-  const downsized =
-    source![0] !== active![0] ||
-    source![1] !== active![1] ||
-    source![2] !== active![2];
-  if (!downsized) {
-    return [
-      { text: maxTextureLine },
-      { text: `volume ${active!.join('x')} · full resolution` },
-    ];
+  const sliceLine = formatVisibleSliceLine(entry);
+  if (sliceLine) {
+    lines.push({ text: sliceLine });
   }
-  const scale = Number(entry.downsampleScale);
-  const scaleLabel =
-    Number.isFinite(scale) && scale > 0 ? `${scale.toFixed(3)}x` : '?';
-  return [
-    { text: maxTextureLine, lossy: true },
-    {
-      text: `volume ${source!.join('x')} -> ${active!.join('x')} (${scaleLabel}) · lossy`,
-      lossy: true,
-    },
-  ];
+  if (entry.volumeWorkBusy) {
+    lines.push({
+      text: entry.volumeWorkLabel?.trim() || 'reloading volume',
+      busy: true,
+    });
+  }
+  return lines;
+}
+
+function formatVisibleSliceLine(entry: MaxTexturesPanelEntry): string | null {
+  const visible = entry.visibleSourceDimensions;
+  const total = entry.visibleSourceTotal;
+  if (
+    !visible ||
+    !total ||
+    visible.length !== 3 ||
+    total.length !== 3 ||
+    !(total[2] > 0)
+  ) {
+    return null;
+  }
+  const sliceFraction = (visible[2] / total[2]) * 100;
+  const range = entry.visibleSliceRange;
+  const rangeNote =
+    Array.isArray(range) && range.length === 2
+      ? ` · K ${Math.round(range[0])}-${Math.round(range[1])}`
+      : '';
+  return (
+    `in frame ${Math.round(visible[2])}/${Math.round(total[2])} slices ` +
+    `(${sliceFraction.toFixed(1)}%) · I ${Math.round(visible[0])}/${Math.round(total[0])} · ` +
+    `J ${Math.round(visible[1])}/${Math.round(total[1])}${rangeNote}`
+  );
 }

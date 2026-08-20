@@ -26,6 +26,7 @@ import {
   MVIEW_DEFAULT_TARGET_FPS,
   getMviewVolume3DPresentQuality,
   getMviewVolume3DProjection,
+  getMviewVolume3D,
   getMviewVolume3DTargetFps,
   getMviewVolume3DTargetFpsEnabled,
   registerMviewVolume3D,
@@ -200,6 +201,13 @@ export class MviewVolume3DRenderPath
   private srcToDstZ?: number[][];
   private srcXForDstX?: Uint32Array;
   private srcYForDstY?: Uint32Array;
+  private renderContext?: Volume3DViewportRenderContext;
+  private imageVolume?: IImageVolume;
+  private fullVolumeCenter?: [number, number, number];
+  private fullVolumePhysicalMax?: number;
+  private lastViewState?: Partial<Volume3DCamera>;
+  private resolveSourceScalarData?: () => ArrayLike<number> | undefined;
+  private readValueRange?: () => [number, number] | undefined;
 
   async addData(
     ctx: Volume3DViewportRenderContext,
@@ -226,9 +234,14 @@ export class MviewVolume3DRenderPath
       shade: true,
       background: [0, 0, 0],
       targetFps: MVIEW_DEFAULT_TARGET_FPS,
+      handleMaxTexture: true,
       camera: {
         projection: 'orthographic',
         zoom: 0.55,
+      },
+      onViewVolumeLayoutChanged: () => {
+        this.renderer?.requestRender();
+        this.renderContext?.display.renderNow();
       },
     });
     await renderer.initialize();
@@ -242,6 +255,8 @@ export class MviewVolume3DRenderPath
     this.viewportId = ctx.viewportId;
     this.volumeResamplePlan = undefined;
     this.didLogResamplePlan = false;
+    this.renderContext = ctx;
+    this.imageVolume = imageVolume;
     this.volumeDirection = getVolumeDirection(imageVolume);
     this.volumePhysicalMax = getVolumePhysicalMax({
       dimensions: imageVolume.dimensions,
@@ -254,6 +269,10 @@ export class MviewVolume3DRenderPath
         getSpacing: () => imageVolume.spacing,
       }
     ) as [number, number, number] | undefined;
+    this.fullVolumeCenter = this.volumeCenter
+      ? [...this.volumeCenter]
+      : undefined;
+    this.fullVolumePhysicalMax = this.volumePhysicalMax;
 
     registerMviewVolume3D(ctx.viewportId, {
       canvas,
@@ -446,6 +465,21 @@ export class MviewVolume3DRenderPath
         }
       }
       return previewValueRange ?? live;
+    };
+
+    this.readValueRange = () => syncPreviewValueRange();
+    this.resolveSourceScalarData = () => {
+      if (isCpuVolumeComplete()) {
+        return getVolumeScalarArray(imageVolume) ?? undefined;
+      }
+      if (
+        sourceDepth > 0 &&
+        countUploadedSourceSlices() >= sourceDepth &&
+        srcProgressiveData
+      ) {
+        return srcProgressiveData;
+      }
+      return undefined;
     };
 
     const runUpload = <T>(task: () => Promise<T>): Promise<T> => {
@@ -906,6 +940,7 @@ export class MviewVolume3DRenderPath
     camera: unknown
   ): void {
     const viewState = camera as Partial<Volume3DCamera> | undefined;
+    this.lastViewState = viewState;
     applyVolume3DCamera(ctx, viewState, {
       resetClippingRange: true,
     });
@@ -965,6 +1000,11 @@ export class MviewVolume3DRenderPath
     rendering.renderer.dispose();
     this.renderer = undefined;
     this.viewportId = undefined;
+    this.renderContext = undefined;
+    this.imageVolume = undefined;
+    this.resolveSourceScalarData = undefined;
+    this.readValueRange = undefined;
+    this.lastViewState = undefined;
     this.dstScalarData = undefined;
     this.uploadedDstSlices = undefined;
     this.dstToSrcZ = undefined;
@@ -1008,6 +1048,57 @@ export class MviewVolume3DRenderPath
     setMviewVolume3DPresentQuality(this.viewportId, quality);
   }
 
+  private updateRegistryFraming(): void {
+    if (!this.viewportId) {
+      return;
+    }
+    const existing = getMviewVolume3D(this.viewportId);
+    if (!existing) {
+      return;
+    }
+    registerMviewVolume3D(this.viewportId, {
+      ...existing,
+      volumePhysicalMax: this.volumePhysicalMax,
+      volumeCenter: this.volumeCenter,
+    });
+  }
+
+  private syncViewRefineSource(renderer: VolumeRenderer): void {
+    const plan = this.volumeResamplePlan;
+    const imageVolume = this.imageVolume;
+    if (!plan?.enabled || !imageVolume) {
+      return;
+    }
+
+    const spacing = normalizeVolumeSpacing(
+      imageVolume.spacing ?? imageVolume.imageData?.getSpacing?.()
+    );
+    const imageData = imageVolume.imageData;
+    if (!spacing || !imageData) {
+      return;
+    }
+
+    const attach = (
+      renderer as VolumeRenderer & {
+        attachViewRefineSource?: (source: Record<string, unknown>) => void;
+      }
+    ).attachViewRefineSource;
+    attach?.call(renderer, {
+      sourceDimensions: plan.originalDimensions,
+      sourceSpacing: spacing,
+      getScalars: () => this.resolveSourceScalarData?.(),
+      getValueRange: () => this.readValueRange?.(),
+      indexToWorld: (ijk: number[]) =>
+        imageData.indexToWorld(ijk as [number, number, number]),
+      label: imageVolume.volumeId,
+      coarsePlan: plan,
+      getCoarseScalars: () => this.dstScalarData,
+      isCoarseComplete: () => this.isCoarseDstComplete(),
+      fullVolumeCenter: this.fullVolumeCenter,
+      fullVolumePhysicalMax: this.fullVolumePhysicalMax,
+    });
+  }
+
   private async allocateEmptyVolume(
     renderer: VolumeRenderer,
     imageVolume: IImageVolume
@@ -1049,6 +1140,7 @@ export class MviewVolume3DRenderPath
         sourceFormat: 'r16float',
         label: imageVolume.volumeId,
         originalDimensions: plan.originalDimensions,
+        volumeMode: 'coarseFull',
       });
       // setVolume arms the probe for standalone/full uploads; keep it off
       // until every progressive slice is on the GPU.
@@ -1240,7 +1332,22 @@ export class MviewVolume3DRenderPath
           )}, maxTextureDimension3D=${plan.maxTextureDimension3D})`
       );
     }
+    this.syncViewRefineSource(renderer);
     return this.volumeResamplePlan;
+  }
+
+  private isCoarseDstComplete(): boolean {
+    const plan = this.volumeResamplePlan;
+    if (!plan?.enabled || !this.uploadedDstSlices) {
+      return false;
+    }
+    const dstDepth = plan.targetDimensions[2];
+    for (let z = 0; z < dstDepth; z++) {
+      if (!this.uploadedDstSlices[z]) {
+        return false;
+      }
+    }
+    return true;
   }
 }
 

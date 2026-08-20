@@ -13,6 +13,7 @@ export type MviewTargetFpsPanelEntry = {
   phase: MviewTargetFpsPhase;
   emaFps: number;
   budgetPx: number;
+  minPx: number;
   scale: number;
   steps: number;
 };
@@ -113,11 +114,13 @@ export class MviewTargetFpsPanel implements Panel {
       const lines: HudLineSpec[] = !entry.targeting
         ? [
             { text: 'target FPS off' },
+            { text: `min pixel budget: ${formatBudget(entry.minPx)}` },
             { text: interactionLabel, orange: learning },
             { text: `interact budget ${formatBudget(entry.budgetPx)}` },
           ]
         : [
             { text: `target ${entry.targetFps}` },
+            { text: `min pixel budget: ${formatBudget(entry.minPx)}` },
             { text: `ema ${entry.emaFps.toFixed(1)} fps` },
             { text: `interact budget ${formatBudget(entry.budgetPx)}` },
             { text: `scale ${entry.scale.toFixed(2)}` },
