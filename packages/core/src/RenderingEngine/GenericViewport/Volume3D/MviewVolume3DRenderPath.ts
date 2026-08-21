@@ -1,6 +1,7 @@
 import {
   VolumeRenderer,
   convertScalarVolumeToHalfFloatChunk,
+  shouldUseLowMemoryMaxTextureCap,
 } from '@mview/webgpu-volume-standalone';
 import { Events, ViewportType } from '../../../enums';
 import eventTarget from '../../../eventTarget';
@@ -112,11 +113,17 @@ function normalizeVolumeSpacing(
 }
 
 function getRendererTextureLimit(renderer: VolumeRenderer): number {
-  const candidate = (
-    renderer as unknown as {
-      device?: { limits?: { maxTextureDimension3D?: number } };
+  const withGetter = renderer as unknown as {
+    getMaxTextureDimension3D?: () => number;
+    device?: { limits?: { maxTextureDimension3D?: number } };
+  };
+  if (typeof withGetter.getMaxTextureDimension3D === 'function') {
+    const effective = Number(withGetter.getMaxTextureDimension3D());
+    if (Number.isFinite(effective) && effective > 0) {
+      return effective;
     }
-  ).device?.limits?.maxTextureDimension3D;
+  }
+  const candidate = withGetter.device?.limits?.maxTextureDimension3D;
   if (Number.isFinite(candidate) && (candidate as number) > 0) {
     return candidate as number;
   }
@@ -249,6 +256,7 @@ export class MviewVolume3DRenderPath
       background: [0, 0, 0],
       targetFps: MVIEW_DEFAULT_TARGET_FPS,
       handleMaxTexture: true,
+      maxTextureDimension3DCap: 1024, // force tablet mode - low memory
       camera: {
         projection: 'orthographic',
         zoom: 0.55,
@@ -871,6 +879,19 @@ export class MviewVolume3DRenderPath
     };
 
     const kickNativeR16IfReady = () => {
+      // Tablet/low-memory: skip full-volume r16 cache; ROI converts from CS scalars.
+      // Still drop the progressive assembly duplicate once the volume is complete.
+      if (
+        shouldUseLowMemoryMaxTextureCap() ||
+        (
+          this.renderer as { shouldDisableVolumeCaches?: () => boolean }
+        )?.shouldDisableVolumeCaches?.()
+      ) {
+        this.releaseNativeScalarAssembly?.();
+        this.nativeR16 = undefined;
+        this.nativeR16Complete = false;
+        return;
+      }
       if (this.nativeR16Complete) {
         return;
       }
@@ -1160,6 +1181,14 @@ export class MviewVolume3DRenderPath
       coarsePlan: plan,
       getCoarseScalars: () => this.dstScalarData,
       isCoarseComplete: () => this.isCoarseDstComplete(),
+      releaseCoarseCpuBuffers: () => {
+        this.dstScalarData = undefined;
+        this.uploadedDstSlices = undefined;
+        this.dstToSrcZ = undefined;
+        this.srcToDstZ = undefined;
+        this.srcXForDstX = undefined;
+        this.srcYForDstY = undefined;
+      },
       fullVolumeCenter: this.fullVolumeCenter,
       fullVolumePhysicalMax: this.fullVolumePhysicalMax,
       getVtkVisibleRoi: () => this.computeVtkVisibleVolumeRoi(),
@@ -1183,6 +1212,17 @@ export class MviewVolume3DRenderPath
     dimensions: [number, number, number],
     valueRange: [number, number] | undefined
   ): void {
+    if (
+      shouldUseLowMemoryMaxTextureCap() ||
+      (
+        this.renderer as { shouldDisableVolumeCaches?: () => boolean }
+      )?.shouldDisableVolumeCaches?.()
+    ) {
+      this.nativeR16 = undefined;
+      this.nativeR16Complete = false;
+      this.releaseNativeScalarAssembly?.();
+      return;
+    }
     if (this.nativeR16Complete && this.nativeR16) {
       this.releaseNativeScalarAssembly?.();
       return;

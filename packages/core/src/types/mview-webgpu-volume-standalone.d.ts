@@ -80,6 +80,8 @@ declare module '@mview/webgpu-volume-standalone' {
     scheduleTargetFpsProbe(): void;
     runTargetFpsProbe(generation?: number): Promise<number | null>;
     waitForGpuIdle(): Promise<void>;
+    getMaxTextureDimension3D?(): number;
+    shouldDisableVolumeCaches?(): boolean;
     getStats(): {
       fps: number;
       frameMs: number;
@@ -148,4 +150,46 @@ declare module '@mview/webgpu-volume-standalone' {
     valueRange: [number, number];
     dimensions: [number, number, number];
   };
+
+  export function shouldUseLowMemoryMaxTextureCap(
+    env?: Navigator | null
+  ): boolean;
+
+  export function isAndroidOrTablet(env?: Navigator | null): boolean;
+
+  export function resolveEffectiveMaxTextureDimension3D(
+    deviceLimit: number,
+    options?: {
+      maxTextureDimension3DCap?: number | false | null | 'device';
+      env?: Navigator | null;
+    }
+  ): number;
+
+  export function estimateR16TextureBytes(
+    dimensions: number[] | null | undefined
+  ): number;
+
+  export function shrinkBrickToR16ByteBudget(
+    brick: {
+      ijkMin: number[];
+      ijkMax: number[];
+      roiDimensions: number[];
+      roiSpacing: number[];
+      centerIjk: number[];
+    },
+    sourceDimensions: number[],
+    maxBytes: number
+  ):
+    | {
+        ijkMin: number[];
+        ijkMax: number[];
+        roiDimensions: number[];
+        roiSpacing: number[];
+        centerIjk: number[];
+      }
+    | undefined;
+
+  export const LOW_MEMORY_MAX_TEXTURE_DIMENSION_3D: number;
+  export const LOW_MEMORY_ROI_MAX_TEXTURE_DIMENSION_3D: number;
+  export const LOW_MEMORY_ROI_MAX_BYTES: number;
 }
