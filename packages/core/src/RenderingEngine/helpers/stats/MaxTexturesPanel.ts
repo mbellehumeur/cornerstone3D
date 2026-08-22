@@ -19,6 +19,8 @@ export type MaxTexturesPanelEntry = {
   volumeWorkLabel?: string;
   /** Wall time of the last completed volume reload (ms). */
   lastVolumeReloadMs?: number;
+  /** True when GPU volume is downsampled vs source / ROI native. */
+  isLossy?: boolean;
 };
 
 type LineSpec = {
@@ -165,20 +167,28 @@ function formatLines(entry: MaxTexturesPanelEntry): LineSpec[] {
       source![0] !== active![0] ||
       source![1] !== active![1] ||
       source![2] !== active![2];
-    if (!downsized) {
-      const roiNative =
-        entry.volumeMode === 'roiRefined' &&
-        entry.roiSourceDimensions &&
-        (entry.roiSourceDimensions[0] !== active![0] ||
-          entry.roiSourceDimensions[1] !== active![1] ||
-          entry.roiSourceDimensions[2] !== active![2]);
+    const roiNative =
+      entry.volumeMode === 'roiRefined' &&
+      entry.roiSourceDimensions &&
+      (entry.roiSourceDimensions[0] !== active![0] ||
+        entry.roiSourceDimensions[1] !== active![1] ||
+        entry.roiSourceDimensions[2] !== active![2]);
+    // Prefer renderer isLossy when present so badge and panel stay in sync.
+    const lossy =
+      typeof entry.isLossy === 'boolean'
+        ? entry.isLossy
+        : downsized || Boolean(roiNative);
+    if (!lossy) {
+      lines = [
+        { text: maxTextureLine },
+        { text: `volume ${active!.join('x')} · full resolution` },
+      ];
+    } else if (!downsized && roiNative) {
       lines = [
         { text: maxTextureLine },
         {
-          text: roiNative
-            ? `volume ${entry.roiSourceDimensions!.join('x')} -> ${active!.join('x')} · roi lossy`
-            : `volume ${active!.join('x')} · full resolution`,
-          lossy: Boolean(roiNative),
+          text: `volume ${entry.roiSourceDimensions!.join('x')} -> ${active!.join('x')} · roi lossy`,
+          lossy: true,
         },
       ];
     } else {
@@ -194,20 +204,9 @@ function formatLines(entry: MaxTexturesPanelEntry): LineSpec[] {
       ];
     }
   }
-  const mviewLine = formatVisibleSliceLine(
-    entry.visibleSourceDimensions,
-    entry.visibleSourceTotal,
-    entry.visibleSliceRange,
-    'mview'
-  );
-  if (mviewLine) {
-    lines.push({ text: mviewLine });
-  }
   const vtkLine = formatVisibleSliceLine(
     entry.vtkVisibleSourceDimensions,
-    entry.visibleSourceTotal,
-    entry.vtkVisibleSliceRange,
-    'vtk'
+    entry.visibleSourceTotal
   );
   if (vtkLine) {
     lines.push({ text: vtkLine });
@@ -232,11 +231,10 @@ function formatReloadMs(ms: number): string {
   return `${Math.round(ms)} ms`;
 }
 
+/** Visible-slice count only — no I/J/K range suffixes. */
 function formatVisibleSliceLine(
   visible: [number, number, number] | null | undefined,
-  total: [number, number, number] | null | undefined,
-  range: [number, number] | null | undefined,
-  label: 'mview' | 'vtk'
+  total: [number, number, number] | null | undefined
 ): string | null {
   if (
     !visible ||
@@ -248,13 +246,8 @@ function formatVisibleSliceLine(
     return null;
   }
   const sliceFraction = (visible[2] / total[2]) * 100;
-  const rangeNote =
-    Array.isArray(range) && range.length === 2
-      ? ` · K ${Math.round(range[0])}-${Math.round(range[1])}`
-      : '';
   return (
-    `in frame (${label}) ${Math.round(visible[2])}/${Math.round(total[2])} slices ` +
-    `(${sliceFraction.toFixed(1)}%) · I ${Math.round(visible[0])}/${Math.round(total[0])} · ` +
-    `J ${Math.round(visible[1])}/${Math.round(total[1])}${rangeNote}`
+    `in frame ${Math.round(visible[2])}/${Math.round(total[2])} slices ` +
+    `(${sliceFraction.toFixed(1)}%)`
   );
 }

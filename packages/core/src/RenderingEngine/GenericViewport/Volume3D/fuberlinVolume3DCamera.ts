@@ -32,7 +32,8 @@ export type FuberlinCameraConvertOptions = {
 export const FUBERLIN_ORTHO_DEFAULT_HALF_HEIGHT = 0.55;
 
 const ORTHO_HALF_HEIGHT_MIN = 0.05;
-const ORTHO_HALF_HEIGHT_MAX = 2;
+/** Match mviewVolume3DCamera — allow zoom-out so framing tracks VTK. */
+const ORTHO_HALF_HEIGHT_MAX = 8;
 const ORTHO_PAN_MAX = 2;
 
 /**

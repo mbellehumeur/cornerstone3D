@@ -16,10 +16,13 @@ export type MviewTargetFpsPanelEntry = {
   minPx: number;
   scale: number;
   steps: number;
+  /** Interactive frames counted in the current drag / learn window. */
+  dragFrames: number;
 };
 type HudLineSpec = {
   text: string;
   orange?: boolean;
+  green?: boolean;
 };
 
 /**
@@ -105,18 +108,24 @@ export class MviewTargetFpsPanel implements Panel {
         gap:2px;
       `;
 
-      // ready waits idle; only the active learn window shows "learning" (orange).
-      const learning = entry.phase === 'learn';
-      const interactionLabel = learning
-        ? 'learning'
-        : entry.interacting
-          ? 'drag'
+      // ready waits idle; learn = probing (orange); drag = analysing (green).
+      const probing = entry.phase === 'learn';
+      const analysing = !probing && entry.interacting;
+      const frames = Math.max(0, Math.round(entry.dragFrames) || 0);
+      const interactionLabel = probing
+        ? `probing · ${frames} frames`
+        : analysing
+          ? `analysing frame data · ${frames} frames`
           : 'idle';
       const lines: HudLineSpec[] = !entry.targeting
         ? [
             { text: 'target FPS off' },
             { text: `min pixel budget: ${formatBudget(entry.minPx)}` },
-            { text: interactionLabel, orange: learning },
+            {
+              text: interactionLabel,
+              orange: probing,
+              green: analysing,
+            },
             { text: `interact budget ${formatBudget(entry.budgetPx)}` },
           ]
         : [
@@ -127,7 +136,11 @@ export class MviewTargetFpsPanel implements Panel {
             {
               text: `scale ${entry.scale.toFixed(2)} · steps ${entry.steps}`,
             },
-            { text: interactionLabel, orange: learning },
+            {
+              text: interactionLabel,
+              orange: probing,
+              green: analysing,
+            },
           ];
 
       for (const lineSpec of lines) {
@@ -135,6 +148,9 @@ export class MviewTargetFpsPanel implements Panel {
         line.textContent = lineSpec.text;
         if (lineSpec.orange) {
           line.style.color = '#ff9800';
+          line.style.fontWeight = '700';
+        } else if (lineSpec.green) {
+          line.style.color = '#4caf50';
           line.style.fontWeight = '700';
         }
         row.appendChild(line);

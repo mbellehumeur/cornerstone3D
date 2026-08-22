@@ -21,7 +21,24 @@ declare module '@mview/webgpu-volume-standalone' {
     data: ArrayBufferView;
     dimensions: [number, number, number];
     sliceIndices: number[];
+    /** When set, write converted source planes to these GPU depth indices. */
+    destSliceIndices?: number[];
     valueRange?: [number, number];
+  };
+
+  export type MaxTextureReduceMode = 'uniform' | 'zSkip';
+
+  export type MaxTextureResamplePlan = {
+    enabled: boolean;
+    mode: MaxTextureReduceMode;
+    originalDimensions: number[];
+    targetDimensions: number[];
+    targetSpacing: number[];
+    uniformScale: number;
+    maxTextureDimension3D: number;
+    strideZ?: number;
+    dstToSrcZ?: Uint32Array;
+    forcedUniformReason?: string;
   };
 
   export type FuberlinCameraState = {
@@ -53,6 +70,7 @@ declare module '@mview/webgpu-volume-standalone' {
   export class VolumeRenderer {
     static isSupported(): boolean;
     constructor(canvas: HTMLCanvasElement, options?: Record<string, unknown>);
+    maxTextureReduceMode?: MaxTextureReduceMode;
     initialize(): Promise<VolumeRenderer>;
     setVolume(volume: FuberlinVolumeDescriptor): Promise<void>;
     updateVolumeSlices(update: FuberlinVolumeSliceUpdate): Promise<void>;
@@ -60,6 +78,7 @@ declare module '@mview/webgpu-volume-standalone' {
     setSettings(settings: FuberlinSettingsPatch): void;
     setCamera(camera?: FuberlinCameraPatch): void;
     getCamera(): FuberlinCameraState;
+    refreshVisibleRoiStats?(): void;
     setQualityProfiles(quality?: {
       interactive?: {
         pixelBudget?: number;
@@ -117,6 +136,8 @@ declare module '@mview/webgpu-volume-standalone' {
       volumeWorkBusy?: boolean;
       volumeWorkLabel?: string;
       lastVolumeReloadMs?: number;
+      /** True when GPU volume is downsampled vs source / ROI native. */
+      isLossy?: boolean;
     };
     rotateTrackball(
       deltaX: number,
@@ -126,7 +147,24 @@ declare module '@mview/webgpu-volume-standalone' {
     ): void;
     beginInteraction(): void;
     endInteraction(): void;
-    attachViewRefineSource?(source: Record<string, unknown>): void;
+    attachViewRefineSource?(source: {
+      sourceDimensions?: [number, number, number];
+      sourceSpacing?: [number, number, number];
+      getScalars?: () => ArrayLike<number> | undefined;
+      /** True when every source K in [ijkMin[2], ijkMax[2]] is in the progressive assembly. */
+      areSourceSlicesReady?: (ijkMin: number[], ijkMax: number[]) => boolean;
+      getNativeR16?: () => Uint16Array | undefined;
+      getValueRange?: () => [number, number] | undefined;
+      indexToWorld?: (ijk: number[]) => number[];
+      label?: string;
+      coarsePlan?: unknown;
+      getCoarseScalars?: () => ArrayLike<number> | undefined;
+      isCoarseComplete?: () => boolean;
+      releaseCoarseCpuBuffers?: () => void;
+      fullVolumeCenter?: [number, number, number];
+      fullVolumePhysicalMax?: number;
+      getVtkVisibleRoi?: () => unknown;
+    }): void;
     requestRender(): void;
     render(): void;
     dispose(): void;
@@ -188,6 +226,46 @@ declare module '@mview/webgpu-volume-standalone' {
         centerIjk: number[];
       }
     | undefined;
+
+  export function normalizeMaxTextureReduceMode(
+    mode: unknown
+  ): MaxTextureReduceMode;
+
+  export function buildZSkipDstToSrcMap(
+    srcDepth: number,
+    dstDepth: number
+  ): Uint32Array;
+
+  export function buildUniformResamplePlan(
+    dimensions: number[],
+    spacing: number[],
+    maxTextureDimension3D: number
+  ): MaxTextureResamplePlan;
+
+  export function buildZSkipResamplePlan(
+    dimensions: number[],
+    spacing: number[],
+    maxTextureDimension3D: number
+  ): MaxTextureResamplePlan;
+
+  export function buildMaxTextureResamplePlan(
+    dimensions: number[],
+    spacing: number[],
+    maxTextureDimension3D: number,
+    mode?: MaxTextureReduceMode | string
+  ): MaxTextureResamplePlan;
+
+  export function packZSkippedSlices(
+    source: ArrayBufferView,
+    sourceDimensions: number[],
+    plan: MaxTextureResamplePlan
+  ): ArrayBufferView;
+
+  export function resampleScalarVolumeNearest(
+    source: ArrayBufferView,
+    sourceDimensions: number[],
+    targetDimensions: number[]
+  ): Float32Array;
 
   export const LOW_MEMORY_MAX_TEXTURE_DIMENSION_3D: number;
   export const LOW_MEMORY_ROI_MAX_TEXTURE_DIMENSION_3D: number;

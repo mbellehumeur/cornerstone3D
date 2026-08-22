@@ -32,7 +32,8 @@ export type MviewCameraConvertOptions = {
 export const MVIEW_ORTHO_DEFAULT_HALF_HEIGHT = 0.55;
 
 const ORTHO_HALF_HEIGHT_MIN = 0.05;
-const ORTHO_HALF_HEIGHT_MAX = 2;
+/** Allow zoom-out past ~2× volume half-height so HUD/ROI match VTK. */
+const ORTHO_HALF_HEIGHT_MAX = 8;
 const ORTHO_PAN_MAX = 2;
 
 /**

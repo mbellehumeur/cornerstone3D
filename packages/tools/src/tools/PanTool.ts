@@ -52,6 +52,20 @@ class PanTool extends BaseTool {
     endSlicerLiveVolume3DInteraction(viewportId);
   }
 
+  /** Remove mouse + touch end listeners so interaction can settle on tablets. */
+  private _detachInteractionEndListeners(handler: () => void): void {
+    document.removeEventListener('mouseup', handler);
+    document.removeEventListener('touchend', handler);
+    document.removeEventListener('touchcancel', handler);
+  }
+
+  /** Arm end-of-drag cleanup for both mouse and touch (Android tablets). */
+  private _attachInteractionEndListeners(handler: () => void): void {
+    document.addEventListener('mouseup', handler);
+    document.addEventListener('touchend', handler);
+    document.addEventListener('touchcancel', handler);
+  }
+
   private _armVolume3DInteractionCleanup(viewport: {
     id: string;
     render: () => void;
@@ -67,17 +81,20 @@ class PanTool extends BaseTool {
     this._hasVolume3DInteraction = true;
 
     if (this.cleanUp !== null) {
-      document.removeEventListener('mouseup', this.cleanUp);
+      this._detachInteractionEndListeners(this.cleanUp);
     }
 
     this.cleanUp = () => {
+      if (this.cleanUp) {
+        this._detachInteractionEndListeners(this.cleanUp);
+      }
       this._endVolume3DInteraction(viewport.id);
       viewport.render();
       this._hasVolume3DInteraction = false;
       this.cleanUp = null;
     };
 
-    document.addEventListener('mouseup', this.cleanUp, { once: true });
+    this._attachInteractionEndListeners(this.cleanUp);
   }
 
   touchDragCallback(evt: EventTypes.InteractionEventType) {

@@ -73,6 +73,7 @@ export class StatsOverlay implements StatsInstance {
 
       // Apply styles and add to DOM
       this.applyOverlayStyles();
+      this.attachCloseButton();
       this.restorePosition();
       this.attachDragHandlers();
       document.body.appendChild(this.dom);
@@ -128,6 +129,52 @@ export class StatsOverlay implements StatsInstance {
    */
   private applyOverlayStyles(): void {
     Object.assign(this.dom.style, STATS_CONFIG.OVERLAY_STYLES);
+    // Anchor for the absolute close button.
+    this.dom.style.position = 'fixed';
+  }
+
+  private attachCloseButton(): void {
+    if (!this.dom) {
+      return;
+    }
+
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'cs3d-stats-overlay-close';
+    close.setAttribute('aria-label', 'Close stats overlay');
+    close.title = 'Close HUD (Ctrl+Shift+D)';
+    close.textContent = '×';
+    Object.assign(close.style, {
+      position: 'absolute',
+      top: '2px',
+      right: '2px',
+      zIndex: '1',
+      width: '22px',
+      height: '22px',
+      margin: '0',
+      padding: '0',
+      border: '1px solid rgba(255, 255, 255, 0.35)',
+      borderRadius: '3px',
+      background: 'rgba(0, 0, 0, 0.65)',
+      color: '#fff',
+      fontSize: '16px',
+      fontWeight: '700',
+      lineHeight: '18px',
+      cursor: 'pointer',
+      pointerEvents: 'auto',
+      userSelect: 'none',
+    });
+
+    close.addEventListener('pointerdown', (event) => {
+      event.stopPropagation();
+    });
+    close.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.cleanup();
+    });
+
+    this.dom.appendChild(close);
   }
 
   /**
@@ -299,6 +346,7 @@ export class StatsOverlay implements StatsInstance {
           minPx: number;
           targetFpsPhase: 'off' | 'ready' | 'learn' | 'steer';
           lastDragAvgFps: number;
+          lastDragFrames: number;
           fps: number;
           lastDragScale: number;
           scale: number;
@@ -317,6 +365,7 @@ export class StatsOverlay implements StatsInstance {
         const emaFps = Number(stats.lastDragAvgFps) || Number(stats.fps) || 0;
         const scale = Number(stats.lastDragScale) || Number(stats.scale) || 0;
         const steps = Number(stats.lastDragSteps) || Number(stats.steps) || 0;
+        const dragFrames = Number(stats.lastDragFrames) || 0;
         const rawPhase = stats.targetFpsPhase;
         const phase =
           rawPhase === 'ready' ||
@@ -339,6 +388,7 @@ export class StatsOverlay implements StatsInstance {
           minPx,
           scale,
           steps,
+          dragFrames,
         });
       }
     }
@@ -381,6 +431,7 @@ export class StatsOverlay implements StatsInstance {
           volumeWorkBusy: boolean;
           volumeWorkLabel: string;
           lastVolumeReloadMs: number;
+          isLossy: boolean;
         }>;
 
         entries.push({
@@ -417,6 +468,8 @@ export class StatsOverlay implements StatsInstance {
           volumeWorkBusy: Boolean(stats.volumeWorkBusy),
           volumeWorkLabel: stats.volumeWorkLabel || '',
           lastVolumeReloadMs: Number(stats.lastVolumeReloadMs) || 0,
+          isLossy:
+            typeof stats.isLossy === 'boolean' ? stats.isLossy : undefined,
         });
       }
     }
@@ -542,6 +595,13 @@ export class StatsOverlay implements StatsInstance {
 
   private onPointerDown(event: PointerEvent): void {
     if (!this.dom || event.button !== 0) {
+      return;
+    }
+    // Don't start a drag from the close button.
+    if (
+      event.target instanceof Element &&
+      event.target.closest('.cs3d-stats-overlay-close')
+    ) {
       return;
     }
 

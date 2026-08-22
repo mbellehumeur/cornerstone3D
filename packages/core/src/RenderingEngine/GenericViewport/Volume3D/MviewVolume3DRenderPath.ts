@@ -2,6 +2,10 @@ import {
   VolumeRenderer,
   convertScalarVolumeToHalfFloatChunk,
   shouldUseLowMemoryMaxTextureCap,
+  buildMaxTextureResamplePlan,
+  buildZSkipDstToSrcMap,
+  normalizeMaxTextureReduceMode,
+  resampleScalarVolumeNearest,
 } from '@mview/webgpu-volume-standalone';
 import { Events, ViewportType } from '../../../enums';
 import eventTarget from '../../../eventTarget';
@@ -41,7 +45,6 @@ import {
   setMviewVolume3DValueRange,
   unregisterMviewVolume3D,
 } from './mviewVolume3DRegistry';
-import { setStatsOverlayEnabled } from '../../helpers/stats/toggleStatsOverlay';
 import { VIEWPORT_PRESETS } from '../../../constants';
 import type {
   Volume3DCamera,
@@ -75,15 +78,24 @@ const APPLY_MVIEW_POST_LOAD_PITCH_UP_90 = false;
 const PROGRESSIVE_FRAME_SLICE_BUDGET = 12;
 const PROGRESSIVE_BURST_DEBOUNCE_MS = 24;
 const PROGRESSIVE_LOG_EVERY_UPDATES = 30;
+/** Nested Z interlacing: every 2nd overview → full (milder than 4→2→1). */
+const PROGRESSIVE_Z_STRIDES = [2, 1] as const;
+/** Reveal as soon as this many authoritative slices are on the GPU. */
+const PROGRESSIVE_EARLY_REVEAL_MIN_SLICES = 1;
 
 type VolumeDims3 = [number, number, number];
+type MaxTextureReduceMode = 'uniform' | 'zSkip';
 type VolumeResamplePlan = {
   enabled: boolean;
+  mode: MaxTextureReduceMode;
   originalDimensions: VolumeDims3;
   targetDimensions: VolumeDims3;
   targetSpacing: VolumeDims3;
   uniformScale: number;
   maxTextureDimension3D: number;
+  strideZ?: number;
+  dstToSrcZ?: Uint32Array;
+  forcedUniformReason?: string;
 };
 
 function normalizeVolumeDims(
@@ -130,66 +142,154 @@ function getRendererTextureLimit(renderer: VolumeRenderer): number {
   return 2048;
 }
 
-function buildUniformResamplePlan(
-  dimensions: VolumeDims3,
-  spacing: VolumeDims3,
-  maxTextureDimension3D: number
-): VolumeResamplePlan {
-  const maxDimension = Math.max(...dimensions);
-  const uniformScale =
-    maxDimension > maxTextureDimension3D
-      ? maxTextureDimension3D / maxDimension
-      : 1;
-  const targetDimensions = dimensions.map((dim) =>
-    Math.max(1, Math.floor(dim * uniformScale))
-  ) as VolumeDims3;
-  const targetSpacing = spacing.map(
-    (value) => value / Math.max(uniformScale, Number.EPSILON)
-  ) as VolumeDims3;
+function resolveMaxTextureReduceMode(): MaxTextureReduceMode {
+  try {
+    const fromUrl = new URLSearchParams(window.location.search).get(
+      'maxTextureReduce'
+    );
+    if (fromUrl) {
+      return normalizeMaxTextureReduceMode(fromUrl) as MaxTextureReduceMode;
+    }
+  } catch {
+    // ignore
+  }
+  return 'zSkip';
+}
+
+/** Default on; `?progressiveZ=off` restores FIFO upload order. */
+function isProgressiveZInterlaceEnabled(): boolean {
+  try {
+    const value = new URLSearchParams(window.location.search).get(
+      'progressiveZ'
+    );
+    if (value === 'off' || value === '0' || value === 'false') {
+      return false;
+    }
+  } catch {
+    // ignore
+  }
+  return true;
+}
+
+/**
+ * Nested pass for strides 2→1:
+ * - pass 0: even z (sparse overview)
+ * - pass 1: odds (full)
+ */
+function progressiveZPassIndex(z: number): number {
+  return z % 2 === 0 ? 0 : 1;
+}
+
+/**
+ * Pull up to `budget` indices from `readyQueue`, preferring lower interlacing
+ * passes and center-out order within a pass. Mutates `readyQueue`.
+ */
+function pickNextInterlacedSlices(
+  readyQueue: number[],
+  budget: number,
+  depth: number,
+  enabled: boolean
+): { picked: number[]; pass: number } {
+  if (!readyQueue.length || budget <= 0) {
+    return { picked: [], pass: 0 };
+  }
+  if (!enabled) {
+    return {
+      picked: readyQueue.splice(0, budget),
+      pass: -1,
+    };
+  }
+
+  let activePass = PROGRESSIVE_Z_STRIDES.length - 1;
+  for (let pass = 0; pass < PROGRESSIVE_Z_STRIDES.length; pass++) {
+    if (readyQueue.some((z) => progressiveZPassIndex(z) === pass)) {
+      activePass = pass;
+      break;
+    }
+  }
+
+  const center = Math.max(0, depth - 1) / 2;
+  const candidates: { z: number; queueIndex: number }[] = [];
+  for (let i = 0; i < readyQueue.length; i++) {
+    const z = readyQueue[i];
+    if (progressiveZPassIndex(z) === activePass) {
+      candidates.push({ z, queueIndex: i });
+    }
+  }
+  candidates.sort((a, b) => {
+    const da = Math.abs(a.z - center);
+    const db = Math.abs(b.z - center);
+    if (da !== db) {
+      return da - db;
+    }
+    return a.z - b.z;
+  });
+
+  const selected = candidates.slice(0, budget);
+  const removeIndexes = new Set(selected.map((c) => c.queueIndex));
+  const remaining: number[] = [];
+  for (let i = 0; i < readyQueue.length; i++) {
+    if (!removeIndexes.has(i)) {
+      remaining.push(readyQueue[i]);
+    }
+  }
+  readyQueue.length = 0;
+  readyQueue.push(...remaining);
+
   return {
-    enabled: uniformScale < 1,
-    originalDimensions: dimensions,
-    targetDimensions,
-    targetSpacing,
-    uniformScale,
-    maxTextureDimension3D,
+    picked: selected.map((c) => c.z),
+    pass: activePass,
   };
 }
 
-function resampleScalarVolumeNearest(
-  source: ArrayBufferView,
-  sourceDimensions: VolumeDims3,
-  targetDimensions: VolumeDims3
-): Float32Array {
-  const [srcWidth, srcHeight, srcDepth] = sourceDimensions;
-  const [dstWidth, dstHeight, dstDepth] = targetDimensions;
-  const dst = new Float32Array(dstWidth * dstHeight * dstDepth);
-  const srcPlane = srcWidth * srcHeight;
-  const dstPlane = dstWidth * dstHeight;
-  const srcAsArray = source as unknown as { [index: number]: number };
+function progressiveEarlyRevealThreshold(_depth: number): number {
+  return PROGRESSIVE_EARLY_REVEAL_MIN_SLICES;
+}
 
-  for (let z = 0; z < dstDepth; z++) {
-    const srcZ = Math.min(
-      srcDepth - 1,
-      Math.floor(((z + 0.5) * srcDepth) / dstDepth)
-    );
-    for (let y = 0; y < dstHeight; y++) {
-      const srcY = Math.min(
-        srcHeight - 1,
-        Math.floor(((y + 0.5) * srcHeight) / dstHeight)
-      );
-      const dstRowBase = z * dstPlane + y * dstWidth;
-      const srcRowBase = srcZ * srcPlane + srcY * srcWidth;
-      for (let x = 0; x < dstWidth; x++) {
-        const srcX = Math.min(
-          srcWidth - 1,
-          Math.floor(((x + 0.5) * srcWidth) / dstWidth)
-        );
-        dst[dstRowBase + x] = Number(srcAsArray[srcRowBase + srcX]) || 0;
+/**
+ * Stretch each primary Z plane across the current interlacing stride so DVR
+ * does not shade through empty zero slabs. Gap fills are not marked
+ * authoritative — denser passes overwrite them.
+ */
+function buildGapFilledSlicePairs(
+  primaryZs: number[],
+  primaryToSrcZ: (primaryZ: number) => number,
+  pass: number,
+  depth: number,
+  enabled: boolean,
+  isAuthoritative: (z: number) => boolean
+): { destZs: number[]; srcZs: number[] } {
+  const destZs: number[] = [];
+  const srcZs: number[] = [];
+  if (!primaryZs.length) {
+    return { destZs, srcZs };
+  }
+  if (!enabled || pass < 0) {
+    for (const z of primaryZs) {
+      destZs.push(z);
+      srcZs.push(primaryToSrcZ(z));
+    }
+    return { destZs, srcZs };
+  }
+
+  const stride = PROGRESSIVE_Z_STRIDES[pass] ?? 1;
+  const seen = new Set<number>();
+  for (const primary of primaryZs) {
+    const srcZ = primaryToSrcZ(primary);
+    const fillTo = Math.min(depth, primary + stride);
+    for (let d = primary; d < fillTo; d++) {
+      if (seen.has(d)) {
+        continue;
       }
+      if (d !== primary && isAuthoritative(d)) {
+        continue;
+      }
+      seen.add(d);
+      destZs.push(d);
+      srcZs.push(srcZ);
     }
   }
-  return dst;
+  return { destZs, srcZs };
 }
 
 /** @internal */
@@ -218,6 +318,10 @@ export class MviewVolume3DRenderPath
   private fullVolumePhysicalMax?: number;
   private lastViewState?: Partial<Volume3DCamera>;
   private resolveSourceScalarData?: () => ArrayLike<number> | undefined;
+  private areSourceSlicesReady?: (
+    ijkMin: number[],
+    ijkMax: number[]
+  ) => boolean;
   private readValueRange?: () => [number, number] | undefined;
   /** One-shot native scalar buffer for ROI refine (avoid rematerialize every settle). */
   private cachedNativeScalars?: ArrayLike<number>;
@@ -247,6 +351,8 @@ export class MviewVolume3DRenderPath
     const canvas = this.ensureCanvas(ctx.viewport.element);
     this.resizeCanvas(canvas, ctx.viewport.element);
 
+    const maxTextureReduceMode = resolveMaxTextureReduceMode();
+    const progressiveZEnabled = isProgressiveZInterlaceEnabled();
     const renderer = new VolumeRenderer(canvas, {
       // Match OHIF Volume3D defaults (CT-Bone composite DVR).
       mode: 'composite',
@@ -256,7 +362,8 @@ export class MviewVolume3DRenderPath
       background: [0, 0, 0],
       targetFps: MVIEW_DEFAULT_TARGET_FPS,
       handleMaxTexture: true,
-      maxTextureDimension3DCap: 1024, // force tablet mode - low memory
+      //  maxTextureDimension3DCap: 1024, // force tablet mode - low memory
+      maxTextureReduceMode,
       camera: {
         projection: 'orthographic',
         zoom: 0.55,
@@ -267,8 +374,6 @@ export class MviewVolume3DRenderPath
       },
     });
     await renderer.initialize();
-    // Show Cornerstone stats overlay (includes MVIEW TARGET FPS panel).
-    setStatsOverlayEnabled(true);
     // Progressive path: defer the GPU probe until the volume is fully loaded.
     renderer.setTargetFpsProbeReady?.(false);
     this.canvas = canvas;
@@ -403,6 +508,8 @@ export class MviewVolume3DRenderPath
     let gpuVolumeFinalized = false;
     /** First range used for preview patches + TF; later slices keep this window. */
     let previewValueRange: [number, number] | undefined;
+    let overviewCanvasRevealed = false;
+    let lastLoggedOverviewPass = -2;
 
     const countUploadedSourceSlices = () => {
       let count = 0;
@@ -455,7 +562,9 @@ export class MviewVolume3DRenderPath
         clearTimeout(progressiveFlushTimer);
         progressiveFlushTimer = null;
       }
-      this.applyPresentQuality();
+      // Do not re-apply present quality here — that remaps still/interactive
+      // profiles and causes an end-of-load visual pop. Profiles were set at
+      // allocate / first progressive apply.
       await this.renderer.waitForGpuIdle?.();
       if (!this.renderer) {
         return;
@@ -496,13 +605,8 @@ export class MviewVolume3DRenderPath
       if (this.nativeR16Complete && this.nativeR16) {
         return undefined;
       }
-      // Prefer the progressive assembly — already complete and contiguous.
-      if (
-        sourceDepth > 0 &&
-        countUploadedSourceSlices() >= sourceDepth &&
-        srcProgressiveData
-      ) {
-        this.cachedNativeScalars = srcProgressiveData;
+      // Progressive assembly (may be partial) — refine gates on areSourceSlicesReady.
+      if (srcProgressiveData) {
         return srcProgressiveData;
       }
       if (this.cachedNativeScalars) {
@@ -516,6 +620,25 @@ export class MviewVolume3DRenderPath
         return scalars;
       }
       return undefined;
+    };
+    this.areSourceSlicesReady = (ijkMin, ijkMax) => {
+      if (!uploadedSourceSlices.length || sourceDepth <= 0) {
+        return false;
+      }
+      const k0 = Math.max(0, Math.floor(Number(ijkMin?.[2]) || 0));
+      const k1 = Math.min(
+        sourceDepth - 1,
+        Math.floor(Number(ijkMax?.[2]) || 0)
+      );
+      if (k1 < k0) {
+        return false;
+      }
+      for (let k = k0; k <= k1; k++) {
+        if (!uploadedSourceSlices[k]) {
+          return false;
+        }
+      }
+      return true;
     };
 
     const releaseNativeScalarAssembly = () => {
@@ -655,13 +778,60 @@ export class MviewVolume3DRenderPath
       }
     };
 
+    const getProgressiveUploadDepth = () => {
+      if (this.volumeResamplePlan?.enabled) {
+        return this.volumeResamplePlan.targetDimensions[2];
+      }
+      return sourceDepth;
+    };
+
+    const getProgressiveUploadedCount = () => {
+      if (this.volumeResamplePlan?.enabled) {
+        return uploadedDstCount;
+      }
+      return countUploadedSourceSlices();
+    };
+
+    const logOverviewPass = (pass: number, pickedCount: number) => {
+      if (!progressiveZEnabled || pass < 0 || pass === lastLoggedOverviewPass) {
+        return;
+      }
+      lastLoggedOverviewPass = pass;
+      const stride = PROGRESSIVE_Z_STRIDES[pass] ?? 1;
+      console.debug(
+        `[MviewVolume3D] progressive overview pass=${pass} stride=${stride} ` +
+          `batch=${pickedCount} uploaded=${getProgressiveUploadedCount()}/${getProgressiveUploadDepth()}`
+      );
+    };
+
     const revealIfUploaded = (uploaded: boolean) => {
       if (!uploaded || !this.renderer) {
         return;
       }
       this.volumeUploaded = true;
       applyPostLoadPitchIfNeeded();
-      revealCanvas();
+
+      const depth = getProgressiveUploadDepth();
+      const count = getProgressiveUploadedCount();
+      const shouldReveal =
+        !progressiveZEnabled ||
+        overviewCanvasRevealed ||
+        gpuVolumeFinalized ||
+        isGpuVolumeComplete() ||
+        count >= progressiveEarlyRevealThreshold(depth);
+
+      if (shouldReveal) {
+        if (progressiveZEnabled && !overviewCanvasRevealed) {
+          console.debug(
+            `[MviewVolume3D] progressive overview early reveal ` +
+              `uploaded=${count}/${depth}`
+          );
+        }
+        overviewCanvasRevealed = true;
+        revealCanvas();
+        this.renderer.refreshVisibleRoiStats?.();
+      }
+
       this.renderer.requestRender();
       ctx.display.renderNow();
     };
@@ -691,13 +861,13 @@ export class MviewVolume3DRenderPath
       const downsampled = this.volumeResamplePlan?.enabled;
 
       if (downsampled) {
+        const isZSkip = this.volumeResamplePlan.mode === 'zSkip';
         if (
-          !this.dstScalarData ||
           !this.uploadedDstSlices ||
           !this.dstToSrcZ ||
           !this.srcToDstZ ||
-          !this.srcXForDstX ||
-          !this.srcYForDstY
+          (!isZSkip &&
+            (!this.dstScalarData || !this.srcXForDstX || !this.srcYForDstY))
         ) {
           return false;
         }
@@ -731,49 +901,86 @@ export class MviewVolume3DRenderPath
         if (mappedNewDstIndices.length) {
           appendUnique(pendingDstSliceQueue, mappedNewDstIndices);
         }
-        const pendingDstIndices = pendingDstSliceQueue.splice(
-          0,
-          PROGRESSIVE_FRAME_SLICE_BUDGET
-        );
+        const { picked: pendingDstIndices, pass: overviewPass } =
+          pickNextInterlacedSlices(
+            pendingDstSliceQueue,
+            PROGRESSIVE_FRAME_SLICE_BUDGET,
+            dstDims[2],
+            progressiveZEnabled
+          );
+        logOverviewPass(overviewPass, pendingDstIndices.length);
 
         if (pendingDstIndices.length === 0) {
           return isGpuVolumeComplete();
         }
 
-        // Downsample only the affected destination slices on the CPU,
-        // then let VolumeRenderer convert scalar -> r16float for GPU upload.
-        for (const zDst of pendingDstIndices) {
-          const zSrcMapped = this.dstToSrcZ[zDst];
-          const srcSliceBase = zSrcMapped * srcPlane;
-          const dstSliceBase = zDst * dstPlane;
-          for (let yDst = 0; yDst < dstH; yDst++) {
-            const ySrc = this.srcYForDstY[yDst];
-            const dstRowBase = dstSliceBase + yDst * dstW;
-            const srcRowBase = srcSliceBase + ySrc * srcW;
-            for (let xDst = 0; xDst < dstW; xDst++) {
-              const xSrc = this.srcXForDstX[xDst];
-              const dstIndex = dstRowBase + xDst;
-              const srcIndex = srcRowBase + xSrc;
-              const value = srcAsArray[srcIndex];
-              this.dstScalarData[dstIndex] = Number.isFinite(value) ? value : 0;
-            }
-          }
-        }
-
         try {
           const uploadStarted = performance.now();
-          await this.renderer.updateVolumeSlices({
-            data: this.dstScalarData as unknown as ArrayBufferView,
-            dimensions: dstDims,
-            sliceIndices: pendingDstIndices,
-            valueRange,
-          });
+          const dstDepth = dstDims[2];
+          const { destZs, srcZs } = buildGapFilledSlicePairs(
+            pendingDstIndices,
+            (z) => this.dstToSrcZ![z],
+            overviewPass,
+            dstDepth,
+            progressiveZEnabled,
+            (z) => this.uploadedDstSlices![z] === 1
+          );
+
+          if (isZSkip) {
+            await this.renderer.updateVolumeSlices({
+              data: srcProgressiveData as unknown as ArrayBufferView,
+              dimensions: srcDims,
+              sliceIndices: srcZs,
+              destSliceIndices: destZs,
+              valueRange,
+            });
+          } else {
+            // Uniform: downsample only the affected destination slices on the CPU,
+            // then let VolumeRenderer convert scalar -> r16float for GPU upload.
+            for (let i = 0; i < destZs.length; i++) {
+              const zDst = destZs[i];
+              const zSrcMapped = srcZs[i];
+              const srcSliceBase = zSrcMapped * srcPlane;
+              const dstSliceBase = zDst * dstPlane;
+              for (let yDst = 0; yDst < dstH; yDst++) {
+                const ySrc = this.srcYForDstY![yDst];
+                const dstRowBase = dstSliceBase + yDst * dstW;
+                const srcRowBase = srcSliceBase + ySrc * srcW;
+                for (let xDst = 0; xDst < dstW; xDst++) {
+                  const xSrc = this.srcXForDstX![xDst];
+                  const dstIndex = dstRowBase + xDst;
+                  const srcIndex = srcRowBase + xSrc;
+                  const value = srcAsArray[srcIndex];
+                  this.dstScalarData![dstIndex] = Number.isFinite(value)
+                    ? value
+                    : 0;
+                }
+              }
+            }
+
+            await this.renderer.updateVolumeSlices({
+              data: this.dstScalarData as unknown as ArrayBufferView,
+              dimensions: dstDims,
+              sliceIndices: destZs,
+              valueRange,
+            });
+          }
           const uploadElapsedMs = performance.now() - uploadStarted;
 
+          // Only primary interlacing samples are authoritative; gap fills get replaced.
           for (const zDst of pendingDstIndices) {
             if (this.uploadedDstSlices[zDst] === 0) {
               this.uploadedDstSlices[zDst] = 1;
               uploadedDstCount += 1;
+            }
+          }
+          // Drop pending entries covered by gap-fill so we do not re-queue work.
+          if (progressiveZEnabled && destZs.length > pendingDstIndices.length) {
+            const covered = new Set(destZs);
+            for (let i = pendingDstSliceQueue.length - 1; i >= 0; i--) {
+              if (covered.has(pendingDstSliceQueue[i])) {
+                pendingDstSliceQueue.splice(i, 1);
+              }
             }
           }
           if (pendingDstSliceQueue.length > 0) {
@@ -784,7 +991,7 @@ export class MviewVolume3DRenderPath
           progressiveUploadMsTotal += uploadElapsedMs;
           if (progressiveUpdateCount % PROGRESSIVE_LOG_EVERY_UPDATES === 0) {
             console.debug(
-              `[MviewVolume3D] progressive downsample avg prep=${(
+              `[MviewVolume3D] progressive ${isZSkip ? 'zSkip' : 'downsample'} avg prep=${(
                 progressivePrepMsTotal / progressiveUpdateCount
               ).toFixed(2)}ms avg upload=${(
                 progressiveUploadMsTotal / progressiveUpdateCount
@@ -801,22 +1008,46 @@ export class MviewVolume3DRenderPath
       if (!srcProgressiveData || !sourceDimensions) {
         return false;
       }
-      const newIndices = pendingSourceSliceQueue.splice(
-        0,
-        PROGRESSIVE_FRAME_SLICE_BUDGET
-      );
+      const { picked: newIndices, pass: overviewPass } =
+        pickNextInterlacedSlices(
+          pendingSourceSliceQueue,
+          PROGRESSIVE_FRAME_SLICE_BUDGET,
+          sourceDepth,
+          progressiveZEnabled
+        );
+      logOverviewPass(overviewPass, newIndices.length);
       if (newIndices.length === 0) {
         return isGpuVolumeComplete();
       }
 
       try {
         const uploadStarted = performance.now();
+        const { destZs, srcZs } = buildGapFilledSlicePairs(
+          newIndices,
+          (z) => z,
+          overviewPass,
+          sourceDepth,
+          progressiveZEnabled,
+          (z) => uploadedSourceSlices[z] === 1
+        );
         await this.renderer.updateVolumeSlices({
           data: srcProgressiveData as unknown as ArrayBufferView,
           dimensions: sourceDimensions,
-          sliceIndices: newIndices,
+          sliceIndices: srcZs,
+          destSliceIndices: destZs,
           valueRange,
         });
+        for (const z of newIndices) {
+          uploadedSourceSlices[z] = 1;
+        }
+        if (progressiveZEnabled && destZs.length > newIndices.length) {
+          const covered = new Set(destZs);
+          for (let i = pendingSourceSliceQueue.length - 1; i >= 0; i--) {
+            if (covered.has(pendingSourceSliceQueue[i])) {
+              pendingSourceSliceQueue.splice(i, 1);
+            }
+          }
+        }
         const uploadElapsedMs = performance.now() - uploadStarted;
         if (pendingSourceSliceQueue.length > 0) {
           scheduleProgressiveRefresh();
@@ -905,6 +1136,17 @@ export class MviewVolume3DRenderPath
       }
       const scalars = this.resolveSourceScalarData?.();
       if (!scalars) {
+        return;
+      }
+      // Progressive buffer is full-length while still filling; convert only when
+      // every source K is present (or native path already complete elsewhere).
+      if (
+        this.areSourceSlicesReady &&
+        !this.areSourceSlicesReady(
+          [0, 0, 0],
+          [dims[0] - 1, dims[1] - 1, dims[2] - 1]
+        )
+      ) {
         return;
       }
       this.scheduleNativeR16Convert(
@@ -1082,6 +1324,7 @@ export class MviewVolume3DRenderPath
     this.renderContext = undefined;
     this.imageVolume = undefined;
     this.resolveSourceScalarData = undefined;
+    this.areSourceSlicesReady = undefined;
     this.readValueRange = undefined;
     this.cachedNativeScalars = undefined;
     this.releaseNativeScalarAssembly = undefined;
@@ -1172,6 +1415,8 @@ export class MviewVolume3DRenderPath
       sourceDimensions: plan.originalDimensions,
       sourceSpacing: spacing,
       getScalars: () => this.resolveSourceScalarData?.(),
+      areSourceSlicesReady: (ijkMin: number[], ijkMax: number[]) =>
+        this.areSourceSlicesReady?.(ijkMin, ijkMax) === true,
       getNativeR16: () =>
         this.nativeR16Complete && this.nativeR16 ? this.nativeR16 : undefined,
       getValueRange: () => this.readValueRange?.(),
@@ -1179,10 +1424,13 @@ export class MviewVolume3DRenderPath
         imageData.indexToWorld(ijk as [number, number, number]),
       label: imageVolume.volumeId,
       coarsePlan: plan,
-      getCoarseScalars: () => this.dstScalarData,
+      getCoarseScalars: () =>
+        plan.mode === 'zSkip' ? undefined : this.dstScalarData,
       isCoarseComplete: () => this.isCoarseDstComplete(),
       releaseCoarseCpuBuffers: () => {
-        this.dstScalarData = undefined;
+        if (plan.mode !== 'zSkip') {
+          this.dstScalarData = undefined;
+        }
         this.uploadedDstSlices = undefined;
         this.dstToSrcZ = undefined;
         this.srcToDstZ = undefined;
@@ -1375,6 +1623,7 @@ export class MviewVolume3DRenderPath
       // until every progressive slice is on the GPU.
       renderer.setTargetFpsProbeReady?.(false);
       this.applyPresentQuality();
+      renderer.refreshVisibleRoiStats?.();
       return true;
     } catch (error) {
       console.error('[MviewVolume3D] allocateEmptyVolume failed', error);
@@ -1418,20 +1667,18 @@ export class MviewVolume3DRenderPath
       dimensions,
       spacing
     );
-    const valueRange =
+    // Keep the progressive HU window so finalize does not remormalize r16
+    // (early preview range vs full-volume range was causing an end-of-load pop).
+    const progressiveRange = this.readValueRange?.();
+    const finalRange =
       range && range.length === 2
         ? ([range[0], range[1]] as [number, number])
         : undefined;
+    const valueRange = progressiveRange ?? finalRange;
 
     if (plan.enabled) {
       // Full completion path should not reallocate the GPU 3D texture.
       // `allocateEmptyVolume()` already created it with `plan.targetDimensions`.
-      this.dstScalarData = resampleScalarVolumeNearest(
-        scalarData as unknown as ArrayBufferView,
-        plan.originalDimensions,
-        plan.targetDimensions
-      );
-
       const dstDepth = plan.targetDimensions[2];
       const pendingDstSlices: number[] = [];
       if (this.uploadedDstSlices) {
@@ -1448,14 +1695,43 @@ export class MviewVolume3DRenderPath
 
       try {
         if (pendingDstSlices.length) {
-          await renderer.updateVolumeSlices({
-            data: this.dstScalarData as unknown as ArrayBufferView,
-            dimensions: plan.targetDimensions,
-            sliceIndices: pendingDstSlices,
-            valueRange,
-          });
+          if (plan.mode === 'zSkip') {
+            const dstToSrc =
+              this.dstToSrcZ ??
+              plan.dstToSrcZ ??
+              buildZSkipDstToSrcMap(
+                plan.originalDimensions[2],
+                plan.targetDimensions[2]
+              );
+            const srcZs = pendingDstSlices.map((z) => dstToSrc[z]);
+            await renderer.updateVolumeSlices({
+              data: scalarData as unknown as ArrayBufferView,
+              dimensions: plan.originalDimensions,
+              sliceIndices: srcZs,
+              destSliceIndices: pendingDstSlices,
+              valueRange,
+            });
+          } else {
+            this.dstScalarData = resampleScalarVolumeNearest(
+              scalarData as unknown as ArrayBufferView,
+              plan.originalDimensions,
+              plan.targetDimensions
+            );
+            await renderer.updateVolumeSlices({
+              data: this.dstScalarData as unknown as ArrayBufferView,
+              dimensions: plan.targetDimensions,
+              sliceIndices: pendingDstSlices,
+              valueRange,
+            });
+          }
+          if (this.uploadedDstSlices) {
+            for (const z of pendingDstSlices) {
+              this.uploadedDstSlices[z] = 1;
+            }
+          }
         }
-        this.applyPresentQuality();
+        // Skip applyPresentQuality — already applied at allocate; re-applying
+        // at finalize was a visible quality jump after progressive display.
         return true;
       } catch (error) {
         console.error(
@@ -1478,15 +1754,14 @@ export class MviewVolume3DRenderPath
         originalDimensions: plan.originalDimensions,
       });
 
-      if (this.viewportId && range && range.length === 2) {
-        setMviewVolume3DValueRange(this.viewportId, [range[0], range[1]]);
+      if (this.viewportId && valueRange) {
+        setMviewVolume3DValueRange(this.viewportId, valueRange);
         if (!reapplyMviewVolume3DPreset(this.viewportId)) {
           flushMviewVolume3DPendingPreset(this.viewportId);
         }
       }
 
-      // Re-apply present quality now that volume dims/spacing exist so OHIF
-      // still steps can match createVolumeMapper sample density.
+      // Only needed when this is the first full upload (no progressive scaffold).
       this.applyPresentQuality();
 
       return true;
@@ -1510,18 +1785,27 @@ export class MviewVolume3DRenderPath
     const [srcW, srcH, srcD] = plan.originalDimensions;
     const [dstW, dstH, dstD] = plan.targetDimensions;
 
-    this.dstScalarData = new Float32Array(dstW * dstH * dstD);
     this.uploadedDstSlices = new Uint8Array(dstD);
+    this.dstToSrcZ =
+      plan.dstToSrcZ instanceof Uint32Array && plan.dstToSrcZ.length >= dstD
+        ? plan.dstToSrcZ
+        : buildZSkipDstToSrcMap(srcD, dstD);
 
-    this.dstToSrcZ = new Uint32Array(dstD);
     this.srcToDstZ = Array.from({ length: srcD }, () => []);
-
     for (let zDst = 0; zDst < dstD; zDst++) {
-      const zSrc = Math.min(srcD - 1, Math.floor(((zDst + 0.5) * srcD) / dstD));
-      this.dstToSrcZ[zDst] = zSrc;
+      const zSrc = this.dstToSrcZ[zDst];
       this.srcToDstZ[zSrc].push(zDst);
     }
 
+    if (plan.mode === 'zSkip') {
+      // Native WxH planes upload directly — no coarse Float32 volume / XY maps.
+      this.dstScalarData = undefined;
+      this.srcXForDstX = undefined;
+      this.srcYForDstY = undefined;
+      return;
+    }
+
+    this.dstScalarData = new Float32Array(dstW * dstH * dstD);
     this.srcXForDstX = new Uint32Array(dstW);
     for (let xDst = 0; xDst < dstW; xDst++) {
       const xSrc = Math.min(srcW - 1, Math.floor(((xDst + 0.5) * srcW) / dstW));
@@ -1542,24 +1826,42 @@ export class MviewVolume3DRenderPath
   ): VolumeResamplePlan {
     if (!this.volumeResamplePlan) {
       const limit = getRendererTextureLimit(renderer);
-      this.volumeResamplePlan = buildUniformResamplePlan(
+      const mode =
+        (
+          renderer as VolumeRenderer & {
+            maxTextureReduceMode?: MaxTextureReduceMode;
+          }
+        ).maxTextureReduceMode ?? resolveMaxTextureReduceMode();
+      this.volumeResamplePlan = buildMaxTextureResamplePlan(
         dimensions,
         spacing,
-        limit
-      );
+        limit,
+        mode
+      ) as VolumeResamplePlan;
     }
     if (this.volumeResamplePlan.enabled && !this.didLogResamplePlan) {
       this.didLogResamplePlan = true;
       const plan = this.volumeResamplePlan;
-      console.warn(
-        `[MviewVolume3D] Auto-downsampling volume ` +
-          `${plan.originalDimensions.join('x')} -> ${plan.targetDimensions.join(
-            'x'
-          )} ` +
-          `(scale=${plan.uniformScale.toFixed(
-            4
-          )}, maxTextureDimension3D=${plan.maxTextureDimension3D})`
-      );
+      if (plan.mode === 'zSkip') {
+        console.warn(
+          `[MviewVolume3D] Auto-downsampling volume ` +
+            `${plan.originalDimensions.join('x')} -> ${plan.targetDimensions.join(
+              'x'
+            )} ` +
+            `(mode=zSkip stride=${Number(plan.strideZ ?? 0).toFixed(3)}, ` +
+            `maxTextureDimension3D=${plan.maxTextureDimension3D})`
+        );
+      } else {
+        console.warn(
+          `[MviewVolume3D] Auto-downsampling volume ` +
+            `${plan.originalDimensions.join('x')} -> ${plan.targetDimensions.join(
+              'x'
+            )} ` +
+            `(mode=uniform scale=${plan.uniformScale.toFixed(4)}` +
+            `${plan.forcedUniformReason ? `, forced=${plan.forcedUniformReason}` : ''}, ` +
+            `maxTextureDimension3D=${plan.maxTextureDimension3D})`
+        );
+      }
     }
     this.syncViewRefineSource(renderer);
     return this.volumeResamplePlan;
