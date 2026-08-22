@@ -1,4 +1,8 @@
 import { StatsOverlay } from './index';
+import {
+  refreshMviewVolume3DVisibleRoiStats,
+  setMviewVolume3DStatsOverlayEnabled,
+} from '../../GenericViewport/Volume3D/mviewVolume3DRegistry';
 
 /**
  * Whether the cornerstone stats/debug overlay is currently visible.
@@ -14,10 +18,13 @@ export function isStatsOverlayVisible(): boolean {
 export function toggleStatsOverlay(): boolean {
   if (isStatsOverlayVisible()) {
     StatsOverlay.cleanup();
+    setMviewVolume3DStatsOverlayEnabled(false);
     return false;
   }
 
   StatsOverlay.setup();
+  setMviewVolume3DStatsOverlayEnabled(true);
+  refreshMviewVolume3DVisibleRoiStats();
   return true;
 }
 
@@ -30,11 +37,14 @@ export function setStatsOverlayEnabled(enabled: boolean): boolean {
     if (!isStatsOverlayVisible()) {
       StatsOverlay.setup();
     }
+    setMviewVolume3DStatsOverlayEnabled(true);
+    refreshMviewVolume3DVisibleRoiStats();
     return true;
   }
 
   if (isStatsOverlayVisible()) {
     StatsOverlay.cleanup();
   }
+  setMviewVolume3DStatsOverlayEnabled(false);
   return false;
 }

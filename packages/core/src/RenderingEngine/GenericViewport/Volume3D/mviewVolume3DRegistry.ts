@@ -18,6 +18,13 @@ export const MVIEW_DEFAULT_PRESENT_QUALITY = 0.18;
 /** 200ms-while-dragging FPS target (short drags sample on mouse-up). 0 = off. */
 export const MVIEW_DEFAULT_TARGET_FPS = 30;
 
+/** Target FPS interactive budget floor (slider default). */
+export const MVIEW_DEFAULT_MIN_BUDGET_PX = 150_000;
+/** Absolute floor for the min-budget slider. */
+export const MVIEW_MIN_BUDGET_PX_FLOOR = 10_000;
+/** Slider max — matches VolumeRenderer interactive profile ceiling. */
+export const MVIEW_MIN_BUDGET_PX_CEILING = 760_000;
+
 const MVIEW_RENDER_MODES: ReadonlySet<string> = new Set([
   'surface',
   'composite',
@@ -44,6 +51,8 @@ export type MviewVolume3DEntry = {
   targetFps?: number;
   /** When false, FPS targeting is off. Default true. */
   targetFpsEnabled?: boolean;
+  /** Target FPS interactive budget floor (pixels). */
+  minBudgetPx?: number;
   /** Volume scalar range used to normalize VIEWPORT_PRESET HU curves. */
   valueRange?: [number, number];
   /** Preset applied before scalars were ready; flushed after upload. */
@@ -71,9 +80,21 @@ export function registerMviewVolume3D(
     presentQuality: entry.presentQuality ?? existing?.presentQuality,
     targetFps: entry.targetFps ?? existing?.targetFps,
     targetFpsEnabled: entry.targetFpsEnabled ?? existing?.targetFpsEnabled,
+    minBudgetPx: entry.minBudgetPx ?? existing?.minBudgetPx,
     baselineParallelScale:
       entry.baselineParallelScale ?? existing?.baselineParallelScale,
   });
+  const merged = entries.get(viewportId);
+  if (merged?.minBudgetPx != null) {
+    (
+      merged.renderer as VolumeRenderer & {
+        setFpsBudgetLimits?: (
+          limits: { minPx?: number },
+          options?: { rearm?: boolean }
+        ) => void;
+      }
+    ).setFpsBudgetLimits?.({ minPx: merged.minBudgetPx }, { rearm: false });
+  }
 }
 
 /** @internal */
@@ -86,6 +107,28 @@ export function getMviewVolume3D(
   viewportId: string
 ): MviewVolume3DEntry | undefined {
   return entries.get(viewportId);
+}
+
+/** @internal Sync HUD-only visible-ROI stats with the stats overlay toggle. */
+export function setMviewVolume3DStatsOverlayEnabled(enabled: boolean): void {
+  for (const entry of entries.values()) {
+    (
+      entry.renderer as VolumeRenderer & {
+        setStatsOverlayEnabled?: (enabled: boolean) => void;
+      }
+    ).setStatsOverlayEnabled?.(enabled);
+  }
+}
+
+/** @internal Recompute visible-ROI HUD stats for every mview Volume3D viewport. */
+export function refreshMviewVolume3DVisibleRoiStats(): void {
+  for (const entry of entries.values()) {
+    (
+      entry.renderer as VolumeRenderer & {
+        refreshVisibleRoiStats?: (options?: { force?: boolean }) => void;
+      }
+    ).refreshVisibleRoiStats?.({ force: true });
+  }
 }
 
 /** @internal */
@@ -429,6 +472,66 @@ export function setMviewVolume3DTargetFps(
 
   entry.targetFps = Math.min(240, Math.max(1, Math.round(fps)));
   applyMviewVolume3DTargetFps(viewportId);
+  return true;
+}
+
+/**
+ * Read the interactive Target FPS budget floor (pixels).
+ *
+ * @internal
+ */
+export function getMviewVolume3DMinBudgetPx(
+  viewportId: string
+): number | undefined {
+  const entry = entries.get(viewportId);
+
+  if (!entry) {
+    return undefined;
+  }
+
+  if (Number.isFinite(entry.minBudgetPx)) {
+    return entry.minBudgetPx;
+  }
+
+  const limits = (
+    entry.renderer as VolumeRenderer & {
+      getFpsBudgetLimits?: () => { minPx: number; maxPx: number };
+    }
+  ).getFpsBudgetLimits?.();
+
+  return Number.isFinite(limits?.minPx)
+    ? limits.minPx
+    : MVIEW_DEFAULT_MIN_BUDGET_PX;
+}
+
+/**
+ * Set the interactive Target FPS budget floor (slider).
+ *
+ * @internal
+ */
+export function setMviewVolume3DMinBudgetPx(
+  viewportId: string,
+  minPx: number
+): boolean {
+  const entry = entries.get(viewportId);
+
+  if (!entry || !Number.isFinite(minPx) || minPx <= 0) {
+    return false;
+  }
+
+  const clamped = Math.min(
+    MVIEW_MIN_BUDGET_PX_CEILING,
+    Math.max(MVIEW_MIN_BUDGET_PX_FLOOR, Math.round(minPx))
+  );
+  entry.minBudgetPx = clamped;
+  (
+    entry.renderer as VolumeRenderer & {
+      setFpsBudgetLimits?: (
+        limits: { minPx?: number },
+        options?: { rearm?: boolean }
+      ) => void;
+    }
+  ).setFpsBudgetLimits?.({ minPx: clamped });
   return true;
 }
 

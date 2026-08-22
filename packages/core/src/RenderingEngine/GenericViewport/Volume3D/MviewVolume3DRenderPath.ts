@@ -27,6 +27,7 @@ import {
   pitchVolume3DCameraUp90,
 } from './mviewVolume3DCamera';
 import { computeVisibleVolumeRoi } from './mviewVolume3DRoi';
+import { isStatsOverlayVisible } from '../../helpers/stats/toggleStatsOverlay';
 import {
   applyMviewVolume3DPreset,
   flushMviewVolume3DPendingPreset,
@@ -292,6 +293,87 @@ function buildGapFilledSlicePairs(
   return { destZs, srcZs };
 }
 
+type ZSkipProgressiveUploadBatch = {
+  data: ArrayBufferView;
+  dimensions: [number, number, number];
+  sliceIndices: number[];
+};
+
+function isZSkipResamplePlan(
+  plan: VolumeResamplePlan | undefined
+): plan is VolumeResamplePlan & { mode: 'zSkip' } {
+  return Boolean(plan?.enabled && plan.mode === 'zSkip');
+}
+
+/**
+ * Pack only the source Z planes needed for this progressive batch (zSkip).
+ * Avoids a full native `srcProgressiveData` buffer.
+ */
+function buildZSkipProgressiveUploadBatch(
+  srcZs: number[],
+  srcW: number,
+  srcH: number,
+  sourceSliceSize: number,
+  readSlice: (z: number) => ArrayLike<number> | undefined
+): ZSkipProgressiveUploadBatch | undefined {
+  if (!srcZs.length || !(sourceSliceSize > 0)) {
+    return undefined;
+  }
+
+  const srcZToCompact = new Map<number, number>();
+  const uniqueSrcZs: number[] = [];
+  const remappedIndices: number[] = [];
+
+  for (const z of srcZs) {
+    const srcZ = Math.floor(Number(z));
+    if (!Number.isFinite(srcZ)) {
+      remappedIndices.push(0);
+      continue;
+    }
+    let compact = srcZToCompact.get(srcZ);
+    if (compact === undefined) {
+      compact = uniqueSrcZs.length;
+      srcZToCompact.set(srcZ, compact);
+      uniqueSrcZs.push(srcZ);
+    }
+    remappedIndices.push(compact);
+  }
+
+  const uniqueCount = uniqueSrcZs.length;
+  if (!uniqueCount) {
+    return undefined;
+  }
+
+  const firstSlice = readSlice(uniqueSrcZs[0]);
+  if (!firstSlice || firstSlice.length !== sourceSliceSize) {
+    return undefined;
+  }
+
+  const Ctor = firstSlice.constructor as
+    | (new (length: number) => ArrayBufferView & {
+        set: (array: ArrayLike<number>, offset?: number) => void;
+      })
+    | undefined;
+  if (!Ctor) {
+    return undefined;
+  }
+
+  const scratch = new Ctor(sourceSliceSize * uniqueCount);
+  for (let i = 0; i < uniqueSrcZs.length; i++) {
+    const slice = readSlice(uniqueSrcZs[i]);
+    if (!slice || slice.length !== sourceSliceSize) {
+      return undefined;
+    }
+    scratch.set(slice as ArrayLike<number>, i * sourceSliceSize);
+  }
+
+  return {
+    data: scratch,
+    dimensions: [srcW, srcH, uniqueCount],
+    sliceIndices: remappedIndices,
+  };
+}
+
 /** @internal */
 export class MviewVolume3DRenderPath
   implements RenderPath<Volume3DViewportRenderContext>
@@ -368,6 +450,7 @@ export class MviewVolume3DRenderPath
         projection: 'orthographic',
         zoom: 0.55,
       },
+      statsOverlayEnabled: isStatsOverlayVisible(),
       onViewVolumeLayoutChanged: () => {
         this.renderer?.requestRender();
         this.renderContext?.display.renderNow();
@@ -485,6 +568,17 @@ export class MviewVolume3DRenderPath
     const dimensions =
       imageVolume.dimensions ?? imageVolume.imageData?.getDimensions?.();
     const sourceDimensions = normalizeVolumeDims(dimensions);
+    const sourceSpacing = normalizeVolumeSpacing(
+      imageVolume.spacing ?? imageVolume.imageData?.getSpacing?.()
+    );
+    if (sourceDimensions && sourceSpacing) {
+      // Plan before progressive uploads so zSkip never allocates srcProgressiveData.
+      this.getOrCreateVolumeResamplePlan(
+        renderer,
+        sourceDimensions,
+        sourceSpacing
+      );
+    }
     const sourceDepth =
       dimensions && dimensions.length >= 3 ? dimensions[2] : 0;
     const uploadedSourceSlices =
@@ -600,6 +694,10 @@ export class MviewVolume3DRenderPath
 
     this.readValueRange = () => syncPreviewValueRange();
     this.resolveSourceScalarData = () => {
+      // zSkip: ROI refine reads per-slice from CS cache — never materialize full volume.
+      if (isZSkipResamplePlan(this.volumeResamplePlan)) {
+        return undefined;
+      }
       // After native r16float is ready, ROI refine uses getNativeR16 — drop the
       // duplicate full-res scalar assembly from this path.
       if (this.nativeR16Complete && this.nativeR16) {
@@ -724,22 +822,30 @@ export class MviewVolume3DRenderPath
           );
           sourceSliceSize = srcW * srcH * inferredComponents;
         }
-        if (!srcProgressiveData) {
-          const ctor = pixelData.constructor as
-            | (new (length: number) => ArrayLike<number> & {
-                set: (array: ArrayLike<number>, offset?: number) => void;
-              })
-            | undefined;
-          if (!ctor) {
+        const zSkipProgressive = isZSkipResamplePlan(this.volumeResamplePlan);
+        if (!zSkipProgressive) {
+          if (!srcProgressiveData) {
+            const ctor = pixelData.constructor as
+              | (new (length: number) => ArrayLike<number> & {
+                  set: (array: ArrayLike<number>, offset?: number) => void;
+                })
+              | undefined;
+            if (!ctor) {
+              continue;
+            }
+            srcProgressiveData = new ctor(sourceSliceSize * sourceDepth);
+          }
+          if (
+            !srcProgressiveData?.set ||
+            pixelData.length !== sourceSliceSize
+          ) {
             continue;
           }
-          srcProgressiveData = new ctor(sourceSliceSize * sourceDepth);
-        }
-        if (!srcProgressiveData?.set || pixelData.length !== sourceSliceSize) {
+          srcProgressiveData.set(pixelData, z * sourceSliceSize);
+        } else if (pixelData.length !== sourceSliceSize) {
           continue;
         }
 
-        srcProgressiveData.set(pixelData, z * sourceSliceSize);
         uploadedSourceSlices[z] = 1;
         newSourceIndices.push(z);
       }
@@ -882,7 +988,30 @@ export class MviewVolume3DRenderPath
         const srcAsArray = srcProgressiveData as unknown as {
           [index: number]: number;
         };
-        if (!srcProgressiveData || !sourceSliceSize) {
+
+        const readSourceSlice = (z: number): ArrayLike<number> | undefined => {
+          if (z < 0 || z >= srcD || !Array.isArray(imageVolume.imageIds)) {
+            return undefined;
+          }
+          const imageId = imageVolume.imageIds[z];
+          if (!imageId) {
+            return undefined;
+          }
+          const image = cache.getImage(imageId);
+          const sliceVm = image?.voxelManager as
+            | { getScalarData?: () => ArrayLike<number> }
+            | undefined;
+          try {
+            return sliceVm?.getScalarData?.();
+          } catch {
+            return undefined;
+          }
+        };
+
+        if (!isZSkip && (!srcProgressiveData || !sourceSliceSize)) {
+          return false;
+        }
+        if (isZSkip && !sourceSliceSize) {
           return false;
         }
 
@@ -927,10 +1056,20 @@ export class MviewVolume3DRenderPath
           );
 
           if (isZSkip) {
+            const batch = buildZSkipProgressiveUploadBatch(
+              srcZs,
+              srcW,
+              srcH,
+              sourceSliceSize,
+              readSourceSlice
+            );
+            if (!batch) {
+              return false;
+            }
             await this.renderer.updateVolumeSlices({
-              data: srcProgressiveData as unknown as ArrayBufferView,
-              dimensions: srcDims,
-              sliceIndices: srcZs,
+              data: batch.data,
+              dimensions: batch.dimensions,
+              sliceIndices: batch.sliceIndices,
               destSliceIndices: destZs,
               valueRange,
             });
@@ -1110,6 +1249,13 @@ export class MviewVolume3DRenderPath
     };
 
     const kickNativeR16IfReady = () => {
+      // zSkip: skip full native r16 cache; ROI converts from CS scalars on demand.
+      if (isZSkipResamplePlan(this.volumeResamplePlan)) {
+        this.releaseNativeScalarAssembly?.();
+        this.nativeR16 = undefined;
+        this.nativeR16Complete = false;
+        return;
+      }
       // Tablet/low-memory: skip full-volume r16 cache; ROI converts from CS scalars.
       // Still drop the progressive assembly duplicate once the volume is complete.
       if (
@@ -1391,6 +1537,103 @@ export class MviewVolume3DRenderPath
     });
   }
 
+  /** Read one native source Z plane from the CS image cache (no full-volume copy). */
+  private readImageVolumeSourceSlice(z: number): ArrayLike<number> | undefined {
+    const imageVolume = this.imageVolume;
+    if (!imageVolume || !Array.isArray(imageVolume.imageIds)) {
+      return undefined;
+    }
+    const dimensions = normalizeVolumeDims(
+      imageVolume.dimensions ?? imageVolume.imageData?.getDimensions?.()
+    );
+    if (!dimensions || dimensions.length < 3) {
+      return undefined;
+    }
+    const sourceDepth = dimensions[2];
+    if (z < 0 || z >= sourceDepth) {
+      return undefined;
+    }
+    const imageId = imageVolume.imageIds[z];
+    if (!imageId) {
+      return undefined;
+    }
+    const image = cache.getImage(imageId);
+    const sliceVm = image?.voxelManager as
+      | { getScalarData?: () => ArrayLike<number> }
+      | undefined;
+    try {
+      return sliceVm?.getScalarData?.();
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async finalizeZSkipDownsampleVolume(
+    renderer: VolumeRenderer,
+    plan: VolumeResamplePlan,
+    valueRange: [number, number] | undefined
+  ): Promise<boolean> {
+    const dstDepth = plan.targetDimensions[2];
+    const pendingDstSlices: number[] = [];
+    if (this.uploadedDstSlices) {
+      for (let z = 0; z < dstDepth; z++) {
+        if (!this.uploadedDstSlices[z]) {
+          pendingDstSlices.push(z);
+        }
+      }
+    } else {
+      for (let z = 0; z < dstDepth; z++) {
+        pendingDstSlices.push(z);
+      }
+    }
+
+    if (!pendingDstSlices.length) {
+      return true;
+    }
+
+    const [srcW, srcH] = plan.originalDimensions;
+    const dstToSrc =
+      this.dstToSrcZ ??
+      plan.dstToSrcZ ??
+      buildZSkipDstToSrcMap(plan.originalDimensions[2], dstDepth);
+    const srcZs = pendingDstSlices.map((zDst) => dstToSrc[zDst]);
+
+    const firstSlice = this.readImageVolumeSourceSlice(srcZs[0] ?? 0);
+    if (!firstSlice || firstSlice.length <= 0) {
+      return false;
+    }
+    const sourceSliceSize = firstSlice.length;
+
+    try {
+      const batch = buildZSkipProgressiveUploadBatch(
+        srcZs,
+        srcW,
+        srcH,
+        sourceSliceSize,
+        (z) => this.readImageVolumeSourceSlice(z)
+      );
+      if (!batch) {
+        return false;
+      }
+      await renderer.updateVolumeSlices({
+        data: batch.data,
+        dimensions: batch.dimensions,
+        sliceIndices: batch.sliceIndices,
+        destSliceIndices: pendingDstSlices,
+        valueRange,
+      });
+      if (this.uploadedDstSlices) {
+        for (const z of pendingDstSlices) {
+          this.uploadedDstSlices[z] = 1;
+        }
+      }
+      return true;
+    } catch (error) {
+      console.error('[MviewVolume3D] zSkip finalize update failed', error);
+      return false;
+    }
+  }
+
   private syncViewRefineSource(renderer: VolumeRenderer): void {
     const plan = this.volumeResamplePlan;
     const imageVolume = this.imageVolume;
@@ -1415,6 +1658,10 @@ export class MviewVolume3DRenderPath
       sourceDimensions: plan.originalDimensions,
       sourceSpacing: spacing,
       getScalars: () => this.resolveSourceScalarData?.(),
+      readSourceSlice:
+        plan.mode === 'zSkip'
+          ? (z: number) => this.readImageVolumeSourceSlice(z)
+          : undefined,
       areSourceSlicesReady: (ijkMin: number[], ijkMax: number[]) =>
         this.areSourceSlicesReady?.(ijkMin, ijkMax) === true,
       getNativeR16: () =>
@@ -1460,6 +1707,12 @@ export class MviewVolume3DRenderPath
     dimensions: [number, number, number],
     valueRange: [number, number] | undefined
   ): void {
+    if (isZSkipResamplePlan(this.volumeResamplePlan)) {
+      this.nativeR16 = undefined;
+      this.nativeR16Complete = false;
+      this.releaseNativeScalarAssembly?.();
+      return;
+    }
     if (
       shouldUseLowMemoryMaxTextureCap() ||
       (
@@ -1605,20 +1858,42 @@ export class MviewVolume3DRenderPath
     const range = voxelManager?.getRange?.();
 
     try {
-      // Zero r16float scaffold — skip full scalar→half convert on allocate.
-      await renderer.setVolume({
-        data: new Uint16Array(total),
+      const scaffoldVolume = {
         dimensions: plan.targetDimensions,
         spacing: plan.targetSpacing,
         valueRange:
           range && range.length === 2
             ? ([range[0], range[1]] as [number, number])
             : ([0, 1] as [number, number]),
-        sourceFormat: 'r16float',
         label: imageVolume.volumeId,
         originalDimensions: plan.originalDimensions,
-        volumeMode: 'coarseFull',
-      });
+        volumeMode: 'coarseFull' as const,
+      };
+      if (plan.mode === 'zSkip') {
+        const allocateScaffold = (
+          renderer as VolumeRenderer & {
+            allocateVolumeScaffold?: (
+              volume: typeof scaffoldVolume
+            ) => Promise<void>;
+          }
+        ).allocateVolumeScaffold;
+        if (allocateScaffold) {
+          await allocateScaffold.call(renderer, scaffoldVolume);
+        } else {
+          await renderer.setVolume({
+            data: new Uint16Array(total),
+            ...scaffoldVolume,
+            sourceFormat: 'r16float',
+          });
+        }
+      } else {
+        // Zero r16float scaffold — skip full scalar→half convert on allocate.
+        await renderer.setVolume({
+          data: new Uint16Array(total),
+          ...scaffoldVolume,
+          sourceFormat: 'r16float',
+        });
+      }
       // setVolume arms the probe for standalone/full uploads; keep it off
       // until every progressive slice is on the GPU.
       renderer.setTargetFpsProbeReady?.(false);
@@ -1635,7 +1910,6 @@ export class MviewVolume3DRenderPath
     renderer: VolumeRenderer,
     imageVolume: IImageVolume
   ): Promise<boolean> {
-    const scalarData = getVolumeScalarArray(imageVolume);
     const dimensions = normalizeVolumeDims(
       imageVolume.dimensions ?? imageVolume.imageData?.getDimensions?.()
     );
@@ -1643,18 +1917,7 @@ export class MviewVolume3DRenderPath
       imageVolume.spacing ?? imageVolume.imageData?.getSpacing?.()
     );
 
-    if (!scalarData || !dimensions || !spacing) {
-      return false;
-    }
-
-    if (scalarData.length === 0) {
-      return false;
-    }
-
-    if (!ArrayBuffer.isView(scalarData)) {
-      console.warn(
-        '[MviewVolume3D] Scalar buffer is not a TypedArray; skipping upload'
-      );
+    if (!dimensions || !spacing) {
       return false;
     }
 
@@ -1667,14 +1930,29 @@ export class MviewVolume3DRenderPath
       dimensions,
       spacing
     );
-    // Keep the progressive HU window so finalize does not remormalize r16
-    // (early preview range vs full-volume range was causing an end-of-load pop).
     const progressiveRange = this.readValueRange?.();
     const finalRange =
       range && range.length === 2
         ? ([range[0], range[1]] as [number, number])
         : undefined;
     const valueRange = progressiveRange ?? finalRange;
+
+    if (plan.enabled && plan.mode === 'zSkip') {
+      return this.finalizeZSkipDownsampleVolume(renderer, plan, valueRange);
+    }
+
+    const scalarData = getVolumeScalarArray(imageVolume);
+
+    if (!scalarData || scalarData.length === 0) {
+      return false;
+    }
+
+    if (!ArrayBuffer.isView(scalarData)) {
+      console.warn(
+        '[MviewVolume3D] Scalar buffer is not a TypedArray; skipping upload'
+      );
+      return false;
+    }
 
     if (plan.enabled) {
       // Full completion path should not reallocate the GPU 3D texture.
@@ -1695,43 +1973,23 @@ export class MviewVolume3DRenderPath
 
       try {
         if (pendingDstSlices.length) {
-          if (plan.mode === 'zSkip') {
-            const dstToSrc =
-              this.dstToSrcZ ??
-              plan.dstToSrcZ ??
-              buildZSkipDstToSrcMap(
-                plan.originalDimensions[2],
-                plan.targetDimensions[2]
-              );
-            const srcZs = pendingDstSlices.map((z) => dstToSrc[z]);
-            await renderer.updateVolumeSlices({
-              data: scalarData as unknown as ArrayBufferView,
-              dimensions: plan.originalDimensions,
-              sliceIndices: srcZs,
-              destSliceIndices: pendingDstSlices,
-              valueRange,
-            });
-          } else {
-            this.dstScalarData = resampleScalarVolumeNearest(
-              scalarData as unknown as ArrayBufferView,
-              plan.originalDimensions,
-              plan.targetDimensions
-            );
-            await renderer.updateVolumeSlices({
-              data: this.dstScalarData as unknown as ArrayBufferView,
-              dimensions: plan.targetDimensions,
-              sliceIndices: pendingDstSlices,
-              valueRange,
-            });
-          }
+          this.dstScalarData = resampleScalarVolumeNearest(
+            scalarData as unknown as ArrayBufferView,
+            plan.originalDimensions,
+            plan.targetDimensions
+          );
+          await renderer.updateVolumeSlices({
+            data: this.dstScalarData as unknown as ArrayBufferView,
+            dimensions: plan.targetDimensions,
+            sliceIndices: pendingDstSlices,
+            valueRange,
+          });
           if (this.uploadedDstSlices) {
             for (const z of pendingDstSlices) {
               this.uploadedDstSlices[z] = 1;
             }
           }
         }
-        // Skip applyPresentQuality — already applied at allocate; re-applying
-        // at finalize was a visible quality jump after progressive display.
         return true;
       } catch (error) {
         console.error(

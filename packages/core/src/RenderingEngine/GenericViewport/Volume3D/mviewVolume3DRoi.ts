@@ -32,7 +32,7 @@ export type ComputeVisibleVolumeRoiParams = {
 };
 
 /** Extra ROI compute diagnostics in the browser console. */
-export const ROI_COMPUTE_DEBUG = true;
+export const ROI_COMPUTE_DEBUG = false;
 
 function logRoiCompute(
   message: string,

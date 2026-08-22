@@ -73,12 +73,14 @@ declare module '@mview/webgpu-volume-standalone' {
     maxTextureReduceMode?: MaxTextureReduceMode;
     initialize(): Promise<VolumeRenderer>;
     setVolume(volume: FuberlinVolumeDescriptor): Promise<void>;
+    allocateVolumeScaffold(volume: FuberlinVolumeDescriptor): Promise<void>;
     updateVolumeSlices(update: FuberlinVolumeSliceUpdate): Promise<void>;
     setTransferFunction(points: FuberlinTransferPoint[]): void;
     setSettings(settings: FuberlinSettingsPatch): void;
     setCamera(camera?: FuberlinCameraPatch): void;
     getCamera(): FuberlinCameraState;
-    refreshVisibleRoiStats?(): void;
+    setStatsOverlayEnabled?(enabled: boolean): void;
+    refreshVisibleRoiStats?(options?: { force?: boolean }): void;
     setQualityProfiles(quality?: {
       interactive?: {
         pixelBudget?: number;
@@ -95,6 +97,11 @@ declare module '@mview/webgpu-volume-standalone' {
     }): void;
     setTargetFps(fps: number): void;
     getTargetFps(): number;
+    setFpsBudgetLimits?(
+      limits?: { minPx?: number },
+      options?: { rearm?: boolean }
+    ): void;
+    getFpsBudgetLimits?(): { minPx: number; maxPx: number };
     setTargetFpsProbeReady(ready: boolean): void;
     scheduleTargetFpsProbe(): void;
     runTargetFpsProbe(generation?: number): Promise<number | null>;
@@ -151,6 +158,8 @@ declare module '@mview/webgpu-volume-standalone' {
       sourceDimensions?: [number, number, number];
       sourceSpacing?: [number, number, number];
       getScalars?: () => ArrayLike<number> | undefined;
+      /** zSkip: per-slice CS cache reader (avoids full-volume materialize). */
+      readSourceSlice?: (z: number) => ArrayLike<number> | undefined;
       /** True when every source K in [ijkMin[2], ijkMax[2]] is in the progressive assembly. */
       areSourceSlicesReady?: (ijkMin: number[], ijkMax: number[]) => boolean;
       getNativeR16?: () => Uint16Array | undefined;
