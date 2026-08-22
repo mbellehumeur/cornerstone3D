@@ -19,7 +19,7 @@ export const MVIEW_DEFAULT_PRESENT_QUALITY = 0.18;
 export const MVIEW_DEFAULT_TARGET_FPS = 30;
 
 /** Target FPS interactive budget floor (slider default). */
-export const MVIEW_DEFAULT_MIN_BUDGET_PX = 150_000;
+export const MVIEW_DEFAULT_MIN_BUDGET_PX = 50_000;
 /** Absolute floor for the min-budget slider. */
 export const MVIEW_MIN_BUDGET_PX_FLOOR = 10_000;
 /** Slider max — matches VolumeRenderer interactive profile ceiling. */
@@ -143,6 +143,38 @@ export function setMviewVolume3DValueRange(
   }
 
   entry.valueRange = valueRange;
+}
+
+/** @internal */
+export function armMviewVolume3DInteraction(viewportId: string): boolean {
+  const entry = entries.get(viewportId);
+
+  if (!entry) {
+    return false;
+  }
+
+  (
+    entry.renderer as VolumeRenderer & { armInteraction?: () => void }
+  ).armInteraction?.();
+  return true;
+}
+
+/** @internal */
+export function ensureMviewVolume3DInteraction(viewportId: string): boolean {
+  const entry = entries.get(viewportId);
+
+  if (!entry) {
+    return false;
+  }
+
+  const renderer = entry.renderer as VolumeRenderer & {
+    ensureInteraction?: () => boolean;
+    interactionArmed?: boolean;
+  };
+  if (renderer.ensureInteraction) {
+    return renderer.ensureInteraction();
+  }
+  return Boolean(renderer.interactionArmed);
 }
 
 /** @internal */

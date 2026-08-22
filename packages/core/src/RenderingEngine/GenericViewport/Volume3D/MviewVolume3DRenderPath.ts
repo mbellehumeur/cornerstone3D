@@ -1,7 +1,6 @@
 import {
   VolumeRenderer,
   convertScalarVolumeToHalfFloatChunk,
-  shouldUseLowMemoryMaxTextureCap,
   buildMaxTextureResamplePlan,
   buildZSkipDstToSrcMap,
   normalizeMaxTextureReduceMode,
@@ -76,11 +75,10 @@ const DEFAULT_MVIEW_PRESET_NAME = 'CT-Bone';
  * webgpuVolume3d load orientation.
  */
 const APPLY_MVIEW_POST_LOAD_PITCH_UP_90 = false;
-const PROGRESSIVE_FRAME_SLICE_BUDGET = 12;
-const PROGRESSIVE_BURST_DEBOUNCE_MS = 24;
+const PROGRESSIVE_FRAME_SLICE_BUDGET = 5;
+const PROGRESSIVE_BURST_DEBOUNCE_MS = 40;
+const PROGRESSIVE_RENDER_MIN_INTERVAL_MS = 500;
 const PROGRESSIVE_LOG_EVERY_UPDATES = 30;
-/** Nested Z interlacing: every 2nd overview → full (milder than 4→2→1). */
-const PROGRESSIVE_Z_STRIDES = [2, 1] as const;
 /** Reveal as soon as this many authoritative slices are on the GPU. */
 const PROGRESSIVE_EARLY_REVEAL_MIN_SLICES = 1;
 
@@ -157,8 +155,8 @@ function resolveMaxTextureReduceMode(): MaxTextureReduceMode {
   return 'zSkip';
 }
 
-/** Default on; `?progressiveZ=off` restores FIFO upload order. */
-function isProgressiveZInterlaceEnabled(): boolean {
+/** Default on (center-out); `?progressiveZ=off` restores FIFO upload order. */
+function isProgressiveCenterOutEnabled(): boolean {
   try {
     const value = new URLSearchParams(window.location.search).get(
       'progressiveZ'
@@ -173,124 +171,36 @@ function isProgressiveZInterlaceEnabled(): boolean {
 }
 
 /**
- * Nested pass for strides 2→1:
- * - pass 0: even z (sparse overview)
- * - pass 1: odds (full)
+ * Pull up to `budget` indices from `readyQueue` in center-out order.
+ * Mutates `readyQueue`.
  */
-function progressiveZPassIndex(z: number): number {
-  return z % 2 === 0 ? 0 : 1;
-}
-
-/**
- * Pull up to `budget` indices from `readyQueue`, preferring lower interlacing
- * passes and center-out order within a pass. Mutates `readyQueue`.
- */
-function pickNextInterlacedSlices(
+function pickCenterOutSlices(
   readyQueue: number[],
   budget: number,
   depth: number,
   enabled: boolean
-): { picked: number[]; pass: number } {
+): number[] {
   if (!readyQueue.length || budget <= 0) {
-    return { picked: [], pass: 0 };
+    return [];
   }
   if (!enabled) {
-    return {
-      picked: readyQueue.splice(0, budget),
-      pass: -1,
-    };
-  }
-
-  let activePass = PROGRESSIVE_Z_STRIDES.length - 1;
-  for (let pass = 0; pass < PROGRESSIVE_Z_STRIDES.length; pass++) {
-    if (readyQueue.some((z) => progressiveZPassIndex(z) === pass)) {
-      activePass = pass;
-      break;
-    }
+    return readyQueue.splice(0, budget);
   }
 
   const center = Math.max(0, depth - 1) / 2;
-  const candidates: { z: number; queueIndex: number }[] = [];
-  for (let i = 0; i < readyQueue.length; i++) {
-    const z = readyQueue[i];
-    if (progressiveZPassIndex(z) === activePass) {
-      candidates.push({ z, queueIndex: i });
-    }
-  }
-  candidates.sort((a, b) => {
-    const da = Math.abs(a.z - center);
-    const db = Math.abs(b.z - center);
+  readyQueue.sort((a, b) => {
+    const da = Math.abs(a - center);
+    const db = Math.abs(b - center);
     if (da !== db) {
       return da - db;
     }
-    return a.z - b.z;
+    return a - b;
   });
-
-  const selected = candidates.slice(0, budget);
-  const removeIndexes = new Set(selected.map((c) => c.queueIndex));
-  const remaining: number[] = [];
-  for (let i = 0; i < readyQueue.length; i++) {
-    if (!removeIndexes.has(i)) {
-      remaining.push(readyQueue[i]);
-    }
-  }
-  readyQueue.length = 0;
-  readyQueue.push(...remaining);
-
-  return {
-    picked: selected.map((c) => c.z),
-    pass: activePass,
-  };
+  return readyQueue.splice(0, budget);
 }
 
 function progressiveEarlyRevealThreshold(_depth: number): number {
   return PROGRESSIVE_EARLY_REVEAL_MIN_SLICES;
-}
-
-/**
- * Stretch each primary Z plane across the current interlacing stride so DVR
- * does not shade through empty zero slabs. Gap fills are not marked
- * authoritative — denser passes overwrite them.
- */
-function buildGapFilledSlicePairs(
-  primaryZs: number[],
-  primaryToSrcZ: (primaryZ: number) => number,
-  pass: number,
-  depth: number,
-  enabled: boolean,
-  isAuthoritative: (z: number) => boolean
-): { destZs: number[]; srcZs: number[] } {
-  const destZs: number[] = [];
-  const srcZs: number[] = [];
-  if (!primaryZs.length) {
-    return { destZs, srcZs };
-  }
-  if (!enabled || pass < 0) {
-    for (const z of primaryZs) {
-      destZs.push(z);
-      srcZs.push(primaryToSrcZ(z));
-    }
-    return { destZs, srcZs };
-  }
-
-  const stride = PROGRESSIVE_Z_STRIDES[pass] ?? 1;
-  const seen = new Set<number>();
-  for (const primary of primaryZs) {
-    const srcZ = primaryToSrcZ(primary);
-    const fillTo = Math.min(depth, primary + stride);
-    for (let d = primary; d < fillTo; d++) {
-      if (seen.has(d)) {
-        continue;
-      }
-      if (d !== primary && isAuthoritative(d)) {
-        continue;
-      }
-      seen.add(d);
-      destZs.push(d);
-      srcZs.push(srcZ);
-    }
-  }
-  return { destZs, srcZs };
 }
 
 type ZSkipProgressiveUploadBatch = {
@@ -434,7 +344,7 @@ export class MviewVolume3DRenderPath
     this.resizeCanvas(canvas, ctx.viewport.element);
 
     const maxTextureReduceMode = resolveMaxTextureReduceMode();
-    const progressiveZEnabled = isProgressiveZInterlaceEnabled();
+    const progressiveZEnabled = isProgressiveCenterOutEnabled();
     const renderer = new VolumeRenderer(canvas, {
       // Match OHIF Volume3D defaults (CT-Bone composite DVR).
       mode: 'composite',
@@ -443,8 +353,8 @@ export class MviewVolume3DRenderPath
       shade: true,
       background: [0, 0, 0],
       targetFps: MVIEW_DEFAULT_TARGET_FPS,
+      targetFpsLearnEnabled: false,
       handleMaxTexture: true,
-      //  maxTextureDimension3DCap: 1024, // force tablet mode - low memory
       maxTextureReduceMode,
       camera: {
         projection: 'orthographic',
@@ -457,8 +367,6 @@ export class MviewVolume3DRenderPath
       },
     });
     await renderer.initialize();
-    // Progressive path: defer the GPU probe until the volume is fully loaded.
-    renderer.setTargetFpsProbeReady?.(false);
     this.canvas = canvas;
     this.renderer = renderer;
     this.volumeUploaded = false;
@@ -597,13 +505,12 @@ export class MviewVolume3DRenderPath
     let progressiveUploadMsTotal = 0;
     // Only used when downsample mode is enabled.
     let uploadedDstCount = 0;
-    let targetFpsProbeArmed = false;
     /** True after a full setVolume with complete CPU scalars + final HU range. */
     let gpuVolumeFinalized = false;
     /** First range used for preview patches + TF; later slices keep this window. */
     let previewValueRange: [number, number] | undefined;
     let overviewCanvasRevealed = false;
-    let lastLoggedOverviewPass = -2;
+    let lastProgressiveRenderMs = 0;
 
     const countUploadedSourceSlices = () => {
       let count = 0;
@@ -638,33 +545,6 @@ export class MviewVolume3DRenderPath
         (imageVolume as { loadStatus?: { loaded?: boolean } }).loadStatus
           ?.loaded
       );
-
-    const armTargetFpsProbe = async () => {
-      if (targetFpsProbeArmed || !this.renderer) {
-        return;
-      }
-      if (!gpuVolumeFinalized) {
-        return;
-      }
-      targetFpsProbeArmed = true;
-      streamingClosed = true;
-      if (progressiveRaf) {
-        cancelAnimationFrame(progressiveRaf);
-        progressiveRaf = 0;
-      }
-      if (progressiveFlushTimer) {
-        clearTimeout(progressiveFlushTimer);
-        progressiveFlushTimer = null;
-      }
-      // Do not re-apply present quality here — that remaps still/interactive
-      // profiles and causes an end-of-load visual pop. Profiles were set at
-      // allocate / first progressive apply.
-      await this.renderer.waitForGpuIdle?.();
-      if (!this.renderer) {
-        return;
-      }
-      this.renderer.setTargetFpsProbeReady?.(true);
-    };
 
     const revealCanvas = () => {
       canvas.style.visibility = '';
@@ -754,6 +634,12 @@ export class MviewVolume3DRenderPath
       return next;
     };
 
+    /** Pause progressive slice work while the user drags/zooms or ROI reload runs. */
+    const isProgressiveLoadPaused = () => {
+      const stats = renderer.getStats?.();
+      return Boolean(stats?.interacting || stats?.volumeWorkBusy);
+    };
+
     const scheduleProgressiveRefresh = () => {
       if (streamingClosed || progressiveRaf || progressiveFlushTimer) {
         return;
@@ -765,9 +651,57 @@ export class MviewVolume3DRenderPath
           if (streamingClosed) {
             return;
           }
+          if (isProgressiveLoadPaused()) {
+            scheduleProgressiveRefresh();
+            return;
+          }
           void runUpload(async () => uploadNewSlices()).then(revealIfUploaded);
         });
       }, PROGRESSIVE_BURST_DEBOUNCE_MS);
+    };
+
+    const resumeProgressiveLoad = () => {
+      if (!streamingClosed && !isProgressiveLoadPaused()) {
+        scheduleProgressiveRefresh();
+      }
+    };
+
+    const prevOnInteractionEnd = (
+      renderer as VolumeRenderer & {
+        options?: { onInteractionEnd?: () => void };
+      }
+    ).options?.onInteractionEnd;
+    (
+      renderer as VolumeRenderer & {
+        options: { onInteractionEnd?: () => void };
+      }
+    ).options.onInteractionEnd = () => {
+      prevOnInteractionEnd?.();
+      resumeProgressiveLoad();
+    };
+
+    const prevOnViewVolumeLayoutChanged = (
+      renderer as VolumeRenderer & {
+        options?: {
+          onViewVolumeLayoutChanged?: (info?: {
+            volumeWorkBusy?: boolean;
+          }) => void;
+        };
+      }
+    ).options?.onViewVolumeLayoutChanged;
+    (
+      renderer as VolumeRenderer & {
+        options: {
+          onViewVolumeLayoutChanged?: (info?: {
+            volumeWorkBusy?: boolean;
+          }) => void;
+        };
+      }
+    ).options.onViewVolumeLayoutChanged = (info) => {
+      prevOnViewVolumeLayoutChanged?.(info);
+      if (info?.volumeWorkBusy !== true) {
+        resumeProgressiveLoad();
+      }
     };
 
     const appendUnique = (queue: number[], items: number[]) => {
@@ -898,16 +832,21 @@ export class MviewVolume3DRenderPath
       return countUploadedSourceSlices();
     };
 
-    const logOverviewPass = (pass: number, pickedCount: number) => {
-      if (!progressiveZEnabled || pass < 0 || pass === lastLoggedOverviewPass) {
-        return;
+    const resolveProgressiveRenderMinIntervalMs = () => {
+      try {
+        const fromUrl = new URLSearchParams(window.location.search).get(
+          'progressiveRenderFps'
+        );
+        if (fromUrl) {
+          const fps = Number(fromUrl);
+          if (Number.isFinite(fps) && fps > 0) {
+            return 1000 / fps;
+          }
+        }
+      } catch {
+        // ignore
       }
-      lastLoggedOverviewPass = pass;
-      const stride = PROGRESSIVE_Z_STRIDES[pass] ?? 1;
-      console.debug(
-        `[MviewVolume3D] progressive overview pass=${pass} stride=${stride} ` +
-          `batch=${pickedCount} uploaded=${getProgressiveUploadedCount()}/${getProgressiveUploadDepth()}`
-      );
+      return PROGRESSIVE_RENDER_MIN_INTERVAL_MS;
     };
 
     const revealIfUploaded = (uploaded: boolean) => {
@@ -926,10 +865,12 @@ export class MviewVolume3DRenderPath
         isGpuVolumeComplete() ||
         count >= progressiveEarlyRevealThreshold(depth);
 
+      const isFirstReveal = shouldReveal && !overviewCanvasRevealed;
+
       if (shouldReveal) {
-        if (progressiveZEnabled && !overviewCanvasRevealed) {
+        if (isFirstReveal) {
           console.debug(
-            `[MviewVolume3D] progressive overview early reveal ` +
+            `[MviewVolume3D] progressive center-out early reveal ` +
               `uploaded=${count}/${depth}`
           );
         }
@@ -938,8 +879,21 @@ export class MviewVolume3DRenderPath
         this.renderer.refreshVisibleRoiStats?.();
       }
 
-      this.renderer.requestRender();
-      ctx.display.renderNow();
+      const forceRender =
+        isFirstReveal ||
+        gpuVolumeFinalized ||
+        isGpuVolumeComplete() ||
+        !progressiveZEnabled;
+      const now = performance.now();
+      const shouldRenderNow =
+        forceRender ||
+        now - lastProgressiveRenderMs >=
+          resolveProgressiveRenderMinIntervalMs();
+
+      if (shouldRenderNow && !isProgressiveLoadPaused()) {
+        lastProgressiveRenderMs = now;
+        this.renderer.requestRender();
+      }
     };
 
     // Allocate a zero-filled GPU volume immediately so progressive slice
@@ -952,6 +906,10 @@ export class MviewVolume3DRenderPath
 
     const uploadNewSlices = async (): Promise<boolean> => {
       if (!this.renderer) {
+        return false;
+      }
+      if (isProgressiveLoadPaused()) {
+        scheduleProgressiveRefresh();
         return false;
       }
 
@@ -1030,14 +988,12 @@ export class MviewVolume3DRenderPath
         if (mappedNewDstIndices.length) {
           appendUnique(pendingDstSliceQueue, mappedNewDstIndices);
         }
-        const { picked: pendingDstIndices, pass: overviewPass } =
-          pickNextInterlacedSlices(
-            pendingDstSliceQueue,
-            PROGRESSIVE_FRAME_SLICE_BUDGET,
-            dstDims[2],
-            progressiveZEnabled
-          );
-        logOverviewPass(overviewPass, pendingDstIndices.length);
+        const pendingDstIndices = pickCenterOutSlices(
+          pendingDstSliceQueue,
+          PROGRESSIVE_FRAME_SLICE_BUDGET,
+          dstDims[2],
+          progressiveZEnabled
+        );
 
         if (pendingDstIndices.length === 0) {
           return isGpuVolumeComplete();
@@ -1045,15 +1001,8 @@ export class MviewVolume3DRenderPath
 
         try {
           const uploadStarted = performance.now();
-          const dstDepth = dstDims[2];
-          const { destZs, srcZs } = buildGapFilledSlicePairs(
-            pendingDstIndices,
-            (z) => this.dstToSrcZ![z],
-            overviewPass,
-            dstDepth,
-            progressiveZEnabled,
-            (z) => this.uploadedDstSlices![z] === 1
-          );
+          const destZs = pendingDstIndices;
+          const srcZs = pendingDstIndices.map((z) => this.dstToSrcZ![z]);
 
           if (isZSkip) {
             const batch = buildZSkipProgressiveUploadBatch(
@@ -1072,6 +1021,7 @@ export class MviewVolume3DRenderPath
               sliceIndices: batch.sliceIndices,
               destSliceIndices: destZs,
               valueRange,
+              requestRender: false,
             });
           } else {
             // Uniform: downsample only the affected destination slices on the CPU,
@@ -1102,24 +1052,16 @@ export class MviewVolume3DRenderPath
               dimensions: dstDims,
               sliceIndices: destZs,
               valueRange,
+              requestRender: false,
             });
           }
           const uploadElapsedMs = performance.now() - uploadStarted;
 
-          // Only primary interlacing samples are authoritative; gap fills get replaced.
+          // Mark authoritative slices uploaded.
           for (const zDst of pendingDstIndices) {
             if (this.uploadedDstSlices[zDst] === 0) {
               this.uploadedDstSlices[zDst] = 1;
               uploadedDstCount += 1;
-            }
-          }
-          // Drop pending entries covered by gap-fill so we do not re-queue work.
-          if (progressiveZEnabled && destZs.length > pendingDstIndices.length) {
-            const covered = new Set(destZs);
-            for (let i = pendingDstSliceQueue.length - 1; i >= 0; i--) {
-              if (covered.has(pendingDstSliceQueue[i])) {
-                pendingDstSliceQueue.splice(i, 1);
-              }
             }
           }
           if (pendingDstSliceQueue.length > 0) {
@@ -1147,45 +1089,30 @@ export class MviewVolume3DRenderPath
       if (!srcProgressiveData || !sourceDimensions) {
         return false;
       }
-      const { picked: newIndices, pass: overviewPass } =
-        pickNextInterlacedSlices(
-          pendingSourceSliceQueue,
-          PROGRESSIVE_FRAME_SLICE_BUDGET,
-          sourceDepth,
-          progressiveZEnabled
-        );
-      logOverviewPass(overviewPass, newIndices.length);
+      const newIndices = pickCenterOutSlices(
+        pendingSourceSliceQueue,
+        PROGRESSIVE_FRAME_SLICE_BUDGET,
+        sourceDepth,
+        progressiveZEnabled
+      );
       if (newIndices.length === 0) {
         return isGpuVolumeComplete();
       }
 
       try {
         const uploadStarted = performance.now();
-        const { destZs, srcZs } = buildGapFilledSlicePairs(
-          newIndices,
-          (z) => z,
-          overviewPass,
-          sourceDepth,
-          progressiveZEnabled,
-          (z) => uploadedSourceSlices[z] === 1
-        );
+        const destZs = newIndices;
+        const srcZs = newIndices;
         await this.renderer.updateVolumeSlices({
           data: srcProgressiveData as unknown as ArrayBufferView,
           dimensions: sourceDimensions,
           sliceIndices: srcZs,
           destSliceIndices: destZs,
           valueRange,
+          requestRender: false,
         });
         for (const z of newIndices) {
           uploadedSourceSlices[z] = 1;
-        }
-        if (progressiveZEnabled && destZs.length > newIndices.length) {
-          const covered = new Set(destZs);
-          for (let i = pendingSourceSliceQueue.length - 1; i >= 0; i--) {
-            if (covered.has(pendingSourceSliceQueue[i])) {
-              pendingSourceSliceQueue.splice(i, 1);
-            }
-          }
         }
         const uploadElapsedMs = performance.now() - uploadStarted;
         if (pendingSourceSliceQueue.length > 0) {
@@ -1211,12 +1138,12 @@ export class MviewVolume3DRenderPath
     };
 
     const finishStreaming = async (reason: string) => {
-      if (targetFpsProbeArmed || gpuVolumeFinalized) {
+      if (gpuVolumeFinalized) {
         return;
       }
 
       const uploaded = await runUpload(async () => {
-        if (gpuVolumeFinalized || targetFpsProbeArmed) {
+        if (gpuVolumeFinalized) {
           return true;
         }
         if (!isCpuVolumeComplete()) {
@@ -1226,15 +1153,24 @@ export class MviewVolume3DRenderPath
         if (full) {
           markAllSlicesUploaded();
           gpuVolumeFinalized = true;
-          this.renderer?.setTargetFpsProbeReady?.(false);
+          streamingClosed = true;
+          if (progressiveRaf) {
+            cancelAnimationFrame(progressiveRaf);
+            progressiveRaf = 0;
+          }
+          if (progressiveFlushTimer) {
+            clearTimeout(progressiveFlushTimer);
+            progressiveFlushTimer = null;
+          }
+          this.renderer?.setProgressivePreviewActive?.(false);
           revealIfUploaded(true);
           kickNativeR16IfReady();
-          await armTargetFpsProbe();
+          this.renderer?.prewarmInteractivePresent?.();
         }
         return full;
       });
 
-      if (targetFpsProbeArmed || gpuVolumeFinalized) {
+      if (gpuVolumeFinalized) {
         return;
       }
 
@@ -1251,19 +1187,6 @@ export class MviewVolume3DRenderPath
     const kickNativeR16IfReady = () => {
       // zSkip: skip full native r16 cache; ROI converts from CS scalars on demand.
       if (isZSkipResamplePlan(this.volumeResamplePlan)) {
-        this.releaseNativeScalarAssembly?.();
-        this.nativeR16 = undefined;
-        this.nativeR16Complete = false;
-        return;
-      }
-      // Tablet/low-memory: skip full-volume r16 cache; ROI converts from CS scalars.
-      // Still drop the progressive assembly duplicate once the volume is complete.
-      if (
-        shouldUseLowMemoryMaxTextureCap() ||
-        (
-          this.renderer as { shouldDisableVolumeCaches?: () => boolean }
-        )?.shouldDisableVolumeCaches?.()
-      ) {
         this.releaseNativeScalarAssembly?.();
         this.nativeR16 = undefined;
         this.nativeR16Complete = false;
@@ -1330,6 +1253,7 @@ export class MviewVolume3DRenderPath
     });
 
     // If some frames already arrived before we subscribed, upload them now.
+    renderer.setProgressivePreviewActive?.(true);
     scheduleProgressiveRefresh();
 
     // Volume already fully loaded (cached) — finish immediately.
@@ -1369,6 +1293,7 @@ export class MviewVolume3DRenderPath
           progressiveFlushTimer = null;
         }
         streamingClosed = true;
+        this.renderer?.setProgressivePreviewActive?.(false);
         this.removeData(ctx, rendering);
       },
     };
@@ -1713,17 +1638,6 @@ export class MviewVolume3DRenderPath
       this.releaseNativeScalarAssembly?.();
       return;
     }
-    if (
-      shouldUseLowMemoryMaxTextureCap() ||
-      (
-        this.renderer as { shouldDisableVolumeCaches?: () => boolean }
-      )?.shouldDisableVolumeCaches?.()
-    ) {
-      this.nativeR16 = undefined;
-      this.nativeR16Complete = false;
-      this.releaseNativeScalarAssembly?.();
-      return;
-    }
     if (this.nativeR16Complete && this.nativeR16) {
       this.releaseNativeScalarAssembly?.();
       return;
@@ -1894,9 +1808,7 @@ export class MviewVolume3DRenderPath
           sourceFormat: 'r16float',
         });
       }
-      // setVolume arms the probe for standalone/full uploads; keep it off
-      // until every progressive slice is on the GPU.
-      renderer.setTargetFpsProbeReady?.(false);
+      // Progressive uploads use load-time Target FPS seeding instead of probe.
       this.applyPresentQuality();
       renderer.refreshVisibleRoiStats?.();
       return true;

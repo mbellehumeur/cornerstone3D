@@ -24,6 +24,8 @@ declare module '@mview/webgpu-volume-standalone' {
     /** When set, write converted source planes to these GPU depth indices. */
     destSliceIndices?: number[];
     valueRange?: [number, number];
+    /** When false, skip scheduling a raymarch after upload (progressive load). */
+    requestRender?: boolean;
   };
 
   export type MaxTextureReduceMode = 'uniform' | 'zSkip';
@@ -69,9 +71,18 @@ declare module '@mview/webgpu-volume-standalone' {
 
   export class VolumeRenderer {
     static isSupported(): boolean;
-    constructor(canvas: HTMLCanvasElement, options?: Record<string, unknown>);
+    constructor(
+      canvas: HTMLCanvasElement,
+      options?: Record<string, unknown> & {
+        interactBudgetPx?: number;
+        minBudgetPx?: number;
+        forceLowTier?: boolean;
+        forceHighTier?: boolean;
+      }
+    );
     maxTextureReduceMode?: MaxTextureReduceMode;
     initialize(): Promise<VolumeRenderer>;
+    applyPerformanceTierFromAdapter?(): void;
     setVolume(volume: FuberlinVolumeDescriptor): Promise<void>;
     allocateVolumeScaffold(volume: FuberlinVolumeDescriptor): Promise<void>;
     updateVolumeSlices(update: FuberlinVolumeSliceUpdate): Promise<void>;
@@ -80,6 +91,7 @@ declare module '@mview/webgpu-volume-standalone' {
     setCamera(camera?: FuberlinCameraPatch): void;
     getCamera(): FuberlinCameraState;
     setStatsOverlayEnabled?(enabled: boolean): void;
+    setProgressivePreviewActive?(active: boolean): void;
     refreshVisibleRoiStats?(options?: { force?: boolean }): void;
     setQualityProfiles(quality?: {
       interactive?: {
@@ -102,12 +114,14 @@ declare module '@mview/webgpu-volume-standalone' {
       options?: { rearm?: boolean }
     ): void;
     getFpsBudgetLimits?(): { minPx: number; maxPx: number };
+    recordLoadPresentSample?(frameMs: number): void;
+    trySeedFpsBudgetFromLoadSamples?(): boolean;
+    clearLoadPresentSamples?(): void;
+    reseedFpsBudgetFromLoadSamples?(): boolean;
+    /** @deprecated Offscreen probe removed; no-op for backward compatibility. */
     setTargetFpsProbeReady(ready: boolean): void;
-    scheduleTargetFpsProbe(): void;
-    runTargetFpsProbe(generation?: number): Promise<number | null>;
     waitForGpuIdle(): Promise<void>;
     getMaxTextureDimension3D?(): number;
-    shouldDisableVolumeCaches?(): boolean;
     getStats(): {
       fps: number;
       frameMs: number;
@@ -122,8 +136,8 @@ declare module '@mview/webgpu-volume-standalone' {
       budgetPx: number;
       minPx: number;
       targetFpsPhase: 'off' | 'ready' | 'learn' | 'steer';
-      probeBudgetPx: number;
-      probeStatus: '' | 'ok' | 'fast' | 'flat' | 'slow' | 'fallback';
+      loadSeedBudgetPx: number;
+      loadSeedStatus: '' | 'ok' | 'fast' | 'flat' | 'slow' | 'fallback';
       lastDragAvgFps: number;
       lastDragFrames: number;
       lastDragBudgetFrom: number;
@@ -152,8 +166,11 @@ declare module '@mview/webgpu-volume-standalone' {
       width: number,
       height: number
     ): void;
+    armInteraction(): void;
+    ensureInteraction(): boolean;
     beginInteraction(): void;
     endInteraction(): void;
+    prewarmInteractivePresent?(): void;
     attachViewRefineSource?(source: {
       sourceDimensions?: [number, number, number];
       sourceSpacing?: [number, number, number];
@@ -203,6 +220,38 @@ declare module '@mview/webgpu-volume-standalone' {
   ): boolean;
 
   export function isAndroidOrTablet(env?: Navigator | null): boolean;
+
+  export const INTERACT_MIN_BUDGET_PX: number;
+  export const INTERACT_BUDGET_PX_LOW: number;
+  export const INTERACT_BUDGET_PX_HIGH: number;
+
+  export function resolvePerformanceTierMinBudgetPx(
+    env?: Navigator | null,
+    adapterInfo?: { adapterType?: string } | null,
+    options?: { minBudgetPx?: number }
+  ): number;
+
+  export function resolvePerformanceTierStartBudgetPx(
+    env?: Navigator | null,
+    adapterInfo?: { adapterType?: string } | null,
+    options?: {
+      interactBudgetPx?: number;
+      minBudgetPx?: number;
+      forceLowTier?: boolean;
+      forceHighTier?: boolean;
+    }
+  ): number;
+
+  export function resolvePerformanceTierBudgetPx(
+    env?: Navigator | null,
+    adapterInfo?: { adapterType?: string } | null,
+    options?: {
+      interactBudgetPx?: number;
+      minBudgetPx?: number;
+      forceLowTier?: boolean;
+      forceHighTier?: boolean;
+    }
+  ): number;
 
   export function resolveEffectiveMaxTextureDimension3D(
     deviceLimit: number,

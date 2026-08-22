@@ -15,6 +15,8 @@ export type SlicerLiveVolume3DEntry = {
   volumeCenter?: [number, number, number];
   valueRange?: [number, number];
   pendingPreset?: ViewportPreset;
+  /** Deferred interaction: armed on pointer down, started on first drag move. */
+  interactionArmed?: boolean;
 };
 
 const entries = new Map<string, SlicerLiveVolume3DEntry>();
@@ -62,6 +64,47 @@ export function setSlicerLiveVolume3DValueRange(
 }
 
 /** @internal */
+export function armSlicerLiveVolume3DInteraction(viewportId: string): boolean {
+  const entry = entries.get(viewportId);
+  if (!entry) {
+    return false;
+  }
+  const renderer = entry.renderer as SlicerLiveVolumeRenderer & {
+    armInteraction?: () => void;
+  };
+  if (renderer.armInteraction) {
+    renderer.armInteraction();
+  } else {
+    entry.interactionArmed = true;
+  }
+  return true;
+}
+
+/** @internal */
+export function ensureSlicerLiveVolume3DInteraction(
+  viewportId: string
+): boolean {
+  const entry = entries.get(viewportId);
+  if (!entry) {
+    return false;
+  }
+  const renderer = entry.renderer as SlicerLiveVolumeRenderer & {
+    ensureInteraction?: () => boolean;
+    interacting?: boolean;
+  };
+  if (renderer.ensureInteraction) {
+    return renderer.ensureInteraction();
+  }
+  if (!entry.interactionArmed) {
+    return false;
+  }
+  if (!renderer.interacting) {
+    renderer.beginInteraction();
+  }
+  return true;
+}
+
+/** @internal */
 export function beginSlicerLiveVolume3DInteraction(
   viewportId: string
 ): boolean {
@@ -79,6 +122,7 @@ export function endSlicerLiveVolume3DInteraction(viewportId: string): boolean {
   if (!entry) {
     return false;
   }
+  entry.interactionArmed = false;
   entry.renderer.endInteraction();
   return true;
 }

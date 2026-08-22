@@ -133,6 +133,10 @@ export type {
 } from './slicerLiveVolume3DRegistry';
 export { viewportPresetToSlicerLiveAppearance } from './slicerLiveViewportPreset';
 export type { SlicerLivePresetAppearance } from './slicerLiveViewportPreset';
+export {
+  armVolume3DInteraction,
+  ensureVolume3DInteractionStarted,
+} from './volume3DInteraction';
 /**
  * Lower-level 3D projection helpers for custom synchronizers and tooling.
  * This namespace is less stable than the core viewport API while the generic
