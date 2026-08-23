@@ -353,6 +353,10 @@ export class StatsOverlay implements StatsInstance {
           lastDragSteps: number;
           steps: number;
           interacting: boolean;
+          gpuVendor: string;
+          gpuArchitecture: string;
+          gpuAdapterType: string;
+          performanceTier: string;
         }>;
         const targeting =
           getMviewVolume3DTargetFpsEnabled(viewport.id) !== false;
@@ -389,6 +393,10 @@ export class StatsOverlay implements StatsInstance {
           scale,
           steps,
           dragFrames,
+          gpuVendor: String(stats.gpuVendor || ''),
+          gpuArchitecture: String(stats.gpuArchitecture || ''),
+          gpuAdapterType: String(stats.gpuAdapterType || ''),
+          performanceTier: String(stats.performanceTier || ''),
         });
       }
     }

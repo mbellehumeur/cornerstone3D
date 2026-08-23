@@ -91,6 +91,38 @@ export function setFuberlinVolume3DValueRange(
 }
 
 /** @internal */
+export function armFuberlinVolume3DInteraction(viewportId: string): boolean {
+  const entry = entries.get(viewportId);
+
+  if (!entry) {
+    return false;
+  }
+
+  (
+    entry.renderer as VolumeRenderer & { armInteraction?: () => void }
+  ).armInteraction?.();
+  return true;
+}
+
+/** @internal */
+export function ensureFuberlinVolume3DInteraction(viewportId: string): boolean {
+  const entry = entries.get(viewportId);
+
+  if (!entry) {
+    return false;
+  }
+
+  const renderer = entry.renderer as VolumeRenderer & {
+    ensureInteraction?: () => boolean;
+    interactionArmed?: boolean;
+  };
+  if (renderer.ensureInteraction) {
+    return renderer.ensureInteraction();
+  }
+  return Boolean(renderer.interactionArmed);
+}
+
+/** @internal */
 export function beginFuberlinVolume3DInteraction(viewportId: string): boolean {
   const entry = entries.get(viewportId);
 

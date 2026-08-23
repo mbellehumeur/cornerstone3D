@@ -159,6 +159,14 @@ declare module '@mview/webgpu-volume-standalone' {
       lastVolumeReloadMs?: number;
       /** True when GPU volume is downsampled vs source / ROI native. */
       isLossy?: boolean;
+      /** WebGPU adapter vendor detected at init. */
+      gpuVendor?: string;
+      /** WebGPU adapter architecture detected at init. */
+      gpuArchitecture?: string;
+      /** WebGPU adapter type (integrated, discrete, cpu, …). */
+      gpuAdapterType?: string;
+      /** Performance tier from adapter + env heuristics: low | high. */
+      performanceTier?: string;
     };
     rotateTrackball(
       deltaX: number,
@@ -191,7 +199,7 @@ declare module '@mview/webgpu-volume-standalone' {
       fullVolumePhysicalMax?: number;
       getVtkVisibleRoi?: () => unknown;
     }): void;
-    requestRender(): void;
+    requestRender(options?: { force?: boolean }): void;
     render(): void;
     dispose(): void;
   }
@@ -225,15 +233,31 @@ declare module '@mview/webgpu-volume-standalone' {
   export const INTERACT_BUDGET_PX_LOW: number;
   export const INTERACT_BUDGET_PX_HIGH: number;
 
+  export function isIntelWebGpuAdapter(
+    adapterInfo?: {
+      adapterType?: string;
+      vendor?: string;
+      description?: string;
+    } | null
+  ): boolean;
+
   export function resolvePerformanceTierMinBudgetPx(
     env?: Navigator | null,
-    adapterInfo?: { adapterType?: string } | null,
+    adapterInfo?: {
+      adapterType?: string;
+      vendor?: string;
+      description?: string;
+    } | null,
     options?: { minBudgetPx?: number }
   ): number;
 
   export function resolvePerformanceTierStartBudgetPx(
     env?: Navigator | null,
-    adapterInfo?: { adapterType?: string } | null,
+    adapterInfo?: {
+      adapterType?: string;
+      vendor?: string;
+      description?: string;
+    } | null,
     options?: {
       interactBudgetPx?: number;
       minBudgetPx?: number;
@@ -244,7 +268,11 @@ declare module '@mview/webgpu-volume-standalone' {
 
   export function resolvePerformanceTierBudgetPx(
     env?: Navigator | null,
-    adapterInfo?: { adapterType?: string } | null,
+    adapterInfo?: {
+      adapterType?: string;
+      vendor?: string;
+      description?: string;
+    } | null,
     options?: {
       interactBudgetPx?: number;
       minBudgetPx?: number;
@@ -264,6 +292,20 @@ declare module '@mview/webgpu-volume-standalone' {
   export function estimateR16TextureBytes(
     dimensions: number[] | null | undefined
   ): number;
+
+  export function fullVolumeSourceIjkBounds(sourceDimensions: number[]):
+    | {
+        ijkMin: [number, number, number];
+        ijkMax: [number, number, number];
+      }
+    | undefined;
+
+  export function shouldSkipMaxTextureReload(options: {
+    ijkMin: number[];
+    ijkMax: number[];
+    areSourceSlicesReady?: (ijkMin: number[], ijkMax: number[]) => boolean;
+    hasCompleteNativeR16?: boolean;
+  }): boolean;
 
   export function shrinkBrickToR16ByteBudget(
     brick: {

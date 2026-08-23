@@ -14,6 +14,7 @@ import { loadAndCacheImage } from './imageLoader';
 import triggerEvent from '../utilities/triggerEvent';
 import ProgressiveIterator from '../utilities/ProgressiveIterator';
 import decimate from '../utilities/decimate';
+import centerQuarterAlternatingIndices from '../utilities/centerQuarterAlternatingIndices';
 import imageLoadPoolManager from '../requestPool/imageLoadPoolManager';
 import { ImageQualityStatus, RequestType, Events } from '../enums';
 import cache from '../cache/cache';
@@ -325,8 +326,10 @@ class ProgressiveRetrieveImagesInstance {
 
     for (const stage of this.stages) {
       const indices =
-        stage.positions ||
-        decimate(this.imageIds, stage.decimate || 1, stage.offset ?? 0);
+        stage.positionOrder === 'centerQuarterAlternating'
+          ? centerQuarterAlternatingIndices(this.imageIds.length)
+          : stage.positions ||
+            decimate(this.imageIds, stage.decimate || 1, stage.offset ?? 0);
       indices.forEach((index) => {
         addStageInstance(stage, index);
       });

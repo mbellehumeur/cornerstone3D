@@ -35,6 +35,12 @@ export interface RetrieveStage {
    */
   offset?: number;
   /**
+   * Named index order when positions/decimate are not set.
+   * `centerQuarterAlternating` loads ~1/4 of slices from center toward one
+   * end, then ~1/4 toward the other, repeating until complete.
+   */
+  positionOrder?: 'centerQuarterAlternating';
+  /**
    * Use a specified retrieve type to specify the type of retrieve this stage
    * uses.  There are four standard retrieve types, but others can be defined
    * as required.  The four standard ones are:

@@ -75,9 +75,7 @@ const DEFAULT_MVIEW_PRESET_NAME = 'CT-Bone';
  * webgpuVolume3d load orientation.
  */
 const APPLY_MVIEW_POST_LOAD_PITCH_UP_90 = false;
-const PROGRESSIVE_FRAME_SLICE_BUDGET = 5;
 const PROGRESSIVE_BURST_DEBOUNCE_MS = 40;
-const PROGRESSIVE_RENDER_MIN_INTERVAL_MS = 500;
 const PROGRESSIVE_LOG_EVERY_UPDATES = 30;
 /** Reveal as soon as this many authoritative slices are on the GPU. */
 const PROGRESSIVE_EARLY_REVEAL_MIN_SLICES = 1;
@@ -171,20 +169,18 @@ function isProgressiveCenterOutEnabled(): boolean {
 }
 
 /**
- * Pull up to `budget` indices from `readyQueue` in center-out order.
- * Mutates `readyQueue`.
+ * Drain `readyQueue` (optionally center-out ordered). Mutates `readyQueue`.
  */
 function pickCenterOutSlices(
   readyQueue: number[],
-  budget: number,
   depth: number,
   enabled: boolean
 ): number[] {
-  if (!readyQueue.length || budget <= 0) {
+  if (!readyQueue.length) {
     return [];
   }
   if (!enabled) {
-    return readyQueue.splice(0, budget);
+    return readyQueue.splice(0, readyQueue.length);
   }
 
   const center = Math.max(0, depth - 1) / 2;
@@ -196,11 +192,31 @@ function pickCenterOutSlices(
     }
     return a - b;
   });
-  return readyQueue.splice(0, budget);
+  return readyQueue.splice(0, readyQueue.length);
 }
 
 function progressiveEarlyRevealThreshold(_depth: number): number {
   return PROGRESSIVE_EARLY_REVEAL_MIN_SLICES;
+}
+
+/** Reject unknown/empty ranges like [0,0] before locking TF / half-float encoding. */
+function isUsableValueRange(
+  range: [number, number] | number[] | undefined | null
+): range is [number, number] {
+  return (
+    !!range &&
+    range.length === 2 &&
+    Number.isFinite(range[0]) &&
+    Number.isFinite(range[1]) &&
+    range[1] > range[0]
+  );
+}
+
+function valueRangesEqual(
+  a: [number, number] | undefined,
+  b: [number, number] | undefined
+): boolean {
+  return !!a && !!b && a[0] === b[0] && a[1] === b[1];
 }
 
 type ZSkipProgressiveUploadBatch = {
@@ -507,10 +523,12 @@ export class MviewVolume3DRenderPath
     let uploadedDstCount = 0;
     /** True after a full setVolume with complete CPU scalars + final HU range. */
     let gpuVolumeFinalized = false;
-    /** First range used for preview patches + TF; later slices keep this window. */
+    /**
+     * First usable HU range for progressive patch encoding (kept stable mid-stream).
+     * Finalized on load-complete to the full-volume range + TF reapply.
+     */
     let previewValueRange: [number, number] | undefined;
     let overviewCanvasRevealed = false;
-    let lastProgressiveRenderMs = 0;
 
     const countUploadedSourceSlices = () => {
       let count = 0;
@@ -535,6 +553,8 @@ export class MviewVolume3DRenderPath
         const dstDepth = this.volumeResamplePlan.targetDimensions[2];
         this.uploadedDstSlices?.fill(1);
         uploadedDstCount = dstDepth;
+        // Source K flags track CS-cache readiness for revert/refine gates.
+        uploadedSourceSlices.fill(1);
         return;
       }
       uploadedSourceSlices.fill(1);
@@ -555,7 +575,7 @@ export class MviewVolume3DRenderPath
         | { getRange?: () => number[] }
         | undefined;
       const range = voxelManager?.getRange?.();
-      return range && range.length === 2
+      return isUsableValueRange(range)
         ? ([range[0], range[1]] as [number, number])
         : undefined;
     };
@@ -570,6 +590,20 @@ export class MviewVolume3DRenderPath
         }
       }
       return previewValueRange ?? live;
+    };
+
+    const commitFinalValueRange = (range: [number, number] | undefined) => {
+      if (!isUsableValueRange(range)) {
+        return;
+      }
+      previewValueRange = range;
+      if (!this.viewportId) {
+        return;
+      }
+      setMviewVolume3DValueRange(this.viewportId, range);
+      if (!reapplyMviewVolume3DPreset(this.viewportId)) {
+        flushMviewVolume3DPendingPreset(this.viewportId);
+      }
     };
 
     this.readValueRange = () => syncPreviewValueRange();
@@ -600,8 +634,14 @@ export class MviewVolume3DRenderPath
       return undefined;
     };
     this.areSourceSlicesReady = (ijkMin, ijkMax) => {
-      if (!uploadedSourceSlices.length || sourceDepth <= 0) {
+      if (sourceDepth <= 0 || !Array.isArray(imageVolume.imageIds)) {
         return false;
+      }
+      // Same source as zSkip revert/refine pack: Cornerstone image cache.
+      // Do not use progressive GPU upload flags — finalize can complete coarse
+      // GPU without marking every uploadedSourceSlices[k].
+      if (isCpuVolumeComplete()) {
+        return true;
       }
       const k0 = Math.max(0, Math.floor(Number(ijkMin?.[2]) || 0));
       const k1 = Math.min(
@@ -611,8 +651,25 @@ export class MviewVolume3DRenderPath
       if (k1 < k0) {
         return false;
       }
+      const sourceImageIds = imageVolume.imageIds;
       for (let k = k0; k <= k1; k++) {
-        if (!uploadedSourceSlices[k]) {
+        const imageId = sourceImageIds[k];
+        if (!imageId) {
+          return false;
+        }
+        const image = cache.getImage(imageId);
+        const sliceVm = image?.voxelManager as
+          | { getScalarData?: () => ArrayLike<number> }
+          | undefined;
+        if (!sliceVm?.getScalarData) {
+          return false;
+        }
+        try {
+          const pixelData = sliceVm.getScalarData();
+          if (!pixelData || pixelData.length <= 0) {
+            return false;
+          }
+        } catch {
           return false;
         }
       }
@@ -832,23 +889,6 @@ export class MviewVolume3DRenderPath
       return countUploadedSourceSlices();
     };
 
-    const resolveProgressiveRenderMinIntervalMs = () => {
-      try {
-        const fromUrl = new URLSearchParams(window.location.search).get(
-          'progressiveRenderFps'
-        );
-        if (fromUrl) {
-          const fps = Number(fromUrl);
-          if (Number.isFinite(fps) && fps > 0) {
-            return 1000 / fps;
-          }
-        }
-      } catch {
-        // ignore
-      }
-      return PROGRESSIVE_RENDER_MIN_INTERVAL_MS;
-    };
-
     const revealIfUploaded = (uploaded: boolean) => {
       if (!uploaded || !this.renderer) {
         return;
@@ -884,15 +924,9 @@ export class MviewVolume3DRenderPath
         gpuVolumeFinalized ||
         isGpuVolumeComplete() ||
         !progressiveZEnabled;
-      const now = performance.now();
-      const shouldRenderNow =
-        forceRender ||
-        now - lastProgressiveRenderMs >=
-          resolveProgressiveRenderMinIntervalMs();
 
-      if (shouldRenderNow && !isProgressiveLoadPaused()) {
-        lastProgressiveRenderMs = now;
-        this.renderer.requestRender();
+      if (!isProgressiveLoadPaused()) {
+        this.renderer.requestRender({ force: forceRender });
       }
     };
 
@@ -990,7 +1024,6 @@ export class MviewVolume3DRenderPath
         }
         const pendingDstIndices = pickCenterOutSlices(
           pendingDstSliceQueue,
-          PROGRESSIVE_FRAME_SLICE_BUDGET,
           dstDims[2],
           progressiveZEnabled
         );
@@ -1091,7 +1124,6 @@ export class MviewVolume3DRenderPath
       }
       const newIndices = pickCenterOutSlices(
         pendingSourceSliceQueue,
-        PROGRESSIVE_FRAME_SLICE_BUDGET,
         sourceDepth,
         progressiveZEnabled
       );
@@ -1151,6 +1183,8 @@ export class MviewVolume3DRenderPath
         }
         const full = await this.uploadVolume(this.renderer!, imageVolume);
         if (full) {
+          // Prefer full-volume HU range for TF + any native r16 convert.
+          commitFinalValueRange(readLiveValueRange());
           markAllSlicesUploaded();
           gpuVolumeFinalized = true;
           streamingClosed = true;
@@ -1842,15 +1876,46 @@ export class MviewVolume3DRenderPath
       dimensions,
       spacing
     );
-    const progressiveRange = this.readValueRange?.();
-    const finalRange =
-      range && range.length === 2
-        ? ([range[0], range[1]] as [number, number])
-        : undefined;
-    const valueRange = progressiveRange ?? finalRange;
+    const progressiveRaw = this.readValueRange?.();
+    const progressiveRange = isUsableValueRange(progressiveRaw)
+      ? progressiveRaw
+      : undefined;
+    const finalRange = isUsableValueRange(range)
+      ? ([range[0], range[1]] as [number, number])
+      : undefined;
+    // Finalize must use the full-volume range when known; sticky progressive
+    // range is only a fallback while getRange() is still incomplete.
+    const valueRange = finalRange ?? progressiveRange;
+    const encodingRangeChanged =
+      isUsableValueRange(finalRange) &&
+      isUsableValueRange(progressiveRange) &&
+      !valueRangesEqual(finalRange, progressiveRange);
+
+    const applyFinalTransferFunction = () => {
+      if (!this.viewportId || !isUsableValueRange(valueRange)) {
+        return;
+      }
+      setMviewVolume3DValueRange(this.viewportId, valueRange);
+      if (!reapplyMviewVolume3DPreset(this.viewportId)) {
+        flushMviewVolume3DPendingPreset(this.viewportId);
+      }
+    };
 
     if (plan.enabled && plan.mode === 'zSkip') {
-      return this.finalizeZSkipDownsampleVolume(renderer, plan, valueRange);
+      // Progressive patches may have been encoded with a narrow early range.
+      // Force a full dest re-upload so half-float voxels match the final TF.
+      if (encodingRangeChanged && this.uploadedDstSlices) {
+        this.uploadedDstSlices.fill(0);
+      }
+      const ok = await this.finalizeZSkipDownsampleVolume(
+        renderer,
+        plan,
+        valueRange
+      );
+      if (ok) {
+        applyFinalTransferFunction();
+      }
+      return ok;
     }
 
     const scalarData = getVolumeScalarArray(imageVolume);
@@ -1870,6 +1935,9 @@ export class MviewVolume3DRenderPath
       // Full completion path should not reallocate the GPU 3D texture.
       // `allocateEmptyVolume()` already created it with `plan.targetDimensions`.
       const dstDepth = plan.targetDimensions[2];
+      if (encodingRangeChanged && this.uploadedDstSlices) {
+        this.uploadedDstSlices.fill(0);
+      }
       const pendingDstSlices: number[] = [];
       if (this.uploadedDstSlices) {
         for (let z = 0; z < dstDepth; z++) {
@@ -1902,6 +1970,7 @@ export class MviewVolume3DRenderPath
             }
           }
         }
+        applyFinalTransferFunction();
         return true;
       } catch (error) {
         console.error(
@@ -1924,12 +1993,7 @@ export class MviewVolume3DRenderPath
         originalDimensions: plan.originalDimensions,
       });
 
-      if (this.viewportId && valueRange) {
-        setMviewVolume3DValueRange(this.viewportId, valueRange);
-        if (!reapplyMviewVolume3DPreset(this.viewportId)) {
-          flushMviewVolume3DPendingPreset(this.viewportId);
-        }
-      }
+      applyFinalTransferFunction();
 
       // Only needed when this is the first full upload (no progressive scaffold).
       this.applyPresentQuality();

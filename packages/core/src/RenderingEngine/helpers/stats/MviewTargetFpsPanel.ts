@@ -18,6 +18,14 @@ export type MviewTargetFpsPanelEntry = {
   steps: number;
   /** Interactive frames counted in the current drag / learn window. */
   dragFrames: number;
+  /** WebGPU adapter vendor detected at init. */
+  gpuVendor: string;
+  /** WebGPU adapter architecture detected at init. */
+  gpuArchitecture: string;
+  /** WebGPU adapter type (integrated, discrete, cpu, …). */
+  gpuAdapterType: string;
+  /** Detected performance tier from adapter / device class (`low` | `high`). */
+  performanceTier: string;
 };
 type HudLineSpec = {
   text: string;
@@ -117,8 +125,15 @@ export class MviewTargetFpsPanel implements Panel {
         : analysing
           ? `analysing frame data · ${frames} frames`
           : 'idle';
+      const gpuLine = formatGpuLine(
+        entry.gpuVendor,
+        entry.gpuArchitecture,
+        entry.gpuAdapterType,
+        entry.performanceTier
+      );
       const lines: HudLineSpec[] = !entry.targeting
         ? [
+            ...(gpuLine ? [{ text: gpuLine }] : []),
             { text: 'target FPS off' },
             { text: `min pixel budget: ${formatBudget(entry.minPx)}` },
             {
@@ -129,6 +144,7 @@ export class MviewTargetFpsPanel implements Panel {
             { text: `interact budget ${formatBudget(entry.budgetPx)}` },
           ]
         : [
+            ...(gpuLine ? [{ text: gpuLine }] : []),
             { text: `target: ${entry.targetFps} fps` },
             { text: `min pixel budget: ${formatBudget(entry.minPx)}` },
             { text: `measured fps: ${entry.emaFps.toFixed(1)}` },
@@ -158,6 +174,32 @@ export class MviewTargetFpsPanel implements Panel {
       this.list.appendChild(row);
     }
   }
+}
+
+function formatGpuLine(
+  vendor: string,
+  architecture: string,
+  adapterType: string,
+  performanceTier: string
+): string {
+  const gpuVendor = String(vendor || '').trim();
+  if (!gpuVendor) {
+    return '';
+  }
+  const gpuArch = String(architecture || '').trim();
+  const gpuType = String(adapterType || '').trim();
+  const tier = String(performanceTier || '').trim();
+  let label = gpuVendor;
+  if (gpuArch) {
+    label += ` / ${gpuArch}`;
+  }
+  if (gpuType) {
+    label += ` (${gpuType})`;
+  }
+  if (tier) {
+    label += ` · tier ${tier}`;
+  }
+  return `gpu ${label}`;
 }
 
 function formatBudget(pixels: number): string {
