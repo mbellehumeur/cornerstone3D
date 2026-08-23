@@ -1,8 +1,8 @@
-import type { FuberlinTransferPoint } from '@mview/webgpu-volume-standalone';
+import type { MviewTransferPoint } from '@mview/webgpu-volume-standalone';
 import type { ViewportPreset } from '../../../types';
 
 export type MviewPresetAppearance = {
-  points: FuberlinTransferPoint[];
+  points: MviewTransferPoint[];
   /** Normalized [0,1] surface/MIP threshold (default 0.35). */
   threshold: number;
   shade: boolean;
@@ -54,7 +54,7 @@ export function viewportPresetToMviewAppearance(
     byHu.set(hu, existing);
   }
 
-  const points: FuberlinTransferPoint[] = [...byHu.entries()]
+  const points: MviewTransferPoint[] = [...byHu.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([hu, value]) => ({
       x: Math.max(0, Math.min(1, (hu - min) / width)),

@@ -1,11 +1,11 @@
 declare module '@mview/webgpu-volume-standalone' {
-  export type FuberlinTransferPoint = {
+  export type MviewTransferPoint = {
     x: number;
     color: [number, number, number];
     alpha: number;
   };
 
-  export type FuberlinVolumeDescriptor = {
+  export type MviewVolumeDescriptor = {
     data: ArrayBufferView;
     dimensions: [number, number, number];
     spacing: [number, number, number];
@@ -17,7 +17,7 @@ declare module '@mview/webgpu-volume-standalone' {
     roiSourceDimensions?: [number, number, number];
   };
 
-  export type FuberlinVolumeSliceUpdate = {
+  export type MviewVolumeSliceUpdate = {
     data: ArrayBufferView;
     dimensions: [number, number, number];
     sliceIndices: number[];
@@ -43,7 +43,7 @@ declare module '@mview/webgpu-volume-standalone' {
     forcedUniformReason?: string;
   };
 
-  export type FuberlinCameraState = {
+  export type MviewCameraState = {
     orientation: number[];
     zoom: number;
     panX: number;
@@ -51,7 +51,7 @@ declare module '@mview/webgpu-volume-standalone' {
     projection: 'perspective' | 'orthographic';
   };
 
-  export type FuberlinCameraPatch = Partial<{
+  export type MviewCameraPatch = Partial<{
     orientation: number[];
     rotationX: number;
     rotationY: number;
@@ -61,7 +61,7 @@ declare module '@mview/webgpu-volume-standalone' {
     projection: 'perspective' | 'orthographic';
   }>;
 
-  export type FuberlinSettingsPatch = Partial<{
+  export type MviewSettingsPatch = Partial<{
     mode: 'surface' | 'composite' | 'mip';
     threshold: number;
     opacity: number;
@@ -83,13 +83,13 @@ declare module '@mview/webgpu-volume-standalone' {
     maxTextureReduceMode?: MaxTextureReduceMode;
     initialize(): Promise<VolumeRenderer>;
     applyPerformanceTierFromAdapter?(): void;
-    setVolume(volume: FuberlinVolumeDescriptor): Promise<void>;
-    allocateVolumeScaffold(volume: FuberlinVolumeDescriptor): Promise<void>;
-    updateVolumeSlices(update: FuberlinVolumeSliceUpdate): Promise<void>;
-    setTransferFunction(points: FuberlinTransferPoint[]): void;
-    setSettings(settings: FuberlinSettingsPatch): void;
-    setCamera(camera?: FuberlinCameraPatch): void;
-    getCamera(): FuberlinCameraState;
+    setVolume(volume: MviewVolumeDescriptor): Promise<void>;
+    allocateVolumeScaffold(volume: MviewVolumeDescriptor): Promise<void>;
+    updateVolumeSlices(update: MviewVolumeSliceUpdate): Promise<void>;
+    setTransferFunction(points: MviewTransferPoint[]): void;
+    setSettings(settings: MviewSettingsPatch): void;
+    setCamera(camera?: MviewCameraPatch): void;
+    getCamera(): MviewCameraState;
     setStatsOverlayEnabled?(enabled: boolean): void;
     setProgressivePreviewActive?(active: boolean): void;
     refreshVisibleRoiStats?(options?: { force?: boolean }): void;

@@ -39,7 +39,6 @@ import type {
   Volume3DCamera,
   Volume3DPayload,
   Volume3DDataPresentation,
-  Volume3DFuberlinRendering,
   Volume3DMviewRendering,
   Volume3DRenderMode,
   Volume3DRegisteredDataSet,
@@ -56,18 +55,12 @@ import {
   setWebGPUViewportCanvasVisible,
 } from '../Planar/webgpuViewportRenderWindow';
 import { WEBGPU_VOLUME_3D_RENDER_MODE } from './WebGPUVolume3DRenderPath';
-import { FUBERLIN_VOLUME_3D_RENDER_MODE } from './FuberlinVolume3DRenderPath';
 import { MVIEW_VOLUME_3D_RENDER_MODE } from './MviewVolume3DRenderPath';
 import { SLICERLIVE_VOLUME_3D_RENDER_MODE } from './SlicerLiveVolume3DRenderPath';
-import { iCameraToFuberlinCamera } from './fuberlinVolume3DCamera';
 import {
   iCameraToMviewCamera,
   parallelScaleToMviewOrthoZoom,
 } from './mviewVolume3DCamera';
-import {
-  getFuberlinVolume3D,
-  setFuberlinVolume3DCanvasVisible,
-} from './fuberlinVolume3DRegistry';
 import {
   getMviewVolume3D,
   setMviewVolume3DCanvasVisible,
@@ -109,19 +102,18 @@ class VolumeViewport3D extends GenericViewport<
 
   static get useCustomRenderingPipeline(): boolean {
     // Enable-time routing still uses VTK offscreen for vtkVolume3d. Instance
-    // method below opts webgpu/fuberlin presents out of OpenGL engine frames.
+    // method below opts webgpu/mview presents out of OpenGL engine frames.
     return false;
   }
 
   /**
-   * Binding-owned presents (WebGPU / fuberlin) must not run ContextPool OpenGL
+   * Binding-owned presents (WebGPU / mview) must not run ContextPool OpenGL
    * offscreen work — that canvas is hidden and the volume actor lives on the
-   * WebGPU/fuberlin renderer.
+   * WebGPU/mview renderer.
    */
   getUseCustomRenderingPipeline(): boolean {
     return (
       this.isWebGPUVolumeRenderModeActive() ||
-      this.isFuberlinVolumeRenderModeActive() ||
       this.isMviewVolumeRenderModeActive() ||
       this.isSlicerLiveVolumeRenderModeActive()
     );
@@ -129,7 +121,7 @@ class VolumeViewport3D extends GenericViewport<
 
   /**
    * Engine render loop entry for custom-pipeline Volume3D modes.
-   * Delegates to binding present (WebGPU traverse / fuberlin draw).
+   * Delegates to binding present (WebGPU traverse / mview draw).
    */
   customRenderViewportToCanvas(): void {
     this.render();
@@ -327,7 +319,6 @@ class VolumeViewport3D extends GenericViewport<
       !isVolume3DVolumePayload(data) ||
       !(
         isVolume3DVolumeRendering(rendering) ||
-        isVolume3DFuberlinRendering(rendering) ||
         isVolume3DMviewRendering(rendering)
       )
     ) {
@@ -351,13 +342,6 @@ class VolumeViewport3D extends GenericViewport<
    * surface is the attached WebGPU canvas; otherwise the VTK OpenGL canvas.
    */
   getCanvas(): HTMLCanvasElement {
-    if (this.isFuberlinVolumeRenderModeActive()) {
-      const entry = getFuberlinVolume3D(this.id);
-      if (entry) {
-        return entry.canvas;
-      }
-    }
-
     if (this.isMviewVolumeRenderModeActive()) {
       const entry = getMviewVolume3D(this.id);
       if (entry) {
@@ -384,7 +368,7 @@ class VolumeViewport3D extends GenericViewport<
 
   /**
    * Active Volume3D render mode (`vtkVolume3d` | `webgpuVolume3d` |
-   * `fuberlinVolume3D` | `vtkGeometry3d`). Used by OHIF corner menus / tools.
+   * `mviewVolume3d` | `vtkGeometry3d`). Used by OHIF corner menus / tools.
    * Prefers the mounted binding's render mode so the value is correct as soon
    * as data is attached (not the constructor default `mviewVolume3d`).
    */
@@ -395,7 +379,6 @@ class VolumeViewport3D extends GenericViewport<
     if (
       mountedMode === 'vtkVolume3d' ||
       mountedMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
-      mountedMode === FUBERLIN_VOLUME_3D_RENDER_MODE ||
       mountedMode === MVIEW_VOLUME_3D_RENDER_MODE ||
       mountedMode === SLICERLIVE_VOLUME_3D_RENDER_MODE ||
       mountedMode === 'vtkGeometry3d'
@@ -435,7 +418,6 @@ class VolumeViewport3D extends GenericViewport<
       resetClippingRange: true,
     });
     this.viewState = this.getRuntimeCamera();
-    this.syncFuberlinCameraFromViewState();
     this.syncMviewCameraFromViewState();
     this.syncSlicerLiveCameraFromViewState();
     this.modified(previousCamera);
@@ -506,7 +488,7 @@ class VolumeViewport3D extends GenericViewport<
 
   /**
    * Sets absolute canvas-pixel pan.
-   * For mview/fuberlin: screen-space pan only (do not move VTK focal/position —
+   * For mview: screen-space pan only (do not move VTK focal/position —
    * that made TrackballRotate orbit a different center and jump on click).
    * For vtk/webgpu volume: translate focalPoint + position in the view plane.
    */
@@ -534,8 +516,7 @@ class VolumeViewport3D extends GenericViewport<
     const canvasHeight =
       this.element.clientHeight || this.canvas?.clientHeight || 1;
 
-    const specialized =
-      getMviewVolume3D(this.id) || getFuberlinVolume3D(this.id);
+    const specialized = getMviewVolume3D(this.id);
 
     if (specialized) {
       this.applySpecializedVolumeFraming({
@@ -612,7 +593,6 @@ class VolumeViewport3D extends GenericViewport<
   private getFitParallelScale(): number | undefined {
     const specialized =
       getMviewVolume3D(this.id)?.baselineParallelScale ??
-      getFuberlinVolume3D(this.id)?.baselineParallelScale ??
       getSlicerLiveVolume3D(this.id)?.baselineParallelScale;
 
     if (
@@ -636,15 +616,13 @@ class VolumeViewport3D extends GenericViewport<
   }
 
   /**
-   * After mview/fuberlin/slicerLive mount, VTK may still hold an empty-scene parallelScale
+   * After mview/slicerLive mount, VTK may still hold an empty-scene parallelScale
    * (~1). Force the mount-time fit baseline onto the VTK camera so getZoom/setZoom
    * and framing sync share one scale.
    */
   private alignSpecializedVolumeFitCamera(): void {
     const specialized =
-      getMviewVolume3D(this.id) ||
-      getFuberlinVolume3D(this.id) ||
-      getSlicerLiveVolume3D(this.id);
+      getMviewVolume3D(this.id) || getSlicerLiveVolume3D(this.id);
     const baseline = specialized?.baselineParallelScale;
     if (
       typeof baseline !== 'number' ||
@@ -667,7 +645,7 @@ class VolumeViewport3D extends GenericViewport<
     panCanvasAbsolute?: Point2;
     canvasHeight?: number;
   }): void {
-    const entry = getMviewVolume3D(this.id) || getFuberlinVolume3D(this.id);
+    const entry = getMviewVolume3D(this.id);
     if (!entry) {
       return;
     }
@@ -801,7 +779,6 @@ class VolumeViewport3D extends GenericViewport<
       !isVolume3DVolumePayload(data) ||
       !(
         isVolume3DVolumeRendering(rendering) ||
-        isVolume3DFuberlinRendering(rendering) ||
         isVolume3DMviewRendering(rendering)
       )
     ) {
@@ -942,12 +919,11 @@ class VolumeViewport3D extends GenericViewport<
     if (!resetZoom) {
       camera.setParallelScale(previousParallelScale);
     } else {
-      // mview/fuberlin have no VTK volume actor — resetCamera fits empty
+      // mview/slicerLive have no VTK volume actor — resetCamera fits empty
       // bounds (~parallelScale 1) and would sync as ~10× over-zoom. Restore
       // the fit baseline captured at mount instead.
       const specializedBaseline =
         getMviewVolume3D(this.id)?.baselineParallelScale ??
-        getFuberlinVolume3D(this.id)?.baselineParallelScale ??
         getSlicerLiveVolume3D(this.id)?.baselineParallelScale;
       if (
         typeof specializedBaseline === 'number' &&
@@ -972,7 +948,6 @@ class VolumeViewport3D extends GenericViewport<
     } else if (resetPan && resetToCenter) {
       this.panOffset = [0, 0];
     }
-    this.syncFuberlinCameraFromViewState();
     this.syncMviewCameraFromViewState();
     this.syncSlicerLiveCameraFromViewState();
     this.render();
@@ -995,7 +970,7 @@ class VolumeViewport3D extends GenericViewport<
   /**
    * Updates cached size state and notifies active render bindings.
    *
-   * Specialized presents (mview / fuberlin / …) own their canvas bitmap (pixel
+   * Specialized presents (mview / …) own their canvas bitmap (pixel
    * budget). VTK/OpenGL uses the element CSS size × DPR — do not read
    * `this.canvas.width` after a custom-pipeline session, or sWidth stays stuck
    * on the last adaptive present size / a display:none bitmap.
@@ -1020,7 +995,7 @@ class VolumeViewport3D extends GenericViewport<
 
   /**
    * Renders active 3D bindings or queues an engine-driven render.
-   * Binding-owned presents (WebGPU / fuberlin) skip the engine frame loop, so
+   * Binding-owned presents (WebGPU / mview) skip the engine frame loop, so
    * fire IMAGE_RENDERED here for OHIF overlays and other consumers.
    */
   render(): void {
@@ -1227,16 +1202,14 @@ class VolumeViewport3D extends GenericViewport<
     const modeChanged = this.activeRenderMode !== renderMode;
     this.activeRenderMode = renderMode;
     const useWebGPU = renderMode === WEBGPU_VOLUME_3D_RENDER_MODE;
-    const useFuberlin = renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE;
     const useMview = renderMode === MVIEW_VOLUME_3D_RENDER_MODE;
     const useSlicerLive = renderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE;
     // cpuCanvas is unused for direct WebGPU present; keep it hidden.
     this.cpuCanvas.style.display = 'none';
     this.cpuCanvas.style.pointerEvents = 'none';
     this.canvas.style.display =
-      useWebGPU || useFuberlin || useMview || useSlicerLive ? 'none' : '';
+      useWebGPU || useMview || useSlicerLive ? 'none' : '';
 
-    setFuberlinVolume3DCanvasVisible(this.id, useFuberlin);
     setMviewVolume3DCanvasVisible(this.id, useMview);
     setSlicerLiveVolume3DCanvasVisible(this.id, useSlicerLive);
 
@@ -1262,13 +1235,11 @@ class VolumeViewport3D extends GenericViewport<
       setWebGPUViewportCanvasVisible(webgpuWindow, false);
     }
 
-    if (useFuberlin || useMview || useSlicerLive) {
+    if (useMview || useSlicerLive) {
       this.syncPresentSize();
       const entry = useSlicerLive
         ? getSlicerLiveVolume3D(this.id)
-        : useMview
-          ? getMviewVolume3D(this.id)
-          : getFuberlinVolume3D(this.id);
+        : getMviewVolume3D(this.id);
       if (entry) {
         this.renderContext.vtk.canvas = entry.canvas;
       }
@@ -1320,59 +1291,6 @@ class VolumeViewport3D extends GenericViewport<
 
   private isWebGPUVolumeRenderModeActive(): boolean {
     return this.activeRenderMode === WEBGPU_VOLUME_3D_RENDER_MODE;
-  }
-
-  private isFuberlinVolumeRenderModeActive(): boolean {
-    return this.activeRenderMode === FUBERLIN_VOLUME_3D_RENDER_MODE;
-  }
-
-  private syncFuberlinCameraFromViewState(): void {
-    if (!this.isFuberlinVolumeRenderModeActive()) {
-      return;
-    }
-
-    const entry = getFuberlinVolume3D(this.id);
-
-    if (!entry) {
-      return;
-    }
-
-    const binding = this.getCurrentBinding();
-
-    if (!binding) {
-      return;
-    }
-
-    let direction: ArrayLike<number> | number[] | undefined;
-
-    try {
-      const rendering = this.getVolume3DRendering(binding);
-
-      if (isVolume3DFuberlinRendering(rendering)) {
-        direction =
-          rendering.imageVolume.direction ??
-          rendering.imageVolume.imageData?.getDirection?.();
-      }
-    } catch {
-      // Binding not ready yet — still sync with identity volume axes.
-    }
-
-    const patch = iCameraToFuberlinCamera(this.getViewState(), {
-      direction,
-      volumePhysicalMax: entry.volumePhysicalMax,
-      volumeCenter: entry.volumeCenter,
-      baselineParallelScale: entry.baselineParallelScale,
-      // Orientation only — zoom/pan applied below from VTK scale + panOffset so
-      // rotate does not fight absolute canvas pan set by PanTool.
-      includeFraming: false,
-    });
-
-    if (!patch) {
-      return;
-    }
-
-    this.applySpecializedFramingToPatch(patch, entry);
-    entry.renderer.setCamera(patch);
   }
 
   private isMviewVolumeRenderModeActive(): boolean {
@@ -1464,7 +1382,7 @@ class VolumeViewport3D extends GenericViewport<
 
   /**
    * Ortho zoom from VTK parallelScale; pan from canvas panOffset (not focal
-   * offset). Keeps rotate/zoom/pan from fighting each other on mview/fuberlin.
+   * offset). Keeps rotate/zoom/pan from fighting each other on mview.
    */
   private applySpecializedFramingToPatch(
     patch: { zoom?: number; panX?: number; panY?: number },
@@ -1534,17 +1452,6 @@ class VolumeViewport3D extends GenericViewport<
       }
     }
 
-    const fuberlin = getFuberlinVolume3D(this.id);
-    if (fuberlin) {
-      if (
-        fuberlin.canvas.width !== targetWidth ||
-        fuberlin.canvas.height !== targetHeight
-      ) {
-        fuberlin.canvas.width = targetWidth;
-        fuberlin.canvas.height = targetHeight;
-      }
-    }
-
     // mview canvas backing-store size is owned by VolumeRenderer.resize()
     // (pixel-budget / FPS target). Do not reset it to native DPR here.
 
@@ -1574,7 +1481,6 @@ function isVolume3DData(data: LoadedData): data is LoadedData<Volume3DPayload> {
     (payload.type === 'image' &&
       (payload.renderMode === 'vtkVolume3d' ||
         payload.renderMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
-        payload.renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE ||
         payload.renderMode === MVIEW_VOLUME_3D_RENDER_MODE ||
         payload.renderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE)) ||
     (payload.type === 'geometry' && payload.renderMode === 'vtkGeometry3d')
@@ -1587,7 +1493,6 @@ function isVolume3DRendering(rendering: {
   return (
     rendering.renderMode === 'vtkVolume3d' ||
     rendering.renderMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
-    rendering.renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE ||
     rendering.renderMode === MVIEW_VOLUME_3D_RENDER_MODE ||
     rendering.renderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE ||
     rendering.renderMode === 'vtkGeometry3d'
@@ -1599,13 +1504,11 @@ function isVolume3DVolumeRenderMode(
 ): renderMode is
   | 'vtkVolume3d'
   | typeof WEBGPU_VOLUME_3D_RENDER_MODE
-  | typeof FUBERLIN_VOLUME_3D_RENDER_MODE
   | typeof MVIEW_VOLUME_3D_RENDER_MODE
   | typeof SLICERLIVE_VOLUME_3D_RENDER_MODE {
   return (
     renderMode === 'vtkVolume3d' ||
     renderMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
-    renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE ||
     renderMode === MVIEW_VOLUME_3D_RENDER_MODE ||
     renderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE
   );
@@ -1624,12 +1527,6 @@ function isVolume3DVolumeRendering(
     rendering.renderMode === 'vtkVolume3d' ||
     rendering.renderMode === WEBGPU_VOLUME_3D_RENDER_MODE
   );
-}
-
-function isVolume3DFuberlinRendering(
-  rendering: Volume3DRendering
-): rendering is Volume3DFuberlinRendering {
-  return rendering.renderMode === FUBERLIN_VOLUME_3D_RENDER_MODE;
 }
 
 function isVolume3DMviewRendering(

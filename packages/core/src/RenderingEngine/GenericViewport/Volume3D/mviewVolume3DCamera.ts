@@ -1,4 +1,4 @@
-import type { FuberlinCameraPatch } from '@mview/webgpu-volume-standalone';
+import type { MviewCameraPatch } from '@mview/webgpu-volume-standalone';
 import type { ICamera, Point3 } from '../../../types';
 import type { Volume3DCamera } from './viewport3DTypes';
 
@@ -189,7 +189,7 @@ export function getVolumeCenterWorld(imageData: {
 export function iCameraToMviewCamera(
   camera: Partial<Volume3DCamera | ICamera>,
   options: MviewCameraConvertOptions = {}
-): FuberlinCameraPatch | undefined {
+): MviewCameraPatch | undefined {
   const viewPlaneNormal = camera.viewPlaneNormal as Point3 | undefined;
   const viewUp = camera.viewUp as Point3 | undefined;
 
@@ -222,7 +222,7 @@ export function iCameraToMviewCamera(
 
   const yFinal = length(yOrtho) > 1e-6 ? yOrtho : yAxis;
 
-  const patch: FuberlinCameraPatch = {
+  const patch: MviewCameraPatch = {
     orientation: [
       xAxis[0],
       yFinal[0],

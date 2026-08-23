@@ -9,40 +9,8 @@ export {
   createVolume3DRenderPathResolver,
 } from './Volume3DRenderPathResolver';
 export { WEBGPU_VOLUME_3D_RENDER_MODE } from './WebGPUVolume3DRenderPath';
-export { FUBERLIN_VOLUME_3D_RENDER_MODE } from './FuberlinVolume3DRenderPath';
 export { MVIEW_VOLUME_3D_RENDER_MODE } from './MviewVolume3DRenderPath';
 export { SLICERLIVE_VOLUME_3D_RENDER_MODE } from './SlicerLiveVolume3DRenderPath';
-export {
-  applyFuberlinVolume3DPreset,
-  beginFuberlinVolume3DInteraction,
-  endFuberlinVolume3DInteraction,
-  flushFuberlinVolume3DPendingPreset,
-  FUBERLIN_DEFAULT_PRESENT_QUALITY,
-  getFuberlinVolume3D,
-  getFuberlinVolume3DPresentQuality,
-  getFuberlinVolume3DPresentQualityProfiles,
-  getFuberlinVolume3DProjection,
-  getFuberlinVolume3DRenderMode,
-  getFuberlinVolume3DThreshold,
-  isFuberlinVolume3DPresentQuality,
-  isFuberlinVolume3DProjection,
-  isFuberlinVolume3DRenderMode,
-  rotateFuberlinVolume3D,
-  setFuberlinVolume3DPresentQuality,
-  setFuberlinVolume3DProjection,
-  setFuberlinVolume3DRenderMode,
-  setFuberlinVolume3DThreshold,
-  setFuberlinVolume3DValueRange,
-} from './fuberlinVolume3DRegistry';
-export type {
-  FuberlinVolume3DPresentQuality,
-  FuberlinVolume3DPresentQualityProfiles,
-  FuberlinVolume3DProjection,
-  FuberlinVolume3DQualityProfileSnapshot,
-  FuberlinVolume3DRenderMode,
-} from './fuberlinVolume3DRegistry';
-export { viewportPresetToFuberlinAppearance } from './fuberlinViewportPreset';
-export type { FuberlinPresetAppearance } from './fuberlinViewportPreset';
 export {
   applyMviewVolume3DPreset,
   beginMviewVolume3DInteraction,

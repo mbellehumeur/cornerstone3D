@@ -21,7 +21,6 @@ export class DefaultVolume3DDataProvider implements Volume3DDataProvider {
       renderMode:
         | 'vtkVolume3d'
         | 'webgpuVolume3d'
-        | 'fuberlinVolume3D'
         | 'mviewVolume3d'
         | 'slicerLiveVolume3d'
         | 'vtkGeometry3d';
@@ -38,7 +37,6 @@ export class DefaultVolume3DDataProvider implements Volume3DDataProvider {
     if (
       options.renderMode === 'vtkVolume3d' ||
       options.renderMode === 'webgpuVolume3d' ||
-      options.renderMode === 'fuberlinVolume3D' ||
       options.renderMode === 'mviewVolume3d' ||
       options.renderMode === 'slicerLiveVolume3d'
     ) {

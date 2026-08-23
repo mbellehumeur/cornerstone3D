@@ -270,7 +270,7 @@ function resolveMapperScalars(
 }
 
 /**
- * Materializes contiguous scalars for WebGPU / fuberlin volume upload.
+ * Materializes contiguous scalars for WebGPU / mview volume upload.
  * Image-backed streaming volumes expose `getCompleteScalarDataArray` (same as
  * `convertMapperToNotSharedMapper`), not a contiguous `getScalarData()` store.
  *

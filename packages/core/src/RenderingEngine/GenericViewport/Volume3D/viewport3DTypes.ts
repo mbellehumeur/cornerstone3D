@@ -31,7 +31,6 @@ import type { ViewportCameraBase } from '../ViewportCameraTypes';
 export type Volume3DRenderMode =
   | 'vtkVolume3d'
   | 'webgpuVolume3d'
-  | 'fuberlinVolume3D'
   | 'mviewVolume3d'
   | 'slicerLiveVolume3d'
   | 'vtkGeometry3d';
@@ -57,7 +56,6 @@ export interface Volume3DVolumePayload {
   renderMode:
     | 'vtkVolume3d'
     | 'webgpuVolume3d'
-    | 'fuberlinVolume3D'
     | 'mviewVolume3d'
     | 'slicerLiveVolume3d';
   volumeId: string;
@@ -157,16 +155,6 @@ export type Volume3DVolumeRendering = MountedRendering<{
 }>;
 
 /** @internal */
-export type Volume3DFuberlinRendering = MountedRendering<{
-  renderMode: 'fuberlinVolume3D';
-  actorEntryUID: string;
-  defaultVOIRange?: VOIRange;
-  imageVolume: IImageVolume;
-  renderer: VolumeRenderer;
-  removeStreamingSubscriptions?: () => void;
-}>;
-
-/** @internal */
 export type Volume3DMviewRendering = MountedRendering<{
   renderMode: 'mviewVolume3d';
   actorEntryUID: string;
@@ -196,7 +184,6 @@ export type Volume3DGeometryRendering = MountedRendering<{
 /** @internal */
 export type Volume3DRendering =
   | Volume3DVolumeRendering
-  | Volume3DFuberlinRendering
   | Volume3DMviewRendering
   | Volume3DSlicerLiveRendering
   | Volume3DGeometryRendering;

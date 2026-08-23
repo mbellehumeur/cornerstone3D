@@ -6,13 +6,10 @@ import {
   getEnabledElementByIds,
   beginWebGPUViewportAnimation,
   endWebGPUViewportAnimation,
-  beginFuberlinVolume3DInteraction,
-  endFuberlinVolume3DInteraction,
   beginMviewVolume3DInteraction,
   endMviewVolume3DInteraction,
   beginSlicerLiveVolume3DInteraction,
   endSlicerLiveVolume3DInteraction,
-  getFuberlinVolume3D,
   getMviewVolume3D,
   getSlicerLiveVolume3D,
 } from '@cornerstonejs/core';
@@ -75,10 +72,9 @@ class TrackballRotateTool extends BaseTool {
     const enabledElement = getEnabledElement(element);
     const { viewport } = enabledElement;
 
-    // Specialized Volume3D (fuberlin / mview): no VTK volume mapper — drop
-    // interactive quality via VolumeRenderer.beginInteraction / endInteraction.
+    // Specialized Volume3D (mview): no VTK volume mapper — drop interactive
+    // quality via VolumeRenderer.beginInteraction / endInteraction.
     if (
-      beginFuberlinVolume3DInteraction(viewport.id) ||
       beginMviewVolume3DInteraction(viewport.id) ||
       beginSlicerLiveVolume3DInteraction(viewport.id)
     ) {
@@ -98,7 +94,6 @@ class TrackballRotateTool extends BaseTool {
           if (this.cleanUp) {
             this._detachInteractionEndListeners(this.cleanUp);
           }
-          endFuberlinVolume3DInteraction(viewport.id);
           endMviewVolume3DInteraction(viewport.id);
           endSlicerLiveVolume3DInteraction(viewport.id);
           viewport.render();
@@ -202,7 +197,7 @@ class TrackballRotateTool extends BaseTool {
             const height = vp.element.clientHeight;
 
             // ResizeObserver fires once on observe() — that must not reset the
-            // camera (mview/fuberlin jump when switching to TrackballRotate).
+            // camera (mview jump when switching to TrackballRotate).
             if (width === lastWidth && height === lastHeight) {
               return;
             }
@@ -254,15 +249,13 @@ class TrackballRotateTool extends BaseTool {
   };
 
   /**
-   * For mview/fuberlin, rotate about the volume center (same pivot as the
-   * present). canvasToWorld(center) is unreliable with a detached present
-   * canvas and a panned VTK focal point.
+   * For mview, rotate about the volume center (same pivot as the present).
+   * canvasToWorld(center) is unreliable with a detached present canvas and a
+   * panned VTK focal point.
    */
   _recenterSpecializedOrbit = (viewport) => {
     const entry =
-      getMviewVolume3D(viewport.id) ||
-      getFuberlinVolume3D(viewport.id) ||
-      getSlicerLiveVolume3D(viewport.id);
+      getMviewVolume3D(viewport.id) || getSlicerLiveVolume3D(viewport.id);
     const center = entry?.volumeCenter as Types.Point3 | undefined;
     if (!center || !viewport.getVtkActiveCamera) {
       return;
@@ -398,12 +391,10 @@ class TrackballRotateTool extends BaseTool {
     ];
 
     const center: Types.Point2 = [width * 0.5, height * 0.5];
-    // mview/fuberlin: orbit the volume center (matches present). Otherwise the
-    // canvas focal point (cornerstone3D default).
+    // mview: orbit the volume center (matches present). Otherwise the canvas
+    // focal point (cornerstone3D default).
     const specialized =
-      getMviewVolume3D(viewport.id) ||
-      getFuberlinVolume3D(viewport.id) ||
-      getSlicerLiveVolume3D(viewport.id);
+      getMviewVolume3D(viewport.id) || getSlicerLiveVolume3D(viewport.id);
     const centerWorld = (specialized?.volumeCenter ??
       viewport.canvasToWorld(center)) as Types.Point3;
     const normalizedCenter = [0.5, 0.5];

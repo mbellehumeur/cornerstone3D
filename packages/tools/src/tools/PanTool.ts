@@ -3,8 +3,6 @@ import {
   getEnabledElement,
   utilities as csUtils,
   viewportHasPan,
-  beginFuberlinVolume3DInteraction,
-  endFuberlinVolume3DInteraction,
   beginMviewVolume3DInteraction,
   endMviewVolume3DInteraction,
   beginSlicerLiveVolume3DInteraction,
@@ -40,14 +38,12 @@ class PanTool extends BaseTool {
 
   private _beginVolume3DInteraction(viewportId: string): boolean {
     return (
-      beginFuberlinVolume3DInteraction(viewportId) ||
       beginMviewVolume3DInteraction(viewportId) ||
       beginSlicerLiveVolume3DInteraction(viewportId)
     );
   }
 
   private _endVolume3DInteraction(viewportId: string): void {
-    endFuberlinVolume3DInteraction(viewportId);
     endMviewVolume3DInteraction(viewportId);
     endSlicerLiveVolume3DInteraction(viewportId);
   }
