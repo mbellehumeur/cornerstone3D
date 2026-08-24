@@ -13,7 +13,7 @@ declare module '@mview/webgpu-volume-standalone' {
     sourceFormat?: 'r16float';
     label?: string;
     originalDimensions?: [number, number, number];
-    volumeMode?: 'coarseFull' | 'roiRefined';
+    volumeRenderingMode?: 'halfSlices' | 'full';
     roiSourceDimensions?: [number, number, number];
   };
 
@@ -92,7 +92,7 @@ declare module '@mview/webgpu-volume-standalone' {
     getCamera(): MviewCameraState;
     setStatsOverlayEnabled?(enabled: boolean): void;
     setProgressivePreviewActive?(active: boolean): void;
-    refreshVisibleRoiStats?(options?: { force?: boolean }): void;
+    refreshVisibleRegionStats?(options?: { force?: boolean }): void;
     setQualityProfiles(quality?: {
       interactive?: {
         pixelBudget?: number;
@@ -149,7 +149,7 @@ declare module '@mview/webgpu-volume-standalone' {
       activeSpacing?: [number, number, number] | null;
       downsampleScale?: number;
       maxTextureDimension3D?: number;
-      volumeMode?: 'coarseFull' | 'roiRefined';
+      volumeRenderingMode?: 'halfSlices' | 'full';
       roiSourceDimensions?: [number, number, number] | null;
       visibleSourceDimensions?: [number, number, number] | null;
       visibleSourceTotal?: [number, number, number] | null;
@@ -197,7 +197,7 @@ declare module '@mview/webgpu-volume-standalone' {
       releaseCoarseCpuBuffers?: () => void;
       fullVolumeCenter?: [number, number, number];
       fullVolumePhysicalMax?: number;
-      getVtkVisibleRoi?: () => unknown;
+      getVtkVisibleRegion?: () => unknown;
     }): void;
     requestRender(options?: { force?: boolean }): void;
     render(): void;
@@ -307,8 +307,8 @@ declare module '@mview/webgpu-volume-standalone' {
     hasCompleteNativeR16?: boolean;
   }): boolean;
 
-  export function shrinkBrickToR16ByteBudget(
-    brick: {
+  export function shrinkPaddedVisibleRegionToR16ByteBudget(
+    region: {
       ijkMin: number[];
       ijkMax: number[];
       roiDimensions: number[];

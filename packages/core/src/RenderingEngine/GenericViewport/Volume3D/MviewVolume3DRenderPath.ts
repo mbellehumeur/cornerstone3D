@@ -916,7 +916,7 @@ export class MviewVolume3DRenderPath
         }
         overviewCanvasRevealed = true;
         revealCanvas();
-        this.renderer.refreshVisibleRoiStats?.();
+        this.renderer.refreshVisibleRegionStats?.();
       }
 
       const forceRender =
@@ -1645,7 +1645,7 @@ export class MviewVolume3DRenderPath
       },
       fullVolumeCenter: this.fullVolumeCenter,
       fullVolumePhysicalMax: this.fullVolumePhysicalMax,
-      getVtkVisibleRoi: () => this.computeVtkVisibleVolumeRoi(),
+      getVtkVisibleRegion: () => this.computeVtkVisibleVolumeRoi(),
     });
   }
 
@@ -1815,7 +1815,7 @@ export class MviewVolume3DRenderPath
             : ([0, 1] as [number, number]),
         label: imageVolume.volumeId,
         originalDimensions: plan.originalDimensions,
-        volumeMode: 'coarseFull' as const,
+        volumeRenderingMode: 'halfSlices' as const,
       };
       if (plan.mode === 'zSkip') {
         const allocateScaffold = (
@@ -1844,7 +1844,7 @@ export class MviewVolume3DRenderPath
       }
       // Progressive uploads use load-time Target FPS seeding instead of probe.
       this.applyPresentQuality();
-      renderer.refreshVisibleRoiStats?.();
+      renderer.refreshVisibleRegionStats?.();
       return true;
     } catch (error) {
       console.error('[MviewVolume3D] allocateEmptyVolume failed', error);

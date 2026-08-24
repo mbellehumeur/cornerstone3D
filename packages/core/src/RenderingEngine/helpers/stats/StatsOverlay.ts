@@ -429,7 +429,7 @@ export class StatsOverlay implements StatsInstance {
           activeDimensions: [number, number, number] | null;
           downsampleScale: number;
           maxTextureDimension3D: number;
-          volumeMode: 'coarseFull' | 'roiRefined';
+          volumeRenderingMode: 'halfSlices' | 'full';
           roiSourceDimensions: [number, number, number] | null;
           visibleSourceDimensions: [number, number, number] | null;
           visibleSourceTotal: [number, number, number] | null;
@@ -452,7 +452,7 @@ export class StatsOverlay implements StatsInstance {
             : null,
           downsampleScale: Number(stats.downsampleScale) || 1,
           maxTextureDimension3D: Number(stats.maxTextureDimension3D) || 0,
-          volumeMode: stats.volumeMode,
+          volumeRenderingMode: stats.volumeRenderingMode,
           roiSourceDimensions: Array.isArray(stats.roiSourceDimensions)
             ? stats.roiSourceDimensions
             : null,

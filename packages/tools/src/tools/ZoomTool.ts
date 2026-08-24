@@ -15,6 +15,9 @@ import { BaseTool } from './base';
 import type { EventTypes, PublicToolProps, ToolProps } from '../types';
 import { Events } from '../enums';
 
+/** Ignore tiny pinch distance changes so two-finger translate stays pan-dominant. */
+const PINCH_ZOOM_MIN_CANVAS_DELTA = 2;
+
 /**
  * ZoomTool tool manipulates the camera zoom applied to a viewport. It
  * provides a way to set the zoom of a viewport by dragging mouse over the image.
@@ -100,7 +103,7 @@ class ZoomTool extends BaseTool {
   }
 
   mouseWheelCallback(evt: EventTypes.MouseWheelEventType) {
-    const { element } = evt.detail;
+    const { element, event } = evt.detail;
     const enabledElement = getEnabledElement(element);
     const { viewport } = enabledElement;
 
@@ -115,7 +118,12 @@ class ZoomTool extends BaseTool {
       }, 120);
     }
 
-    this._zoom(evt);
+    // Trackpad pinch is typically ctrl/meta + wheel; plain two-finger scroll pans.
+    if (event?.ctrlKey || event?.metaKey) {
+      this._zoom(evt);
+    } else {
+      this._wheelPan(evt);
+    }
   }
 
   preMouseDownCallback = (evt: EventTypes.InteractionEventType): boolean => {
@@ -175,8 +183,22 @@ class ZoomTool extends BaseTool {
       const worldPos = currentPoints.world;
 
       if (!hasLegacyCameraPosition(camera)) {
-        if (viewportHasZoom(viewport)) {
-          this._dragViewportZoom(evt, viewport);
+        const deltaDistance =
+          (evt as EventTypes.TouchDragEventType).detail.deltaDistance?.canvas ??
+          0;
+        if (
+          viewportHasZoom(viewport) &&
+          Math.abs(deltaDistance) >= PINCH_ZOOM_MIN_CANVAS_DELTA
+        ) {
+          const canvasPoint = this.configuration.zoomToCenter
+            ? undefined
+            : currentPoints?.canvas;
+          this._applyViewportZoomDelta(
+            viewport,
+            element,
+            deltaDistance,
+            canvasPoint
+          );
           viewport.render();
         }
 
@@ -245,6 +267,10 @@ class ZoomTool extends BaseTool {
     const deltaY = pinch
       ? (evt as EventTypes.TouchDragEventType).detail.deltaDistance.canvas
       : deltaPoints.canvas[1];
+
+    if (pinch && Math.abs(deltaY) < PINCH_ZOOM_MIN_CANVAS_DELTA) {
+      return;
+    }
 
     const size = [element.clientWidth, element.clientHeight];
     const { parallelScale, focalPoint, position } = camera;
@@ -361,6 +387,10 @@ class ZoomTool extends BaseTool {
       ? (evt as EventTypes.TouchDragEventType).detail.deltaDistance.canvas
       : deltaPoints.canvas[1];
 
+    if (pinch && Math.abs(deltaY) < PINCH_ZOOM_MIN_CANVAS_DELTA) {
+      return;
+    }
+
     const size = [element.clientWidth, element.clientHeight];
     const { position, focalPoint, viewPlaneNormal } = camera;
 
@@ -445,6 +475,21 @@ class ZoomTool extends BaseTool {
     }
 
     this._dragCallback(eventDetails);
+  }
+
+  /** Two-finger trackpad scroll (wheel without ctrl/meta) pans the viewport. */
+  _wheelPan(evt: EventTypes.MouseWheelEventType): void {
+    const { element, wheel } = evt.detail;
+    const enabledElement = getEnabledElement(element);
+    const viewport = enabledElement.viewport;
+
+    if (!viewportHasPan(viewport)) {
+      return;
+    }
+
+    const pan = viewport.getPan();
+    viewport.setPan([pan[0] + wheel.pixelX, pan[1] + wheel.pixelY]);
+    viewport.render();
   }
 
   _panCallback(evt: EventTypes.InteractionEventType) {

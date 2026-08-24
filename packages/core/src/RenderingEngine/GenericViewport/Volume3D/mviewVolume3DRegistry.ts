@@ -120,14 +120,14 @@ export function setMviewVolume3DStatsOverlayEnabled(enabled: boolean): void {
   }
 }
 
-/** @internal Recompute visible-ROI HUD stats for every mview Volume3D viewport. */
-export function refreshMviewVolume3DVisibleRoiStats(): void {
+/** @internal Recompute visibleRegion HUD stats for every mview Volume3D viewport. */
+export function refreshMviewVolume3DVisibleRegionStats(): void {
   for (const entry of entries.values()) {
     (
       entry.renderer as VolumeRenderer & {
-        refreshVisibleRoiStats?: (options?: { force?: boolean }) => void;
+        refreshVisibleRegionStats?: (options?: { force?: boolean }) => void;
       }
-    ).refreshVisibleRoiStats?.({ force: true });
+    ).refreshVisibleRegionStats?.({ force: true });
   }
 }
 

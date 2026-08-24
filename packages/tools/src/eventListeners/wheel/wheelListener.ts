@@ -15,10 +15,10 @@ function wheelListener(evt: WheelEvent) {
   const enabledElement = getEnabledElement(element);
   const { renderingEngineId, viewportId } = enabledElement;
 
-  // Prevent triggering MouseWheel events that are not real scroll events:
-  // E.g. when clicking the MiddleMouseWheelButton, a deltaY of 0 is emitted.
+  // Ignore true no-ops (e.g. middle-button click emits deltaY of 0).
+  // Allow deltaX-only events so trackpad two-finger horizontal pan reaches tools.
   // See https://github.com/cornerstonejs/cornerstoneTools/issues/935
-  if (evt.deltaY > -1 && evt.deltaY < 1) {
+  if (evt.deltaY > -1 && evt.deltaY < 1 && evt.deltaX > -1 && evt.deltaX < 1) {
     return;
   }
 

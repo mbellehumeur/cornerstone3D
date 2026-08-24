@@ -8,7 +8,7 @@ export type MaxTexturesPanelEntry = {
   activeDimensions?: [number, number, number] | null;
   downsampleScale?: number;
   maxTextureDimension3D?: number;
-  volumeMode?: 'coarseFull' | 'roiRefined';
+  volumeRenderingMode?: 'halfSlices' | 'full';
   roiSourceDimensions?: [number, number, number] | null;
   visibleSourceDimensions?: [number, number, number] | null;
   visibleSourceTotal?: [number, number, number] | null;
@@ -168,7 +168,7 @@ function formatLines(entry: MaxTexturesPanelEntry): LineSpec[] {
       source![1] !== active![1] ||
       source![2] !== active![2];
     const roiNative =
-      entry.volumeMode === 'roiRefined' &&
+      entry.volumeRenderingMode === 'full' &&
       entry.roiSourceDimensions &&
       (entry.roiSourceDimensions[0] !== active![0] ||
         entry.roiSourceDimensions[1] !== active![1] ||
@@ -196,7 +196,7 @@ function formatLines(entry: MaxTexturesPanelEntry): LineSpec[] {
       const scaleLabel =
         Number.isFinite(scale) && scale > 0 ? `${scale.toFixed(3)}x` : '?';
       lines = [
-        { text: maxTextureLine, lossy: true },
+        { text: maxTextureLine },
         {
           text: `volume ${source!.join('x')} -> ${active!.join('x')} (${scaleLabel}) · lossy`,
           lossy: true,

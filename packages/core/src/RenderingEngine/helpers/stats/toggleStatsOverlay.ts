@@ -1,6 +1,6 @@
 import { StatsOverlay } from './index';
 import {
-  refreshMviewVolume3DVisibleRoiStats,
+  refreshMviewVolume3DVisibleRegionStats,
   setMviewVolume3DStatsOverlayEnabled,
 } from '../../GenericViewport/Volume3D/mviewVolume3DRegistry';
 
@@ -24,7 +24,7 @@ export function toggleStatsOverlay(): boolean {
 
   StatsOverlay.setup();
   setMviewVolume3DStatsOverlayEnabled(true);
-  refreshMviewVolume3DVisibleRoiStats();
+  refreshMviewVolume3DVisibleRegionStats();
   return true;
 }
 
@@ -38,7 +38,7 @@ export function setStatsOverlayEnabled(enabled: boolean): boolean {
       StatsOverlay.setup();
     }
     setMviewVolume3DStatsOverlayEnabled(true);
-    refreshMviewVolume3DVisibleRoiStats();
+    refreshMviewVolume3DVisibleRegionStats();
     return true;
   }
 
