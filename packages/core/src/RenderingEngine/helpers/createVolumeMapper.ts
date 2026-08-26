@@ -4,39 +4,73 @@ import type vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
 import type vtkOpenGLTexture from '@kitware/vtk.js/Rendering/OpenGL/Texture';
 import vtkVolumeMapper from '@kitware/vtk.js/Rendering/Core/VolumeMapper';
 import vtkDataArray from '@kitware/vtk.js/Common/Core/DataArray';
+import type { VolumeTextureChunkPlan } from './volumeTextureChunks';
+import {
+  computeFittedVolumeSampleDistance,
+  DEFAULT_MAX_SAMPLES_PER_RAY,
+} from './volumeSampleDistance';
 
 /**
- * Given an imageData and a vtkOpenGLTexture, it creates a "shared" vtk volume mapper
- * from which various volume actors can be created.
+ * Given an imageData and a vtkOpenGLTexture (or brick textures), it creates a
+ * "shared" vtk volume mapper from which various volume actors can be created.
  *
  * @param imageData - the vtkImageData object that contains the data to
  * render.
- * @param vtkOpenGLTexture - The vtkOpenGLTexture that will be used to render
- * the volume.
+ * @param vtkOpenGLTexture - The primary vtkOpenGLTexture (brick 0).
+ * @param options - optional brick textures + chunk plan for >max3D Z.
  * @returns The volume mapper.
  */
 export default function createVolumeMapper(
   imageData: vtkImageData,
-  vtkOpenGLTexture: vtkOpenGLTexture
+  vtkOpenGLTexture: vtkOpenGLTexture,
+  options?: {
+    scalarTextures?: vtkOpenGLTexture[];
+    volumeTextureChunkPlan?: VolumeTextureChunkPlan;
+  }
 ): vtkVolumeMapper {
   const volumeMapper = vtkSharedVolumeMapper.newInstance();
 
   volumeMapper.setInputData(imageData);
 
-  const spacing = imageData.getSpacing();
   // Set the sample distance to half the mean length of one side. This is where the divide by 6 comes from.
   // https://github.com/Kitware/VTK/blob/6b559c65bb90614fb02eb6d1b9e3f0fca3fe4b0b/Rendering/VolumeOpenGL2/vtkSmartVolumeMapper.cxx#L344
+  // When the volume diagonal needs more than maxSamples steps, distance is
+  // increased so rays still finish within the budget (avoids GPU hangs).
   const sampleDistanceMultiplier =
     getConfiguration().rendering?.volumeRendering?.sampleDistanceMultiplier ||
     1;
-  const sampleDistance =
-    (sampleDistanceMultiplier * (spacing[0] + spacing[1] + spacing[2])) / 6;
+  const configuredMaxSamples =
+    getConfiguration().rendering?.volumeRendering?.maximumSamplesPerRay;
+  const { sampleDistance, maxSamplesPerRay, fitted, computedSteps } =
+    computeFittedVolumeSampleDistance(imageData, {
+      multiplier: sampleDistanceMultiplier,
+      maxSamplesPerRay:
+        typeof configuredMaxSamples === 'number' && configuredMaxSamples > 0
+          ? configuredMaxSamples
+          : DEFAULT_MAX_SAMPLES_PER_RAY,
+    });
 
-  // This is to allow for good pixel level image quality.
-  // Todo: why we are setting this to 4000? Is this a good number? it should be configurable
-  volumeMapper.setMaximumSamplesPerRay(4000);
+  if (fitted) {
+    // eslint-disable-next-line no-console
+    console.info(
+      `[VolumeSampleDistance] fitted sampleDistance=${sampleDistance.toFixed(4)} ` +
+        `(computedSteps=${computedSteps} > max=${maxSamplesPerRay})`
+    );
+  }
+
+  volumeMapper.setMaximumSamplesPerRay(maxSamplesPerRay);
   volumeMapper.setSampleDistance(sampleDistance);
-  volumeMapper.setScalarTexture(vtkOpenGLTexture);
+
+  const scalarTextures =
+    options?.scalarTextures?.length > 0
+      ? options.scalarTextures
+      : [vtkOpenGLTexture];
+
+  volumeMapper.setScalarTexture(scalarTextures[0]);
+  volumeMapper.setScalarTextures?.(scalarTextures);
+  if (options?.volumeTextureChunkPlan) {
+    volumeMapper.setVolumeTextureChunkPlan?.(options.volumeTextureChunkPlan);
+  }
 
   return volumeMapper;
 }

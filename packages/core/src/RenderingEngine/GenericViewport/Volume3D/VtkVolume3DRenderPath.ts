@@ -8,6 +8,7 @@ import invertRgbTransferFunction from '../../../utilities/invertRgbTransferFunct
 import { updateOpacity as updateVolumeOpacity } from '../../../utilities/colormap';
 import uuidv4 from '../../../utilities/uuidv4';
 import createVolumeActor from '../../helpers/createVolumeActor';
+import { computeFittedVolumeSampleDistance } from '../../helpers/volumeSampleDistance';
 import {
   canvasToWorldContextPool,
   worldToCanvasContextPool,
@@ -307,13 +308,14 @@ function applySampleDistanceMultiplier(
     return;
   }
 
-  const spacing = imageData.getSpacing();
-  const defaultSampleDistance = (spacing[0] + spacing[1] + spacing[2]) / 6;
-  const safeMultiplier = Number.isFinite(multiplier)
-    ? Math.max(multiplier, 0.001)
-    : 1;
+  const { sampleDistance, maxSamplesPerRay } =
+    computeFittedVolumeSampleDistance(imageData, {
+      multiplier,
+      maxSamplesPerRay: mapper.getMaximumSamplesPerRay?.() || undefined,
+    });
 
-  mapper.setSampleDistance(defaultSampleDistance * safeMultiplier);
+  mapper.setMaximumSamplesPerRay(maxSamplesPerRay);
+  mapper.setSampleDistance(sampleDistance);
 }
 
 function setCameraClippingRange(ctx: Volume3DVtkVolumeAdapterContext): void {

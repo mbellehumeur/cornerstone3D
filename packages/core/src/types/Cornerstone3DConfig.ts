@@ -94,6 +94,22 @@ interface Cornerstone3DConfig {
     volumeRendering?: {
       /** Multiplier for the calculated sample distance */
       sampleDistanceMultiplier?: number;
+      /**
+       * Max volume ray-march steps per ray. When the volume diagonal would need
+       * more steps at the spacing-based sample distance, sample distance is
+       * increased to fit. Default 512.
+       */
+      maximumSamplesPerRay?: number;
+      /**
+       * When false, never split oversized Z into multiple 3D textures.
+       * Default (undefined/true): auto-chunk when depth exceeds max 3D size.
+       */
+      volumeTextureChunking?: boolean;
+      /**
+       * Soft cap on max 3D texture dimension (e.g. 512 for tests). Effective
+       * limit is min(GPU MAX_3D_TEXTURE_SIZE, this value).
+       */
+      maxTextureDimension3DCap?: number;
     };
     /**
      * When true, legacy viewport types (STACK, ORTHOGRAPHIC, VIDEO, ECG,

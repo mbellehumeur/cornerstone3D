@@ -97,7 +97,14 @@ export class VtkVolumeSliceRenderPath
         (eventType) => {
           if (eventType === Events.IMAGE_VOLUME_MODIFIED) {
             if (shouldInvalidateFullTextureOnVolumeModified) {
-              imageVolume.vtkOpenGLTexture?.modified?.();
+              const textures =
+                imageVolume.getScalarTextures?.() ??
+                (imageVolume.vtkOpenGLTexture
+                  ? [imageVolume.vtkOpenGLTexture]
+                  : []);
+              for (const tex of textures) {
+                tex?.modified?.();
+              }
             }
 
             mapper.modified();

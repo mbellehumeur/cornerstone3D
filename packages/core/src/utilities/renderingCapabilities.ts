@@ -28,6 +28,11 @@ export interface RenderingCapabilities extends TextureFormatSupport {
   webgl2: boolean;
   /** MAX_TEXTURE_SIZE of the probed context, 0 when no context exists. */
   maxTextureSize: number;
+  /**
+   * MAX_3D_TEXTURE_SIZE of the probed WebGL2 context, 0 when unavailable
+   * (no context or WebGL1-only). Typical desktop value is 2048.
+   */
+  maxTextureDimension3D: number;
   /** Unmasked renderer string when exposed by the browser, '' otherwise. */
   renderer: string;
   /** True when the renderer string identifies a software rasterizer. */
@@ -38,6 +43,7 @@ interface WebGLContextInfo {
   webgl: boolean;
   webgl2: boolean;
   maxTextureSize: number;
+  maxTextureDimension3D: number;
   renderer: string;
 }
 
@@ -64,6 +70,7 @@ function getWebGLContextInfo(): WebGLContextInfo {
     webgl: false,
     webgl2: false,
     maxTextureSize: 0,
+    maxTextureDimension3D: 0,
     renderer: '',
   };
 
@@ -73,7 +80,7 @@ function getWebGLContextInfo(): WebGLContextInfo {
 
   try {
     const canvas = document.createElement('canvas');
-    const gl2 = canvas.getContext('webgl2');
+    const gl2 = canvas.getContext('webgl2') as WebGL2RenderingContext | null;
     const gl =
       gl2 ||
       (canvas.getContext('webgl') as WebGLRenderingContext | null) ||
@@ -86,6 +93,10 @@ function getWebGLContextInfo(): WebGLContextInfo {
     info.webgl = true;
     info.webgl2 = !!gl2;
     info.maxTextureSize = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 0;
+    if (gl2) {
+      info.maxTextureDimension3D =
+        Number(gl2.getParameter(gl2.MAX_3D_TEXTURE_SIZE)) || 0;
+    }
 
     // Modern browsers expose the unmasked renderer through RENDERER directly;
     // older ones require the WEBGL_debug_renderer_info extension.

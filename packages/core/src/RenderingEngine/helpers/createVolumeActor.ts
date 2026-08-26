@@ -52,7 +52,10 @@ async function createVolumeActor(
 
   const { imageData, vtkOpenGLTexture } = imageVolume;
 
-  const volumeMapper = createVolumeMapper(imageData, vtkOpenGLTexture);
+  const volumeMapper = createVolumeMapper(imageData, vtkOpenGLTexture, {
+    scalarTextures: imageVolume.getScalarTextures?.() ?? [vtkOpenGLTexture],
+    volumeTextureChunkPlan: imageVolume.volumeTextureChunkPlan,
+  });
 
   if (blendMode) {
     volumeMapper.setBlendMode(blendMode as unknown as BlendMode);

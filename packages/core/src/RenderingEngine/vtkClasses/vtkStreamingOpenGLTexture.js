@@ -30,6 +30,13 @@ function vtkStreamingOpenGLTexture(publicAPI, model) {
 
   model.updatedFrames = [];
   model.volumeId = null;
+  model.brickSliceStart = model.brickSliceStart ?? 0;
+  if (model.brickSliceEnd === undefined) {
+    model.brickSliceEnd = null;
+  }
+  if (model.fullVolumeDepth === undefined) {
+    model.fullVolumeDepth = null;
+  }
 
   const superCreate3DFilterableFromRaw = publicAPI.create3DFilterableFromRaw;
 
@@ -127,8 +134,18 @@ function vtkStreamingOpenGLTexture(publicAPI, model) {
   function updateTextureImagesUsingVoxelManager() {
     const volume = cache.getVolume(model.volumeId);
     const imageIds = volume.imageIds;
+    const brickStart = model.brickSliceStart ?? 0;
+    const brickEnd =
+      model.brickSliceEnd != null ? model.brickSliceEnd : model.depth - 1;
+
     for (let i = 0; i < model.updatedFrames.length; i++) {
       if (model.updatedFrames[i]) {
+        // Skip frames outside this brick's Z range (chunked volumes).
+        if (i < brickStart || i > brickEnd) {
+          model.updatedFrames[i] = null;
+          continue;
+        }
+
         // find the updated frames
         const image = cache.getImage(imageIds[i]);
         if (!image) {
@@ -150,8 +167,8 @@ function vtkStreamingOpenGLTexture(publicAPI, model) {
         // Bind the texture
         publicAPI.bind();
 
-        // Calculate the offset within the 3D texture
-        const zOffset = i;
+        // Local Z within this brick (0-based)
+        const zOffset = i - brickStart;
 
         // Update the texture sub-image
         // Todo: need to check other systems if it can handle it
@@ -266,6 +283,22 @@ function vtkStreamingOpenGLTexture(publicAPI, model) {
 
   publicAPI.getVolumeId = () => model.volumeId;
 
+  publicAPI.setBrickSliceRange = (sliceStart, sliceEnd) => {
+    model.brickSliceStart = sliceStart;
+    model.brickSliceEnd = sliceEnd;
+  };
+
+  publicAPI.getBrickSliceRange = () => ({
+    sliceStart: model.brickSliceStart ?? 0,
+    sliceEnd: model.brickSliceEnd,
+  });
+
+  publicAPI.setFullVolumeDepth = (depth) => {
+    model.fullVolumeDepth = depth;
+  };
+
+  publicAPI.getFullVolumeDepth = () => model.fullVolumeDepth;
+
   publicAPI.setTextureParameters = ({
     width,
     height,
@@ -273,11 +306,21 @@ function vtkStreamingOpenGLTexture(publicAPI, model) {
     numberOfComponents,
     dataType,
   }) => {
-    model.width ??= width;
-    model.height ??= height;
-    model.depth ??= depth;
-    model.inputNumComps ??= numberOfComponents;
-    model.inputDataType ??= dataType;
+    if (width != null) {
+      model.width = width;
+    }
+    if (height != null) {
+      model.height = height;
+    }
+    if (depth != null) {
+      model.depth = depth;
+    }
+    if (numberOfComponents != null) {
+      model.inputNumComps = numberOfComponents;
+    }
+    if (dataType != null) {
+      model.inputDataType = dataType;
+    }
   };
 
   publicAPI.getTextureParameters = () => ({
@@ -297,6 +340,9 @@ function vtkStreamingOpenGLTexture(publicAPI, model) {
 
 const DEFAULT_VALUES = {
   updatedFrames: [],
+  brickSliceStart: 0,
+  brickSliceEnd: null,
+  fullVolumeDepth: null,
 };
 
 export function extend(publicAPI, model, initialValues = {}) {

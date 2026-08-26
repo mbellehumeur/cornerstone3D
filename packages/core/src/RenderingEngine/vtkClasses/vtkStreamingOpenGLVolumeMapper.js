@@ -64,6 +64,26 @@ function vtkStreamingOpenGLVolumeMapper(publicAPI, model) {
   publicAPI.renderPiece = (ren, actor) => {
     publicAPI.invokeEvent({ type: 'StartEvent' });
 
+    // Re-sync brick textures + Z-chunk plan from the shared mapper every frame.
+    // View-node creation can miss them; without this the shader stays on the
+    // single-texture path and only brick 0 is visible (full-UV clamp).
+    const shared = model.renderable;
+    if (shared) {
+      const textures =
+        typeof shared.getScalarTextures === 'function'
+          ? shared.getScalarTextures()
+          : null;
+      if (Array.isArray(textures) && textures.length > 0) {
+        model.scalarTextures = textures;
+      }
+      if (typeof shared.getVolumeTextureChunkPlan === 'function') {
+        const plan = shared.getVolumeTextureChunkPlan();
+        if (plan) {
+          model.volumeTextureChunkPlan = plan;
+        }
+      }
+    }
+
     // Get the valid image data inputs
     model.renderable.update();
     const numberOfInputs = model.renderable.getNumberOfInputPorts();
@@ -93,9 +113,15 @@ function vtkStreamingOpenGLVolumeMapper(publicAPI, model) {
         });
       }
 
-      // Number of components
+      // Number of components. Spatial Z-chunk bricks are NOT fusion components —
+      // keep image component count when chunking so the VR shader uses the
+      // chunked sample path instead of EnabledMultiTexturePerVolume.
       const numberOfValidInputs = model.currentValidInputs.length;
-      const multiTexturePerVolumeEnabled = numberOfValidInputs > 1;
+      const chunkPlan = model.volumeTextureChunkPlan;
+      const spatialChunking =
+        !!chunkPlan?.chunked && (model.scalarTextures?.length ?? 0) > 1;
+      const multiTexturePerVolumeEnabled =
+        numberOfValidInputs > 1 && !spatialChunking;
       const { numberOfComponents } = firstImageData.get('numberOfComponents');
       model.numberOfComponents = multiTexturePerVolumeEnabled
         ? numberOfValidInputs
@@ -321,43 +347,60 @@ function vtkStreamingOpenGLVolumeMapper(publicAPI, model) {
     model._colorTextureCore = firstColorTransferFunc;
 
     // rebuild scalarTextures using custom streaming approach
-    model.currentValidInputs.forEach(
-      ({ imageData, inputIndex: _inputIndex }, component) => {
-        // rebuild the scalarTexture if the data has changed
-        // IMPORTANT: this is the most important part of the streaming process.
-        // we need to take into account that sometimes the texture is updated (mtime)
-        // but the image is not updated since in the new model the image lives in the cpu
-        // while the texture lives in the gpu.
+    const chunkPlan = model.volumeTextureChunkPlan;
+    const isChunked = chunkPlan?.chunked && model.scalarTextures?.length > 1;
+    const imageDataForBricks = model.currentValidInputs[0]?.imageData;
 
-        // Initialize scalarTextures array if needed
-        if (!model.scalarTextures) {
-          model.scalarTextures = [];
-        }
+    if (isChunked && !model._loggedChunkAlloc) {
+      model._loggedChunkAlloc = true;
+      const dims = imageDataForBricks?.getDimensions?.() ?? [];
+      // eslint-disable-next-line no-console
+      console.info(
+        `[VolumeTextureChunks:VR] allocating ${model.scalarTextures.length} brick texture(s) ` +
+          `fullDims=${dims.join?.('x') ?? dims} ` +
+          `planBricks=${chunkPlan.bricks
+            .map(
+              (b, i) => `#${i}[${b.sliceStart}-${b.sliceEnd}] depth=${b.depth}`
+            )
+            .join(' ')}`
+      );
+    }
 
-        // Ensure texture exists for this component
-        if (!model.scalarTextures[component]) {
-          // Texture should have been initialized in extend(), but create if missing
-          console.warn(
-            `ScalarTexture for component ${component} not initialized, skipping.`
-          );
+    const texturesToUpdate = isChunked
+      ? model.scalarTextures.map((texture, brickIndex) => ({
+          texture,
+          brickIndex,
+          imageData: imageDataForBricks,
+        }))
+      : model.currentValidInputs.map(
+          ({ imageData, inputIndex: _inputIndex }, component) => ({
+            texture: model.scalarTextures[component],
+            brickIndex: component,
+            imageData,
+          })
+        );
+
+    texturesToUpdate.forEach(
+      ({ texture: currentTexture, brickIndex, imageData }) => {
+        if (!currentTexture || !imageData) {
+          if (!currentTexture) {
+            console.warn(
+              `ScalarTexture for brick/component ${brickIndex} not initialized, skipping.`
+            );
+          }
           return;
         }
 
-        const currentTexture = model.scalarTextures[component];
-        const toString = `${imageData.getMTime()}-${currentTexture.getMTime()}`;
+        const toString = `${imageData.getMTime()}-${currentTexture.getMTime()}-chunk${brickIndex}`;
 
         if (!model.scalarTextureStrings) {
           model.scalarTextureStrings = [];
         }
 
-        if (model.scalarTextureStrings[component] !== toString) {
-          // Build the textures
+        if (model.scalarTextureStrings[brickIndex] !== toString) {
           const dims = imageData.getDimensions();
           currentTexture.setOpenGLRenderWindow(model._openGLRenderWindow);
 
-          // Set not to use half float initially since we don't know if the
-          // streamed data is actually half float compatible or not yet, as
-          // the data has not arrived due to streaming
           currentTexture.enableUseHalfFloat(false);
 
           const previousTextureParameters =
@@ -369,12 +412,17 @@ function vtkStreamingOpenGLVolumeMapper(publicAPI, model) {
             imageData.get('numberOfComponents').numberOfComponents ??
             1;
 
+          const brick = chunkPlan?.bricks?.[brickIndex];
+          const texDepth = brick?.depth ?? dims[2];
+          const texWidth = dims[0];
+          const texHeight = dims[1];
+
           let shouldReset = true;
 
           if (previousTextureParameters?.dataType === dataType) {
-            if (previousTextureParameters?.width === dims[0]) {
-              if (previousTextureParameters?.height === dims[1]) {
-                if (previousTextureParameters?.depth === dims[2]) {
+            if (previousTextureParameters?.width === texWidth) {
+              if (previousTextureParameters?.height === texHeight) {
+                if (previousTextureParameters?.depth === texDepth) {
                   if (
                     previousTextureParameters?.numberOfComponents ===
                     textureNumberOfComponents
@@ -387,6 +435,12 @@ function vtkStreamingOpenGLVolumeMapper(publicAPI, model) {
           }
 
           if (shouldReset) {
+            // eslint-disable-next-line no-console
+            console.info(
+              `[VolumeTextureChunks:VR] create3DFromRaw brick=${brickIndex} ` +
+                `size=${texWidth}x${texHeight}x${texDepth} dataType=${dataType} ` +
+                `slices=${brick ? `${brick.sliceStart}-${brick.sliceEnd}` : `0-${dims[2] - 1}`}`
+            );
             const norm16Ext = model.context.getExtension('EXT_texture_norm16');
             currentTexture.setOglNorm16Ext(
               getCanUseNorm16Texture() ? norm16Ext : null
@@ -394,39 +448,31 @@ function vtkStreamingOpenGLVolumeMapper(publicAPI, model) {
             currentTexture.resetFormatAndType();
 
             currentTexture.setTextureParameters({
-              width: dims[0],
-              height: dims[1],
-              depth: dims[2],
+              width: texWidth,
+              height: texHeight,
+              depth: texDepth,
               numberOfComponents: textureNumberOfComponents,
               dataType,
             });
 
-            // There are some bugs in mac for texStorage3D so basically here
-            // we let the vtk.js decide if it wants to use it or not
             currentTexture.create3DFromRaw({
-              width: dims[0],
-              height: dims[1],
-              depth: dims[2],
+              width: texWidth,
+              height: texHeight,
+              depth: texDepth,
               numComps: textureNumberOfComponents,
               dataType,
               data: null,
             });
 
-            // do an initial update since some data may be already
-            // available and we can avoid a re-render to trigger
-            // the update
             currentTexture.update3DFromRaw();
-
-            // since we don't have scalars we don't need to set graphics resource for the scalar texture
           } else {
             currentTexture.deactivate();
             currentTexture.update3DFromRaw();
           }
 
-          model.scalarTextureStrings[component] = toString;
+          model.scalarTextureStrings[brickIndex] = toString;
         }
 
-        // For resource tracking compatibility (though we don't use scalars directly)
         if (!model._scalarTexturesCore) {
           model._scalarTexturesCore = [];
         }
@@ -596,14 +642,17 @@ export function extend(publicAPI, model, initialValues = {}) {
 
   vtkOpenGLVolumeMapper.extend(publicAPI, model, initialValues);
 
-  // Initialize scalarTextures array for multi-texture support
+  // Initialize scalarTextures array for multi-texture / Z-chunk support
   // Keep backward compatibility with single scalarTexture
-  if (initialValues.scalarTexture) {
+  if (initialValues.scalarTextures?.length) {
+    model.scalarTextures = [...initialValues.scalarTextures];
+  } else if (initialValues.scalarTexture) {
     model.scalarTextures = [initialValues.scalarTexture];
   } else {
     model.scalarTextures = [];
   }
 
+  model.volumeTextureChunkPlan = initialValues.volumeTextureChunkPlan ?? null;
   model.scalarTextureStrings = [];
   model._scalarTexturesCore = [];
   model.previousState = {};

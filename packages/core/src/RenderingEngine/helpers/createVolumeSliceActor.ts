@@ -33,18 +33,27 @@ async function createVolumeSliceActor(
   }
 
   const { imageData, vtkOpenGLTexture } = imageVolume;
+  const scalarTextures = imageVolume.getScalarTextures?.() ?? [
+    vtkOpenGLTexture,
+  ];
   const loadStatus = imageVolume.loadStatus as { loaded?: boolean } | undefined;
   const slicePlane = vtkPlane.newInstance();
   const mapper = vtkSharedImageResliceMapper.newInstance();
 
   if (!loadStatus || loadStatus.loaded) {
-    vtkOpenGLTexture.modified();
+    for (const tex of scalarTextures) {
+      tex.modified();
+    }
   }
 
   mapper.setInputData(imageData);
   mapper.setSlicePlane(slicePlane);
   mapper.setSlabThickness(0);
-  mapper.setScalarTexture?.(vtkOpenGLTexture);
+  mapper.setScalarTexture?.(scalarTextures[0]);
+  mapper.setScalarTextures?.(scalarTextures);
+  if (imageVolume.volumeTextureChunkPlan) {
+    mapper.setVolumeTextureChunkPlan?.(imageVolume.volumeTextureChunkPlan);
+  }
   mapper.modified();
 
   const actor = vtkImageSlice.newInstance();

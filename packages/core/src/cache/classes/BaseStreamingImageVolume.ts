@@ -60,11 +60,10 @@ export class BaseStreamingImageVolume
   }
 
   protected invalidateVolume(immediate: boolean): void {
-    const { vtkOpenGLTexture } = this;
     const { numFrames } = this;
 
     for (let i = 0; i < numFrames; i++) {
-      vtkOpenGLTexture.setUpdatedFrame(i);
+      this.setUpdatedFrameOnBricks(i);
     }
 
     this.modified();
@@ -196,7 +195,7 @@ export class BaseStreamingImageVolume
       imageQualityStatus,
     });
 
-    this.vtkOpenGLTexture.setUpdatedFrame(frameIndex);
+    this.setUpdatedFrameOnBricks(frameIndex);
 
     if (this.loadStatus.loaded) {
       this.loadStatus.callbacks = [];
@@ -430,7 +429,7 @@ export class BaseStreamingImageVolume
     const handleImageCacheAdded = (event) => {
       const { image } = event.detail;
       if (image.imageId === imageId) {
-        this.vtkOpenGLTexture.setUpdatedFrame(imageIdIndex);
+        this.setUpdatedFrameOnBricks(imageIdIndex);
         // Remove the event listener after it's been triggered
         eventTarget.removeEventListener(
           Events.IMAGE_CACHE_IMAGE_ADDED,

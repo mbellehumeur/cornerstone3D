@@ -2,6 +2,10 @@ import vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
 import imageIdToURI from '../../utilities/imageIdToURI';
 import VoxelManager from '../../utilities/VoxelManager';
 import { vtkStreamingOpenGLTexture } from '../../RenderingEngine/vtkClasses';
+import {
+  buildZChunkPlan,
+  type VolumeTextureChunkPlan,
+} from '../../RenderingEngine/helpers/volumeTextureChunks';
 import type {
   Metadata,
   Point3,
@@ -20,6 +24,10 @@ export interface vtkStreamingOpenGLTexture extends vtkOpenGLTexture {
   setVolumeId: (volumeId: string) => void;
   releaseGraphicsResources: () => void;
   hasUpdatedFrames: () => boolean;
+  setBrickSliceRange?: (sliceStart: number, sliceEnd: number) => void;
+  getBrickSliceRange?: () => { sliceStart: number; sliceEnd: number | null };
+  setFullVolumeDepth?: (depth: number) => void;
+  getFullVolumeDepth?: () => number | null;
 }
 
 /** The base class for volume data. It includes the volume metadata
@@ -64,8 +72,18 @@ export class ImageVolume {
   numVoxels: number;
   /** volume image data */
   imageData?: vtkImageData;
-  /** open gl texture for the volume */
+  /**
+   * Primary / first brick OpenGL texture (backward compatible).
+   * When chunked, equals vtkOpenGLTextures[0].
+   */
   vtkOpenGLTexture: vtkStreamingOpenGLTexture;
+  /**
+   * All GPU bricks for this volume. Length is 1 for volumes that fit in one
+   * TEXTURE_3D; >1 when Z exceeds maxTextureDimension3D.
+   */
+  vtkOpenGLTextures: vtkStreamingOpenGLTexture[];
+  /** Z-chunk plan used to create vtkOpenGLTextures. */
+  volumeTextureChunkPlan: VolumeTextureChunkPlan;
   /** load status object for the volume */
   loadStatus?: Record<string, unknown>;
   /** optional reference volume id if the volume is derived from another volume */
@@ -143,8 +161,29 @@ export class ImageVolume {
       Number.isFinite(spacing[1]) &&
       spacing[1] > 0;
 
-    this.vtkOpenGLTexture = vtkStreamingOpenGLTexture.newInstance();
-    this.vtkOpenGLTexture.setVolumeId(volumeId);
+    this.volumeTextureChunkPlan = buildZChunkPlan(dimensions);
+    const chunkPlan = this.volumeTextureChunkPlan;
+    // eslint-disable-next-line no-console
+    console.info(
+      `[VolumeTextureChunks] volumeId=${volumeId} dims=${dimensions.join('x')} ` +
+        `max3D=${chunkPlan.max3D} overlap=${chunkPlan.overlap} ` +
+        `chunked=${chunkPlan.chunked} bricks=${chunkPlan.bricks.length}` +
+        (chunkPlan.unsupportedXY ? ' unsupportedXY=true' : ''),
+      chunkPlan.bricks.map((b, i) => ({
+        brick: i,
+        slices: `${b.sliceStart}-${b.sliceEnd}`,
+        depth: b.depth,
+      }))
+    );
+
+    this.vtkOpenGLTextures = this.volumeTextureChunkPlan.bricks.map((brick) => {
+      const tex = vtkStreamingOpenGLTexture.newInstance();
+      tex.setVolumeId(volumeId);
+      tex.setBrickSliceRange?.(brick.sliceStart, brick.sliceEnd);
+      tex.setFullVolumeDepth?.(dimensions[2]);
+      return tex;
+    });
+    this.vtkOpenGLTexture = this.vtkOpenGLTextures[0];
 
     this.voxelManager =
       voxelManager ??
@@ -203,6 +242,11 @@ export class ImageVolume {
     if (additionalDetails) {
       this.additionalDetails = additionalDetails;
     }
+  }
+
+  /** All scalar textures (bricks) for VR and MPR mappers. */
+  public getScalarTextures(): vtkStreamingOpenGLTexture[] {
+    return this.vtkOpenGLTextures;
   }
 
   public get sizeInBytes(): number {
@@ -278,16 +322,30 @@ export class ImageVolume {
     this.imageData = null;
     this.voxelManager.clear();
 
-    this.vtkOpenGLTexture.releaseGraphicsResources();
-    this.vtkOpenGLTexture.delete();
+    for (const tex of this.vtkOpenGLTextures ?? []) {
+      tex.releaseGraphicsResources();
+      tex.delete();
+    }
+    this.vtkOpenGLTextures = [];
+    this.vtkOpenGLTexture = this.vtkOpenGLTextures[0];
   }
 
   public invalidate() {
     for (let i = 0; i < this.imageIds.length; i++) {
-      this.vtkOpenGLTexture.setUpdatedFrame(i);
+      this.setUpdatedFrameOnBricks(i);
     }
 
     this.imageData.modified();
+  }
+
+  /**
+   * Mark a frame dirty on every brick that contains that full-volume Z index
+   * (overlap frames are dual-written).
+   */
+  public setUpdatedFrameOnBricks(frameIndex: number): void {
+    for (const tex of this.vtkOpenGLTextures) {
+      tex.setUpdatedFrame(frameIndex);
+    }
   }
 
   /**
@@ -297,7 +355,9 @@ export class ImageVolume {
    */
   public modified() {
     this.imageData.modified();
-    this.vtkOpenGLTexture.modified();
+    for (const tex of this.vtkOpenGLTextures) {
+      tex.modified();
+    }
 
     this.numFrames = this._getNumFrames();
   }

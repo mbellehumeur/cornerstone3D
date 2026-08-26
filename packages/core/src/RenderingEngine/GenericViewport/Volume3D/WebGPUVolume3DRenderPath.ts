@@ -10,6 +10,10 @@ import invertRgbTransferFunction from '../../../utilities/invertRgbTransferFunct
 import { updateOpacity as updateVolumeOpacity } from '../../../utilities/colormap';
 import uuidv4 from '../../../utilities/uuidv4';
 import {
+  computeFittedVolumeSampleDistance,
+  DEFAULT_MAX_SAMPLES_PER_RAY,
+} from '../../helpers/volumeSampleDistance';
+import {
   canvasToWorldContextPool,
   worldToCanvasContextPool,
 } from '../../helpers/vtkCanvasCoordinateTransforms';
@@ -420,7 +424,7 @@ function applyCamera(
 
 function applyDefaultSampleDistance(mapper: vtkVolumeMapper): void {
   applySampleDistanceMultiplier(mapper, 1);
-  mapper.setMaximumSamplesPerRay(4000);
+  mapper.setMaximumSamplesPerRay(DEFAULT_MAX_SAMPLES_PER_RAY);
   // VolumePass only downscales while isAnimating && _lastScale > 1.5.
   // Default initialInteractionScale is 1.0, which never opens that gate.
   // Scale 4 → half-res per axis (1/sqrt(4)); settled frames still use full DPR
@@ -438,13 +442,14 @@ function applySampleDistanceMultiplier(
     return;
   }
 
-  const spacing = imageData.getSpacing();
-  const defaultSampleDistance = (spacing[0] + spacing[1] + spacing[2]) / 6;
-  const safeMultiplier = Number.isFinite(multiplier)
-    ? Math.max(multiplier, 0.001)
-    : 1;
+  const { sampleDistance, maxSamplesPerRay } =
+    computeFittedVolumeSampleDistance(imageData, {
+      multiplier,
+      maxSamplesPerRay: mapper.getMaximumSamplesPerRay?.() || undefined,
+    });
 
-  mapper.setSampleDistance(defaultSampleDistance * safeMultiplier);
+  mapper.setMaximumSamplesPerRay(maxSamplesPerRay);
+  mapper.setSampleDistance(sampleDistance);
 }
 
 function setCameraClippingRange(ctx: Volume3DVtkVolumeAdapterContext): void {

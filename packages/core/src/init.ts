@@ -48,6 +48,8 @@ const defaultConfig: Cornerstone3DConfig = {
     volumeRendering: {
       /** Multiplier for the calculated sample distance */
       sampleDistanceMultiplier: 1,
+      /** Max ray-march steps; sample distance is fitted up when needed. */
+      maximumSamplesPerRay: 512,
     },
   },
 

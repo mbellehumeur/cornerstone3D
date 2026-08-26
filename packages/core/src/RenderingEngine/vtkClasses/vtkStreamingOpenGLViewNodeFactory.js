@@ -90,11 +90,23 @@ function vtkStreamingOpenGLViewNodeFactory(publicAPI, model) {
     const className = dataObject.getClassName();
 
     if (className === 'vtkSharedVolumeMapper') {
-      initialValues.scalarTexture = dataObject.getScalarTexture();
+      const textures =
+        dataObject.getScalarTextures?.() ||
+        (dataObject.getScalarTexture() ? [dataObject.getScalarTexture()] : []);
+      initialValues.scalarTextures = textures;
+      initialValues.scalarTexture = textures[0] ?? null;
+      initialValues.volumeTextureChunkPlan =
+        dataObject.getVolumeTextureChunkPlan?.() ?? null;
     }
 
     if (className === 'vtkSharedImageResliceMapper') {
-      initialValues.scalarTexture = dataObject.getScalarTexture();
+      const textures =
+        dataObject.getScalarTextures?.() ||
+        (dataObject.getScalarTexture() ? [dataObject.getScalarTexture()] : []);
+      initialValues.scalarTextures = textures;
+      initialValues.scalarTexture = textures[0] ?? null;
+      initialValues.volumeTextureChunkPlan =
+        dataObject.getVolumeTextureChunkPlan?.() ?? null;
     }
 
     return initialValues;

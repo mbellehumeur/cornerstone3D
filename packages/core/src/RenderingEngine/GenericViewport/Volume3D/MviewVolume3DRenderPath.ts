@@ -640,9 +640,6 @@ export class MviewVolume3DRenderPath
       // Same source as zSkip revert/refine pack: Cornerstone image cache.
       // Do not use progressive GPU upload flags — finalize can complete coarse
       // GPU without marking every uploadedSourceSlices[k].
-      if (isCpuVolumeComplete()) {
-        return true;
-      }
       const k0 = Math.max(0, Math.floor(Number(ijkMin?.[2]) || 0));
       const k1 = Math.min(
         sourceDepth - 1,
@@ -695,6 +692,11 @@ export class MviewVolume3DRenderPath
     const isProgressiveLoadPaused = () => {
       const stats = renderer.getStats?.();
       return Boolean(stats?.interacting || stats?.volumeWorkBusy);
+    };
+
+    const isRendererInFullRoiMode = () => {
+      const stats = renderer.getStats?.();
+      return stats?.volumeRenderingMode === 'full';
     };
 
     const scheduleProgressiveRefresh = () => {
@@ -955,6 +957,11 @@ export class MviewVolume3DRenderPath
       }
       const prepElapsedMs = performance.now() - prepStarted;
 
+      // ROI full mode owns the GPU texture layout; defer coarse progressive writes.
+      if (isRendererInFullRoiMode()) {
+        return this.volumeUploaded;
+      }
+
       const valueRange = syncPreviewValueRange();
       const downsampled = this.volumeResamplePlan?.enabled;
 
@@ -1177,6 +1184,10 @@ export class MviewVolume3DRenderPath
       const uploaded = await runUpload(async () => {
         if (gpuVolumeFinalized) {
           return true;
+        }
+        // Keep ROI texture authoritative while max-texture refine is active.
+        if (isRendererInFullRoiMode()) {
+          return this.volumeUploaded;
         }
         if (!isCpuVolumeComplete()) {
           return uploadNewSlices();
