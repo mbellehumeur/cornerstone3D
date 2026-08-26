@@ -5,6 +5,7 @@ import { SlicerLiveVolume3DPath } from './SlicerLiveVolume3DRenderPath';
 import { WebGPUVolume3DPath } from './WebGPUVolume3DRenderPath';
 import { VtkGeometry3DPath } from './VtkGeometry3DRenderPath';
 import { VtkVolume3DPath } from './VtkVolume3DRenderPath';
+import { VtkWasmVolume3DPath } from './VtkWasmVolume3DRenderPath';
 
 export function createDefaultVolume3DRenderPaths(): RenderPathDefinition[] {
   return [
@@ -12,6 +13,7 @@ export function createDefaultVolume3DRenderPaths(): RenderPathDefinition[] {
     new WebGPUVolume3DPath(),
     new MviewVolume3DPath(),
     new SlicerLiveVolume3DPath(),
+    new VtkWasmVolume3DPath(),
     new VtkGeometry3DPath(),
   ];
 }

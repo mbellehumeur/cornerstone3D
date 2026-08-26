@@ -3,9 +3,9 @@ import imageIdToURI from '../../utilities/imageIdToURI';
 import VoxelManager from '../../utilities/VoxelManager';
 import { vtkStreamingOpenGLTexture } from '../../RenderingEngine/vtkClasses';
 import {
-  buildZChunkPlan,
-  type VolumeTextureChunkPlan,
-} from '../../RenderingEngine/helpers/volumeTextureChunks';
+  buildZBrickPlan,
+  type VolumeTextureBrickPlan,
+} from '../../RenderingEngine/helpers/volumeTextureBricks';
 import type {
   Metadata,
   Point3,
@@ -74,7 +74,7 @@ export class ImageVolume {
   imageData?: vtkImageData;
   /**
    * Primary / first brick OpenGL texture (backward compatible).
-   * When chunked, equals vtkOpenGLTextures[0].
+   * When bricked, equals vtkOpenGLTextures[0].
    */
   vtkOpenGLTexture: vtkStreamingOpenGLTexture;
   /**
@@ -82,8 +82,8 @@ export class ImageVolume {
    * TEXTURE_3D; >1 when Z exceeds maxTextureDimension3D.
    */
   vtkOpenGLTextures: vtkStreamingOpenGLTexture[];
-  /** Z-chunk plan used to create vtkOpenGLTextures. */
-  volumeTextureChunkPlan: VolumeTextureChunkPlan;
+  /** Z-brick plan used to create vtkOpenGLTextures. */
+  volumeTextureBrickPlan: VolumeTextureBrickPlan;
   /** load status object for the volume */
   loadStatus?: Record<string, unknown>;
   /** optional reference volume id if the volume is derived from another volume */
@@ -161,22 +161,22 @@ export class ImageVolume {
       Number.isFinite(spacing[1]) &&
       spacing[1] > 0;
 
-    this.volumeTextureChunkPlan = buildZChunkPlan(dimensions);
-    const chunkPlan = this.volumeTextureChunkPlan;
+    this.volumeTextureBrickPlan = buildZBrickPlan(dimensions);
+    const brickPlan = this.volumeTextureBrickPlan;
     // eslint-disable-next-line no-console
     console.info(
-      `[VolumeTextureChunks] volumeId=${volumeId} dims=${dimensions.join('x')} ` +
-        `max3D=${chunkPlan.max3D} overlap=${chunkPlan.overlap} ` +
-        `chunked=${chunkPlan.chunked} bricks=${chunkPlan.bricks.length}` +
-        (chunkPlan.unsupportedXY ? ' unsupportedXY=true' : ''),
-      chunkPlan.bricks.map((b, i) => ({
+      `[VolumeTextureBricks] volumeId=${volumeId} dims=${dimensions.join('x')} ` +
+        `max3D=${brickPlan.max3D} overlap=${brickPlan.overlap} ` +
+        `bricked=${brickPlan.bricked} bricks=${brickPlan.bricks.length}` +
+        (brickPlan.unsupportedXY ? ' unsupportedXY=true' : ''),
+      brickPlan.bricks.map((b, i) => ({
         brick: i,
         slices: `${b.sliceStart}-${b.sliceEnd}`,
         depth: b.depth,
       }))
     );
 
-    this.vtkOpenGLTextures = this.volumeTextureChunkPlan.bricks.map((brick) => {
+    this.vtkOpenGLTextures = this.volumeTextureBrickPlan.bricks.map((brick) => {
       const tex = vtkStreamingOpenGLTexture.newInstance();
       tex.setVolumeId(volumeId);
       tex.setBrickSliceRange?.(brick.sliceStart, brick.sliceEnd);

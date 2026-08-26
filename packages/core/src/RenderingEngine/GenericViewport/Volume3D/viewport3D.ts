@@ -57,6 +57,11 @@ import {
 import { WEBGPU_VOLUME_3D_RENDER_MODE } from './WebGPUVolume3DRenderPath';
 import { MVIEW_VOLUME_3D_RENDER_MODE } from './MviewVolume3DRenderPath';
 import { SLICERLIVE_VOLUME_3D_RENDER_MODE } from './SlicerLiveVolume3DRenderPath';
+import { VTK_WASM_VOLUME_3D_RENDER_MODE } from './VtkWasmVolume3DRenderPath';
+import {
+  getVtkWasmVolume3D,
+  setVtkWasmVolume3DCanvasVisible,
+} from './vtkWasmVolume3DRegistry';
 import {
   iCameraToMviewCamera,
   parallelScaleToMviewOrthoZoom,
@@ -115,7 +120,8 @@ class VolumeViewport3D extends GenericViewport<
     return (
       this.isWebGPUVolumeRenderModeActive() ||
       this.isMviewVolumeRenderModeActive() ||
-      this.isSlicerLiveVolumeRenderModeActive()
+      this.isSlicerLiveVolumeRenderModeActive() ||
+      this.isVtkWasmVolumeRenderModeActive()
     );
   }
 
@@ -363,6 +369,13 @@ class VolumeViewport3D extends GenericViewport<
       }
     }
 
+    if (this.isVtkWasmVolumeRenderModeActive()) {
+      const entry = getVtkWasmVolume3D(this.id);
+      if (entry) {
+        return entry.canvas;
+      }
+    }
+
     return this.canvas;
   }
 
@@ -381,6 +394,7 @@ class VolumeViewport3D extends GenericViewport<
       mountedMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
       mountedMode === MVIEW_VOLUME_3D_RENDER_MODE ||
       mountedMode === SLICERLIVE_VOLUME_3D_RENDER_MODE ||
+      mountedMode === VTK_WASM_VOLUME_3D_RENDER_MODE ||
       mountedMode === 'vtkGeometry3d'
     ) {
       return mountedMode;
@@ -924,7 +938,8 @@ class VolumeViewport3D extends GenericViewport<
       // the fit baseline captured at mount instead.
       const specializedBaseline =
         getMviewVolume3D(this.id)?.baselineParallelScale ??
-        getSlicerLiveVolume3D(this.id)?.baselineParallelScale;
+        getSlicerLiveVolume3D(this.id)?.baselineParallelScale ??
+        getVtkWasmVolume3D(this.id)?.baselineParallelScale;
       if (
         typeof specializedBaseline === 'number' &&
         Number.isFinite(specializedBaseline) &&
@@ -1204,14 +1219,16 @@ class VolumeViewport3D extends GenericViewport<
     const useWebGPU = renderMode === WEBGPU_VOLUME_3D_RENDER_MODE;
     const useMview = renderMode === MVIEW_VOLUME_3D_RENDER_MODE;
     const useSlicerLive = renderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE;
+    const useVtkWasm = renderMode === VTK_WASM_VOLUME_3D_RENDER_MODE;
     // cpuCanvas is unused for direct WebGPU present; keep it hidden.
     this.cpuCanvas.style.display = 'none';
     this.cpuCanvas.style.pointerEvents = 'none';
     this.canvas.style.display =
-      useWebGPU || useMview || useSlicerLive ? 'none' : '';
+      useWebGPU || useMview || useSlicerLive || useVtkWasm ? 'none' : '';
 
     setMviewVolume3DCanvasVisible(this.id, useMview);
     setSlicerLiveVolume3DCanvasVisible(this.id, useSlicerLive);
+    setVtkWasmVolume3DCanvasVisible(this.id, useVtkWasm);
 
     const webgpuWindow = getWebGPUViewportWindow(this.id);
 
@@ -1235,11 +1252,13 @@ class VolumeViewport3D extends GenericViewport<
       setWebGPUViewportCanvasVisible(webgpuWindow, false);
     }
 
-    if (useMview || useSlicerLive) {
+    if (useMview || useSlicerLive || useVtkWasm) {
       this.syncPresentSize();
-      const entry = useSlicerLive
-        ? getSlicerLiveVolume3D(this.id)
-        : getMviewVolume3D(this.id);
+      const entry = useVtkWasm
+        ? getVtkWasmVolume3D(this.id)
+        : useSlicerLive
+          ? getSlicerLiveVolume3D(this.id)
+          : getMviewVolume3D(this.id);
       if (entry) {
         this.renderContext.vtk.canvas = entry.canvas;
       }
@@ -1299,6 +1318,10 @@ class VolumeViewport3D extends GenericViewport<
 
   private isSlicerLiveVolumeRenderModeActive(): boolean {
     return this.activeRenderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE;
+  }
+
+  private isVtkWasmVolumeRenderModeActive(): boolean {
+    return this.activeRenderMode === VTK_WASM_VOLUME_3D_RENDER_MODE;
   }
 
   private syncSlicerLiveCameraFromViewState(): void {
@@ -1465,6 +1488,9 @@ class VolumeViewport3D extends GenericViewport<
         slicerLive.canvas.height = targetHeight;
       }
     }
+
+    // vtk-wasm canvas bitmap + SetSize are owned by the render-path resize
+    // handler so size and GL viewport stay atomic (changing width alone blanks).
   }
 }
 
@@ -1482,7 +1508,8 @@ function isVolume3DData(data: LoadedData): data is LoadedData<Volume3DPayload> {
       (payload.renderMode === 'vtkVolume3d' ||
         payload.renderMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
         payload.renderMode === MVIEW_VOLUME_3D_RENDER_MODE ||
-        payload.renderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE)) ||
+        payload.renderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE ||
+        payload.renderMode === VTK_WASM_VOLUME_3D_RENDER_MODE)) ||
     (payload.type === 'geometry' && payload.renderMode === 'vtkGeometry3d')
   );
 }
@@ -1495,6 +1522,7 @@ function isVolume3DRendering(rendering: {
     rendering.renderMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
     rendering.renderMode === MVIEW_VOLUME_3D_RENDER_MODE ||
     rendering.renderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE ||
+    rendering.renderMode === VTK_WASM_VOLUME_3D_RENDER_MODE ||
     rendering.renderMode === 'vtkGeometry3d'
   );
 }
@@ -1505,12 +1533,14 @@ function isVolume3DVolumeRenderMode(
   | 'vtkVolume3d'
   | typeof WEBGPU_VOLUME_3D_RENDER_MODE
   | typeof MVIEW_VOLUME_3D_RENDER_MODE
-  | typeof SLICERLIVE_VOLUME_3D_RENDER_MODE {
+  | typeof SLICERLIVE_VOLUME_3D_RENDER_MODE
+  | typeof VTK_WASM_VOLUME_3D_RENDER_MODE {
   return (
     renderMode === 'vtkVolume3d' ||
     renderMode === WEBGPU_VOLUME_3D_RENDER_MODE ||
     renderMode === MVIEW_VOLUME_3D_RENDER_MODE ||
-    renderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE
+    renderMode === SLICERLIVE_VOLUME_3D_RENDER_MODE ||
+    renderMode === VTK_WASM_VOLUME_3D_RENDER_MODE
   );
 }
 

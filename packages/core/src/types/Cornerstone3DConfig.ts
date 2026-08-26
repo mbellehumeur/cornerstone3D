@@ -102,14 +102,40 @@ interface Cornerstone3DConfig {
       maximumSamplesPerRay?: number;
       /**
        * When false, never split oversized Z into multiple 3D textures.
-       * Default (undefined/true): auto-chunk when depth exceeds max 3D size.
+       * Default (undefined/true): auto-brickling when depth exceeds max 3D size.
        */
-      volumeTextureChunking?: boolean;
+      volumeTextureBrickling?: boolean;
       /**
        * Soft cap on max 3D texture dimension (e.g. 512 for tests). Effective
        * limit is min(GPU MAX_3D_TEXTURE_SIZE, this value).
        */
       maxTextureDimension3DCap?: number;
+    };
+    /**
+     * Experimental vtk.wasm (WebGL) render path settings.
+     * Used by Planar MPR + Volume3D vtkWasm backends; independent of
+     * OpenGL Z-slab volumeTextureBrickling.
+     */
+    vtkWasm?: {
+      /** Bundle URL for loadAsync (mjs/wasm directory or tar.gz). */
+      url?: string;
+      /**
+       * When true (default in @kitware/vtk-wasm), `url` is treated as a
+       * `.tar.gz`. Set false when `url` is a same-origin directory that
+       * already contains `vtkWebAssembly.mjs` / `.wasm`.
+       */
+      urlIsGzip?: boolean;
+      /** When false, never partition volumes for the wasm path. */
+      volumeTextureBrickling?: boolean;
+      brickPartitions?: {
+        strategy?: 'minimum' | 'target' | 'fixed';
+        targetPerAxis?: number;
+        partitions?: [number, number, number];
+        maxPerAxis?: number;
+        minPerAxis?: number;
+        applyToAllAxes?: boolean;
+        max3D?: number;
+      };
     };
     /**
      * When true, legacy viewport types (STACK, ORTHOGRAPHIC, VIDEO, ECG,

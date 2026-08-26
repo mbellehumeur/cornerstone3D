@@ -64,7 +64,7 @@ function vtkStreamingOpenGLVolumeMapper(publicAPI, model) {
   publicAPI.renderPiece = (ren, actor) => {
     publicAPI.invokeEvent({ type: 'StartEvent' });
 
-    // Re-sync brick textures + Z-chunk plan from the shared mapper every frame.
+    // Re-sync brick textures + Z-brick plan from the shared mapper every frame.
     // View-node creation can miss them; without this the shader stays on the
     // single-texture path and only brick 0 is visible (full-UV clamp).
     const shared = model.renderable;
@@ -76,10 +76,10 @@ function vtkStreamingOpenGLVolumeMapper(publicAPI, model) {
       if (Array.isArray(textures) && textures.length > 0) {
         model.scalarTextures = textures;
       }
-      if (typeof shared.getVolumeTextureChunkPlan === 'function') {
-        const plan = shared.getVolumeTextureChunkPlan();
+      if (typeof shared.getVolumeTextureBrickPlan === 'function') {
+        const plan = shared.getVolumeTextureBrickPlan();
         if (plan) {
-          model.volumeTextureChunkPlan = plan;
+          model.volumeTextureBrickPlan = plan;
         }
       }
     }
@@ -113,15 +113,15 @@ function vtkStreamingOpenGLVolumeMapper(publicAPI, model) {
         });
       }
 
-      // Number of components. Spatial Z-chunk bricks are NOT fusion components —
-      // keep image component count when chunking so the VR shader uses the
-      // chunked sample path instead of EnabledMultiTexturePerVolume.
+      // Number of components. Spatial Z-brick bricks are NOT fusion components —
+      // keep image component count when brickling so the VR shader uses the
+      // bricked sample path instead of EnabledMultiTexturePerVolume.
       const numberOfValidInputs = model.currentValidInputs.length;
-      const chunkPlan = model.volumeTextureChunkPlan;
-      const spatialChunking =
-        !!chunkPlan?.chunked && (model.scalarTextures?.length ?? 0) > 1;
+      const chunkPlan = model.volumeTextureBrickPlan;
+      const spatialBrickling =
+        !!chunkPlan?.bricked && (model.scalarTextures?.length ?? 0) > 1;
       const multiTexturePerVolumeEnabled =
-        numberOfValidInputs > 1 && !spatialChunking;
+        numberOfValidInputs > 1 && !spatialBrickling;
       const { numberOfComponents } = firstImageData.get('numberOfComponents');
       model.numberOfComponents = multiTexturePerVolumeEnabled
         ? numberOfValidInputs
@@ -347,16 +347,16 @@ function vtkStreamingOpenGLVolumeMapper(publicAPI, model) {
     model._colorTextureCore = firstColorTransferFunc;
 
     // rebuild scalarTextures using custom streaming approach
-    const chunkPlan = model.volumeTextureChunkPlan;
-    const isChunked = chunkPlan?.chunked && model.scalarTextures?.length > 1;
+    const chunkPlan = model.volumeTextureBrickPlan;
+    const isBricked = chunkPlan?.bricked && model.scalarTextures?.length > 1;
     const imageDataForBricks = model.currentValidInputs[0]?.imageData;
 
-    if (isChunked && !model._loggedChunkAlloc) {
-      model._loggedChunkAlloc = true;
+    if (isBricked && !model._loggedBrickAlloc) {
+      model._loggedBrickAlloc = true;
       const dims = imageDataForBricks?.getDimensions?.() ?? [];
       // eslint-disable-next-line no-console
       console.info(
-        `[VolumeTextureChunks:VR] allocating ${model.scalarTextures.length} brick texture(s) ` +
+        `[VolumeTextureBricks:VR] allocating ${model.scalarTextures.length} brick texture(s) ` +
           `fullDims=${dims.join?.('x') ?? dims} ` +
           `planBricks=${chunkPlan.bricks
             .map(
@@ -366,7 +366,7 @@ function vtkStreamingOpenGLVolumeMapper(publicAPI, model) {
       );
     }
 
-    const texturesToUpdate = isChunked
+    const texturesToUpdate = isBricked
       ? model.scalarTextures.map((texture, brickIndex) => ({
           texture,
           brickIndex,
@@ -391,7 +391,7 @@ function vtkStreamingOpenGLVolumeMapper(publicAPI, model) {
           return;
         }
 
-        const toString = `${imageData.getMTime()}-${currentTexture.getMTime()}-chunk${brickIndex}`;
+        const toString = `${imageData.getMTime()}-${currentTexture.getMTime()}-brick${brickIndex}`;
 
         if (!model.scalarTextureStrings) {
           model.scalarTextureStrings = [];
@@ -437,7 +437,7 @@ function vtkStreamingOpenGLVolumeMapper(publicAPI, model) {
           if (shouldReset) {
             // eslint-disable-next-line no-console
             console.info(
-              `[VolumeTextureChunks:VR] create3DFromRaw brick=${brickIndex} ` +
+              `[VolumeTextureBricks:VR] create3DFromRaw brick=${brickIndex} ` +
                 `size=${texWidth}x${texHeight}x${texDepth} dataType=${dataType} ` +
                 `slices=${brick ? `${brick.sliceStart}-${brick.sliceEnd}` : `0-${dims[2] - 1}`}`
             );
@@ -642,7 +642,7 @@ export function extend(publicAPI, model, initialValues = {}) {
 
   vtkOpenGLVolumeMapper.extend(publicAPI, model, initialValues);
 
-  // Initialize scalarTextures array for multi-texture / Z-chunk support
+  // Initialize scalarTextures array for multi-texture / Z-brick support
   // Keep backward compatibility with single scalarTexture
   if (initialValues.scalarTextures?.length) {
     model.scalarTextures = [...initialValues.scalarTextures];
@@ -652,7 +652,7 @@ export function extend(publicAPI, model, initialValues = {}) {
     model.scalarTextures = [];
   }
 
-  model.volumeTextureChunkPlan = initialValues.volumeTextureChunkPlan ?? null;
+  model.volumeTextureBrickPlan = initialValues.volumeTextureBrickPlan ?? null;
   model.scalarTextureStrings = [];
   model._scalarTexturesCore = [];
   model.previousState = {};

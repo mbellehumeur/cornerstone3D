@@ -8,7 +8,7 @@ function vtkSharedImageResliceMapper(publicAPI, model) {
   publicAPI.delete = () => {
     model.scalarTexture = null;
     model.scalarTextures = null;
-    model.volumeTextureChunkPlan = null;
+    model.volumeTextureBrickPlan = null;
     superDelete();
   };
 }
@@ -16,7 +16,7 @@ function vtkSharedImageResliceMapper(publicAPI, model) {
 const DEFAULT_VALUES = {
   scalarTexture: null,
   scalarTextures: null,
-  volumeTextureChunkPlan: null,
+  volumeTextureBrickPlan: null,
 };
 
 export function extend(publicAPI, model, initialValues = {}) {
@@ -27,7 +27,7 @@ export function extend(publicAPI, model, initialValues = {}) {
   macro.setGet(publicAPI, model, [
     'scalarTexture',
     'scalarTextures',
-    'volumeTextureChunkPlan',
+    'volumeTextureBrickPlan',
   ]);
 
   vtkSharedImageResliceMapper(publicAPI, model);

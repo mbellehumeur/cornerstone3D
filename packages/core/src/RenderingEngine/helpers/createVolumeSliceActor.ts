@@ -51,8 +51,8 @@ async function createVolumeSliceActor(
   mapper.setSlabThickness(0);
   mapper.setScalarTexture?.(scalarTextures[0]);
   mapper.setScalarTextures?.(scalarTextures);
-  if (imageVolume.volumeTextureChunkPlan) {
-    mapper.setVolumeTextureChunkPlan?.(imageVolume.volumeTextureChunkPlan);
+  if (imageVolume.volumeTextureBrickPlan) {
+    mapper.setVolumeTextureBrickPlan?.(imageVolume.volumeTextureBrickPlan);
   }
   mapper.modified();
 

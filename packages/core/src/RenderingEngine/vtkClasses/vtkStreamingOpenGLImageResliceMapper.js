@@ -80,8 +80,8 @@ function vtkStreamingOpenGLImageResliceMapper(publicAPI, model) {
   publicAPI.renderPiece = (ren, actor) => {
     publicAPI.invokeEvent({ type: 'StartEvent' });
 
-    // Re-sync brick textures + Z-chunk plan from the shared mapper every frame
-    // so MPR stays on the chunked sample path (same as VolumeMapper).
+    // Re-sync brick textures + Z-brick plan from the shared mapper every frame
+    // so MPR stays on the bricked sample path (same as VolumeMapper).
     const shared = model.renderable;
     if (shared) {
       const textures =
@@ -91,10 +91,10 @@ function vtkStreamingOpenGLImageResliceMapper(publicAPI, model) {
       if (Array.isArray(textures) && textures.length > 0) {
         model.scalarTextures = textures;
       }
-      if (typeof shared.getVolumeTextureChunkPlan === 'function') {
-        const plan = shared.getVolumeTextureChunkPlan();
+      if (typeof shared.getVolumeTextureBrickPlan === 'function') {
+        const plan = shared.getVolumeTextureBrickPlan();
         if (plan) {
-          model.volumeTextureChunkPlan = plan;
+          model.volumeTextureBrickPlan = plan;
         }
       }
     }
@@ -129,12 +129,12 @@ function vtkStreamingOpenGLImageResliceMapper(publicAPI, model) {
       numberOfComponents: undefined,
     };
 
-    // Spatial Z-chunk bricks are not fusion components.
-    const chunkPlan = model.volumeTextureChunkPlan;
-    const spatialChunking =
-      !!chunkPlan?.chunked && (model.scalarTextures?.length ?? 0) > 1;
+    // Spatial Z-brick bricks are not fusion components.
+    const chunkPlan = model.volumeTextureBrickPlan;
+    const spatialBrickling =
+      !!chunkPlan?.bricked && (model.scalarTextures?.length ?? 0) > 1;
     model.multiTexturePerVolumeEnabled =
-      numberOfValidInputs > 1 && !spatialChunking;
+      numberOfValidInputs > 1 && !spatialBrickling;
     model.numberOfComponents = model.multiTexturePerVolumeEnabled
       ? numberOfValidInputs
       : typeof numberOfComponents === 'number'
@@ -161,9 +161,9 @@ function vtkStreamingOpenGLImageResliceMapper(publicAPI, model) {
         ({ imageData }) => model.VBOBuildTime.getMTime() < imageData.getMTime()
       ) ||
       model.VBOBuildTime.getMTime() < model.resliceGeom.getMTime() ||
-      (!model.volumeTextureChunkPlan?.chunked &&
+      (!model.volumeTextureBrickPlan?.bricked &&
         model.scalarTextures.length !== model.currentValidInputs.length) ||
-      (model.volumeTextureChunkPlan?.chunked &&
+      (model.volumeTextureBrickPlan?.bricked &&
         model.scalarTextures.length < 2) ||
       !model.colorTexture?.getHandle() ||
       !model.pwfTexture?.getHandle() ||
@@ -193,16 +193,16 @@ function vtkStreamingOpenGLImageResliceMapper(publicAPI, model) {
 
   publicAPI.buildBufferObjects = (ren, actor) => {
     const actorProperties = actor.getProperties();
-    const chunkPlan = model.volumeTextureChunkPlan;
-    const isChunked = chunkPlan?.chunked && model.scalarTextures?.length > 1;
+    const chunkPlan = model.volumeTextureBrickPlan;
+    const isBricked = chunkPlan?.bricked && model.scalarTextures?.length > 1;
     const imageDataForBricks = model.currentValidInputs[0]?.imageData;
 
-    if (isChunked && !model._loggedChunkAlloc) {
-      model._loggedChunkAlloc = true;
+    if (isBricked && !model._loggedBrickAlloc) {
+      model._loggedBrickAlloc = true;
       const dims = imageDataForBricks?.getDimensions?.() ?? [];
       // eslint-disable-next-line no-console
       console.info(
-        `[VolumeTextureChunks:MPR] allocating ${model.scalarTextures.length} brick texture(s) ` +
+        `[VolumeTextureBricks:MPR] allocating ${model.scalarTextures.length} brick texture(s) ` +
           `fullDims=${dims.join?.('x') ?? dims} ` +
           `planBricks=${chunkPlan.bricks
             .map(
@@ -212,7 +212,7 @@ function vtkStreamingOpenGLImageResliceMapper(publicAPI, model) {
       );
     }
 
-    const brickEntries = isChunked
+    const brickEntries = isBricked
       ? model.scalarTextures.map((texture, brickIndex) => ({
           imageData: imageDataForBricks,
           component: brickIndex,
@@ -272,7 +272,7 @@ function vtkStreamingOpenGLImageResliceMapper(publicAPI, model) {
         if (shouldReset) {
           // eslint-disable-next-line no-console
           console.info(
-            `[VolumeTextureChunks:MPR] create3DFromRaw brick=${component} ` +
+            `[VolumeTextureBricks:MPR] create3DFromRaw brick=${component} ` +
               `size=${dims[0]}x${dims[1]}x${texDepth} dataType=${dataType} ` +
               `slices=${brick ? `${brick.sliceStart}-${brick.sliceEnd}` : `0-${dims[2] - 1}`}`
           );
@@ -310,8 +310,8 @@ function vtkStreamingOpenGLImageResliceMapper(publicAPI, model) {
         return;
       }
 
-      // Non-streaming path: only for the first brick / non-chunked volumes
-      if (isChunked && component > 0) {
+      // Non-streaming path: only for the first brick / non-bricked volumes
+      if (isBricked && component > 0) {
         return;
       }
 
@@ -638,7 +638,7 @@ export function extend(publicAPI, model, initialValues = {}) {
     model.scalarTextures = [];
   }
 
-  model.volumeTextureChunkPlan = initialValues.volumeTextureChunkPlan ?? null;
+  model.volumeTextureBrickPlan = initialValues.volumeTextureBrickPlan ?? null;
   model.scalarTextureStrings = [];
   model._scalarTexturesCore = [];
 

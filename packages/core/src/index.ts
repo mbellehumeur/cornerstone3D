@@ -90,6 +90,9 @@ import GenericVolumeViewport3D, {
   endSlicerLiveVolume3DInteraction,
   applySlicerLiveVolume3DPreset,
   flushSlicerLiveVolume3DPendingPreset,
+  applyVtkWasmVolume3DPreset,
+  flushVtkWasmVolume3DPendingPreset,
+  getVtkWasmVolume3D,
   getSlicerLiveVolume3D,
   getSlicerLiveVolume3DAccumulate,
   getSlicerLiveVolume3DAutoSampleStep,
@@ -128,6 +131,7 @@ import GenericVolumeViewport3D, {
   clearSlicerLiveVolume3DSegmentation,
   SLICERLIVE_VOLUME_3D_RENDER_MODE,
   WEBGPU_VOLUME_3D_RENDER_MODE,
+  VTK_WASM_VOLUME_3D_RENDER_MODE,
 } from './RenderingEngine/GenericViewport/Volume3D';
 export type {
   MviewVolume3DPresentQuality,
@@ -288,6 +292,10 @@ import {
   addVolumesToViewports,
   addImageSlicesToViewports,
   getProjectionScaleMatrix,
+  buildZBrickPlan,
+  buildWasmVtkBrickPlan,
+  isVolumeTextureBricklingEnabled,
+  isWasmVolumeTextureBricklingEnabled,
 } from './RenderingEngine/helpers';
 import {
   registerViewportType,
@@ -303,6 +311,13 @@ import {
   registerWebGPURenderBackend,
   isWebGPURenderingAvailable,
 } from './RenderingEngine/helpers/registerWebGPURenderBackend';
+import {
+  registerVtkWasmRenderBackend,
+  isVtkWasmAvailable,
+  VTK_WASM_RENDER_BACKEND,
+  VTK_WASM_VOLUME_RENDER_MODE,
+  VTK_WASM_IMAGE_RENDER_MODE,
+} from './RenderingEngine/helpers/registerVtkWasmRenderBackend';
 import {
   beginWebGPUViewportAnimation,
   endWebGPUViewportAnimation,
@@ -479,6 +494,10 @@ export {
   wsiProjection,
   renderingEngineExportsV2,
   getProjectionScaleMatrix,
+  buildZBrickPlan,
+  buildWasmVtkBrickPlan,
+  isVolumeTextureBricklingEnabled,
+  isWasmVolumeTextureBricklingEnabled,
   registerViewportType,
   isRegisteredViewportType,
   registerRenderBackend,
@@ -488,6 +507,12 @@ export {
   // WebGPU render backend (experimental)
   registerWebGPURenderBackend,
   isWebGPURenderingAvailable,
+  // vtk.wasm WebGL render backend (experimental)
+  registerVtkWasmRenderBackend,
+  isVtkWasmAvailable,
+  VTK_WASM_RENDER_BACKEND,
+  VTK_WASM_VOLUME_RENDER_MODE,
+  VTK_WASM_IMAGE_RENDER_MODE,
   beginWebGPUViewportAnimation,
   endWebGPUViewportAnimation,
   getWebGPUViewportDebugInfo,
@@ -531,6 +556,9 @@ export {
   endSlicerLiveVolume3DInteraction,
   applySlicerLiveVolume3DPreset,
   flushSlicerLiveVolume3DPendingPreset,
+  applyVtkWasmVolume3DPreset,
+  flushVtkWasmVolume3DPendingPreset,
+  getVtkWasmVolume3D,
   getSlicerLiveVolume3D,
   getSlicerLiveVolume3DAccumulate,
   getSlicerLiveVolume3DAutoSampleStep,
@@ -569,6 +597,7 @@ export {
   clearSlicerLiveVolume3DSegmentation,
   SLICERLIVE_VOLUME_3D_RENDER_MODE,
   WEBGPU_VOLUME_3D_RENDER_MODE,
+  VTK_WASM_VOLUME_3D_RENDER_MODE,
   isStatsOverlayVisible,
   toggleStatsOverlay,
   setStatsOverlayEnabled,

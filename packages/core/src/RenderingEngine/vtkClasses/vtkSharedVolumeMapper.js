@@ -6,7 +6,7 @@ import vtkVolumeMapper from '@kitware/vtk.js/Rendering/Core/VolumeMapper';
  * the scalar texture in as an argument. This is so we can share the same texture
  * memory across different mappers/actors, so we don't duplicate memory usage.
  *
- * Supports multiple Z-chunk brick textures via scalarTextures + volumeTextureChunkPlan.
+ * Supports multiple Z-brick brick textures via scalarTextures + volumeTextureBrickPlan.
  *
  * @param {*} publicAPI The public API to extend
  * @param {*} model The private model to extend.
@@ -19,7 +19,7 @@ function vtkSharedVolumeMapper(publicAPI, model) {
   publicAPI.delete = () => {
     model.scalarTexture = null;
     model.scalarTextures = null;
-    model.volumeTextureChunkPlan = null;
+    model.volumeTextureBrickPlan = null;
     superDelete();
   };
 }
@@ -33,7 +33,7 @@ function vtkSharedVolumeMapper(publicAPI, model) {
 const DEFAULT_VALUES = {
   scalarTexture: null,
   scalarTextures: null,
-  volumeTextureChunkPlan: null,
+  volumeTextureBrickPlan: null,
 };
 
 export function extend(publicAPI, model, initialValues = {}) {
@@ -44,7 +44,7 @@ export function extend(publicAPI, model, initialValues = {}) {
   macro.setGet(publicAPI, model, [
     'scalarTexture',
     'scalarTextures',
-    'volumeTextureChunkPlan',
+    'volumeTextureBrickPlan',
   ]);
 
   // Object methods

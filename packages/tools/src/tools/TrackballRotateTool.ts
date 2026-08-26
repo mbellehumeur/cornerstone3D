@@ -12,6 +12,7 @@ import {
   endSlicerLiveVolume3DInteraction,
   getMviewVolume3D,
   getSlicerLiveVolume3D,
+  getVtkWasmVolume3D,
 } from '@cornerstonejs/core';
 import type { Types } from '@cornerstonejs/core';
 import { mat4, vec3 } from 'gl-matrix';
@@ -255,7 +256,9 @@ class TrackballRotateTool extends BaseTool {
    */
   _recenterSpecializedOrbit = (viewport) => {
     const entry =
-      getMviewVolume3D(viewport.id) || getSlicerLiveVolume3D(viewport.id);
+      getMviewVolume3D(viewport.id) ||
+      getSlicerLiveVolume3D(viewport.id) ||
+      getVtkWasmVolume3D(viewport.id);
     const center = entry?.volumeCenter as Types.Point3 | undefined;
     if (!center || !viewport.getVtkActiveCamera) {
       return;
@@ -394,7 +397,9 @@ class TrackballRotateTool extends BaseTool {
     // mview: orbit the volume center (matches present). Otherwise the canvas
     // focal point (cornerstone3D default).
     const specialized =
-      getMviewVolume3D(viewport.id) || getSlicerLiveVolume3D(viewport.id);
+      getMviewVolume3D(viewport.id) ||
+      getSlicerLiveVolume3D(viewport.id) ||
+      getVtkWasmVolume3D(viewport.id);
     const centerWorld = (specialized?.volumeCenter ??
       viewport.canvasToWorld(center)) as Types.Point3;
     const normalizedCenter = [0.5, 0.5];

@@ -11,6 +11,7 @@ export {
 export { WEBGPU_VOLUME_3D_RENDER_MODE } from './WebGPUVolume3DRenderPath';
 export { MVIEW_VOLUME_3D_RENDER_MODE } from './MviewVolume3DRenderPath';
 export { SLICERLIVE_VOLUME_3D_RENDER_MODE } from './SlicerLiveVolume3DRenderPath';
+export { VTK_WASM_VOLUME_3D_RENDER_MODE } from './VtkWasmVolume3DRenderPath';
 export {
   applyMviewVolume3DPreset,
   beginMviewVolume3DInteraction,
@@ -101,6 +102,11 @@ export type {
 } from './slicerLiveVolume3DRegistry';
 export { viewportPresetToSlicerLiveAppearance } from './slicerLiveViewportPreset';
 export type { SlicerLivePresetAppearance } from './slicerLiveViewportPreset';
+export {
+  applyVtkWasmVolume3DPreset,
+  flushVtkWasmVolume3DPendingPreset,
+  getVtkWasmVolume3D,
+} from './vtkWasmVolume3DRegistry';
 export {
   armVolume3DInteraction,
   ensureVolume3DInteractionStarted,

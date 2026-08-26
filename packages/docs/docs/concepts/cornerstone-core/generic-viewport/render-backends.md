@@ -122,3 +122,8 @@ declare module '@cornerstonejs/core' {
 `RenderBackendRegistry` feeds the `RenderBackendValue` string union accepted by
 `setRenderBackend()` and `renderBackend` options; `RenderBackendConstants`
 types the properties of `Enums.RenderBackends`.
+
+## vtk.wasm backend
+
+See [vtk.wasm Render Backend](./vtk-wasm-backend.md) for the experimental
+WebGL vtk.wasm planar MPR + Volume3D paths and VTK XYZ partition brickling.

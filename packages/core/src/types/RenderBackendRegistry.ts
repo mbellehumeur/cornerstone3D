@@ -21,6 +21,11 @@ export interface RenderBackendRegistry extends CoreRenderBackendRegistry {
    * runtime entry only exists after `registerWebGPURenderBackend()` runs.
    */
   webgpu: 'webgpu';
+  /**
+   * Experimental vtk.wasm (WebGL) backend. Runtime entry exists after
+   * `registerVtkWasmRenderBackend()` runs.
+   */
+  vtkWasm: 'vtkWasm';
 }
 
 /**
@@ -33,6 +38,8 @@ export interface RenderBackendRegistry extends CoreRenderBackendRegistry {
 export interface RenderBackendConstants extends CoreRenderBackendConstants {
   /** See RenderBackendRegistry.webgpu — experimental, opt-in registration. */
   readonly WEBGPU: 'webgpu';
+  /** See RenderBackendRegistry.vtkWasm — experimental, opt-in registration. */
+  readonly VTK_WASM: 'vtkWasm';
 }
 
 export type RenderBackend = RenderBackendRegistry[keyof RenderBackendRegistry];

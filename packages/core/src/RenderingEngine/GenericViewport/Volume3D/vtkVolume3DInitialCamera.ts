@@ -48,9 +48,9 @@ export function getInitialVolume3DCamera(
   );
 
   const canvasWidth =
-    ctx.vtk.canvas.width || ctx.viewport.element.clientWidth || 1;
+    ctx.viewport.element.clientWidth || ctx.vtk.canvas.width || 1;
   const canvasHeight =
-    ctx.vtk.canvas.height || ctx.viewport.element.clientHeight || 1;
+    ctx.viewport.element.clientHeight || ctx.vtk.canvas.height || 1;
   const boundsAspectRatio = widthWorld / heightWorld;
   const canvasAspectRatio = canvasWidth / canvasHeight;
   const scaleFactor = boundsAspectRatio / canvasAspectRatio;

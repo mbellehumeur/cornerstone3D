@@ -95,8 +95,8 @@ function vtkStreamingOpenGLViewNodeFactory(publicAPI, model) {
         (dataObject.getScalarTexture() ? [dataObject.getScalarTexture()] : []);
       initialValues.scalarTextures = textures;
       initialValues.scalarTexture = textures[0] ?? null;
-      initialValues.volumeTextureChunkPlan =
-        dataObject.getVolumeTextureChunkPlan?.() ?? null;
+      initialValues.volumeTextureBrickPlan =
+        dataObject.getVolumeTextureBrickPlan?.() ?? null;
     }
 
     if (className === 'vtkSharedImageResliceMapper') {
@@ -105,8 +105,8 @@ function vtkStreamingOpenGLViewNodeFactory(publicAPI, model) {
         (dataObject.getScalarTexture() ? [dataObject.getScalarTexture()] : []);
       initialValues.scalarTextures = textures;
       initialValues.scalarTexture = textures[0] ?? null;
-      initialValues.volumeTextureChunkPlan =
-        dataObject.getVolumeTextureChunkPlan?.() ?? null;
+      initialValues.volumeTextureBrickPlan =
+        dataObject.getVolumeTextureBrickPlan?.() ?? null;
     }
 
     return initialValues;

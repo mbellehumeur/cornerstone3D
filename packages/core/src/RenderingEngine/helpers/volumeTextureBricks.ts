@@ -11,9 +11,9 @@ export interface VolumeTextureBrick {
   depth: number;
 }
 
-export interface VolumeTextureChunkPlan {
+export interface VolumeTextureBrickPlan {
   /** True when more than one brick is required. */
-  chunked: boolean;
+  bricked: boolean;
   /** Full volume depth (dimensions[2]). */
   fullDepth: number;
   /** Effective max 3D texture dimension used for the plan. */
@@ -29,7 +29,7 @@ export interface VolumeTextureChunkPlan {
 }
 
 export const DEFAULT_MAX_TEXTURE_DIMENSION_3D = 2048;
-export const DEFAULT_VOLUME_TEXTURE_CHUNK_OVERLAP = 1;
+export const DEFAULT_VOLUME_TEXTURE_BRICK_OVERLAP = 1;
 export const MAX_VOLUME_TEXTURE_BRICKS = 4;
 
 /**
@@ -52,9 +52,9 @@ export function getMaxTextureDimension3D(): number {
   return probed;
 }
 
-export function isVolumeTextureChunkingEnabled(): boolean {
+export function isVolumeTextureBricklingEnabled(): boolean {
   const flag =
-    getConfiguration()?.rendering?.volumeRendering?.volumeTextureChunking;
+    getConfiguration()?.rendering?.volumeRendering?.volumeTextureBrickling;
   // Auto-on when needed; allow explicit disable.
   return flag !== false;
 }
@@ -63,11 +63,11 @@ export function isVolumeTextureChunkingEnabled(): boolean {
  * Build a Z-axis brick plan so each brick depth fits in max3D.
  * Adjacent bricks share `overlap` slices for seamless trilinear filtering.
  */
-export function buildZChunkPlan(
+export function buildZBrickPlan(
   dimensions: readonly [number, number, number] | number[],
   max3D: number = getMaxTextureDimension3D(),
-  overlap: number = DEFAULT_VOLUME_TEXTURE_CHUNK_OVERLAP
-): VolumeTextureChunkPlan {
+  overlap: number = DEFAULT_VOLUME_TEXTURE_BRICK_OVERLAP
+): VolumeTextureBrickPlan {
   const width = dimensions[0];
   const height = dimensions[1];
   const fullDepth = dimensions[2];
@@ -76,7 +76,7 @@ export function buildZChunkPlan(
 
   if (width > safeMax3D || height > safeMax3D) {
     return {
-      chunked: false,
+      bricked: false,
       fullDepth,
       max3D: safeMax3D,
       overlap: safeOverlap,
@@ -92,12 +92,12 @@ export function buildZChunkPlan(
   }
 
   if (
-    !isVolumeTextureChunkingEnabled() ||
+    !isVolumeTextureBricklingEnabled() ||
     fullDepth <= safeMax3D ||
     fullDepth <= 0
   ) {
     return {
-      chunked: false,
+      bricked: false,
       fullDepth,
       max3D: safeMax3D,
       overlap: safeOverlap,
@@ -146,7 +146,7 @@ export function buildZChunkPlan(
   }
 
   return {
-    chunked: bricks.length > 1,
+    bricked: bricks.length > 1,
     fullDepth,
     max3D: safeMax3D,
     overlap: safeOverlap,

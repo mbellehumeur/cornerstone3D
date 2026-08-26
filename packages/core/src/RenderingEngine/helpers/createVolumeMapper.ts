@@ -4,7 +4,7 @@ import type vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
 import type vtkOpenGLTexture from '@kitware/vtk.js/Rendering/OpenGL/Texture';
 import vtkVolumeMapper from '@kitware/vtk.js/Rendering/Core/VolumeMapper';
 import vtkDataArray from '@kitware/vtk.js/Common/Core/DataArray';
-import type { VolumeTextureChunkPlan } from './volumeTextureChunks';
+import type { VolumeTextureBrickPlan } from './volumeTextureBricks';
 import {
   computeFittedVolumeSampleDistance,
   DEFAULT_MAX_SAMPLES_PER_RAY,
@@ -25,7 +25,7 @@ export default function createVolumeMapper(
   vtkOpenGLTexture: vtkOpenGLTexture,
   options?: {
     scalarTextures?: vtkOpenGLTexture[];
-    volumeTextureChunkPlan?: VolumeTextureChunkPlan;
+    volumeTextureBrickPlan?: VolumeTextureBrickPlan;
   }
 ): vtkVolumeMapper {
   const volumeMapper = vtkSharedVolumeMapper.newInstance();
@@ -68,8 +68,8 @@ export default function createVolumeMapper(
 
   volumeMapper.setScalarTexture(scalarTextures[0]);
   volumeMapper.setScalarTextures?.(scalarTextures);
-  if (options?.volumeTextureChunkPlan) {
-    volumeMapper.setVolumeTextureChunkPlan?.(options.volumeTextureChunkPlan);
+  if (options?.volumeTextureBrickPlan) {
+    volumeMapper.setVolumeTextureBrickPlan?.(options.volumeTextureBrickPlan);
   }
 
   return volumeMapper;

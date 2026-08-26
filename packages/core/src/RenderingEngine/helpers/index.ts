@@ -7,18 +7,35 @@ import volumeNewImageEventDispatcher from './volumeNewImageEventDispatcher';
 import addImageSlicesToViewports from './addImageSlicesToViewports';
 import { getProjectionScaleMatrix } from './getProjectionScaleMatrix';
 export {
-  buildZChunkPlan,
+  buildZBrickPlan,
   getMaxTextureDimension3D,
-  isVolumeTextureChunkingEnabled,
+  isVolumeTextureBricklingEnabled,
   fullSliceToBrickLocalZ,
   DEFAULT_MAX_TEXTURE_DIMENSION_3D,
-  DEFAULT_VOLUME_TEXTURE_CHUNK_OVERLAP,
+  DEFAULT_VOLUME_TEXTURE_BRICK_OVERLAP,
   MAX_VOLUME_TEXTURE_BRICKS,
-} from './volumeTextureChunks';
+} from './volumeTextureBricks';
 export type {
   VolumeTextureBrick,
-  VolumeTextureChunkPlan,
-} from './volumeTextureChunks';
+  VolumeTextureBrickPlan,
+} from './volumeTextureBricks';
+export {
+  buildWasmVtkBrickPlan,
+  fullVolumeRegionToBrickUploads,
+  isWasmVolumeTextureBricklingEnabled,
+  minimumPartitionsForAxis,
+  splitAxisExtents,
+  DEFAULT_WASM_BRICK_MAX_PER_AXIS,
+} from './volumeTextureBrickWasm';
+export type {
+  WasmVtkBrickPartitions,
+  WasmVtkBrickPartitionStrategy,
+  WasmVtkBrickPartitionOptions,
+  WasmVtkVolumeBrick,
+  WasmVtkVolumeBrickPlan,
+  WasmIjkBox,
+  WasmBrickRegionUpload,
+} from './volumeTextureBrickWasm';
 export {
   computeFittedVolumeSampleDistance,
   DEFAULT_MAX_SAMPLES_PER_RAY,
