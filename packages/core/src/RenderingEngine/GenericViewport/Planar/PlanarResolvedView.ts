@@ -364,7 +364,22 @@ export function getPlanarViewStateCanvasDimensions(args: {
   // The registry knows which composited surface a render mode draws to; the
   // core cpu modes and extension backends registered with `surface: 'cpu'`
   // (e.g. the WebGPU path, which blits into the cpu canvas) all measure the
-  // cpu canvas, everything else measures the vtk canvas.
+  // cpu canvas, everything else measures the vtk canvas. vtk-wasm MPR draws to
+  // its own overlay canvas — prefer that when present so parallelScale matches.
+  // Cast: PlanarRendering's closed union omits extension modes (vtkWasm*).
+  const renderMode = rendering.renderMode as string;
+  if (renderMode === 'vtkWasmVolume' || renderMode === 'vtkWasmImage') {
+    const host =
+      renderContext.cpu?.canvas?.parentElement ??
+      renderContext.vtk?.canvas?.parentElement;
+    const wasmCanvas = host?.querySelector(
+      '.vtk-wasm-planar-canvas'
+    ) as HTMLCanvasElement | null;
+    if (wasmCanvas) {
+      return getCanvasCssDimensions(wasmCanvas);
+    }
+  }
+
   if (getRenderSurfaceForRenderMode(rendering.renderMode) === 'cpu') {
     if (!renderContext.cpu) {
       throw new Error(

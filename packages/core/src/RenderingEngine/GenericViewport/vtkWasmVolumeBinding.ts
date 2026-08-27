@@ -97,6 +97,29 @@ async function callMaybeAsync(result: unknown): Promise<unknown> {
   return await result;
 }
 
+/**
+ * Invoke a vtk-wasm method if present. Returns false when the Proxy rejects
+ * the name (typed builds throw instead of returning undefined).
+ */
+async function tryInvokeMapper(
+  mapper: VtkWasmObject,
+  method: string,
+  ...args: unknown[]
+): Promise<boolean> {
+  try {
+    const fn = (mapper as Record<string, unknown>)[method];
+    if (typeof fn !== 'function') {
+      return false;
+    }
+    await callMaybeAsync(
+      (fn as (...a: unknown[]) => unknown).apply(mapper, args)
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function disposeVtkObject(obj: VtkWasmObject | undefined): void {
   if (!obj) {
     return;
@@ -164,11 +187,25 @@ export function bindVtkWasmVolume(
     spacing,
     origin,
   });
+  const [dx, dy, dz] = dimensions;
+  const extent = [
+    0,
+    Math.max(0, dx - 1),
+    0,
+    Math.max(0, dy - 1),
+    0,
+    Math.max(0, dz - 1),
+  ];
   imageData.$set?.({
     dimensions,
     spacing,
     origin,
+    extent,
   });
+  const setExtent = imageData.setExtent as
+    | ((...args: number[]) => unknown)
+    | undefined;
+  setExtent?.(extent[0], extent[1], extent[2], extent[3], extent[4], extent[5]);
 
   if (direction && direction.length >= 9) {
     const dir9 = Array.from(direction.slice(0, 9));
@@ -211,6 +248,10 @@ export function bindVtkWasmVolume(
     if (!pointData?.setScalars) {
       return false;
     }
+    // Do not setNumberOfTuples here: setArray already sized the buffer; a
+    // property/$set of NumberOfTuples re-deserializes and can throw
+    // (Hash must be string), and SetNumberOfTuples may reallocate.
+
     await callMaybeAsync(
       (pointData.setScalars as (a: unknown) => unknown)(vtkArray)
     );
@@ -291,8 +332,14 @@ export function bindVtkWasmVolume(
       numberOfComponents,
       name: SCALARS_ARRAY_NAME,
     }) as VtkWasmObject;
-    (dataArray as { name?: string }).name = SCALARS_ARRAY_NAME;
-    dataArray.numberOfComponents = numberOfComponents;
+    // Prefer ctor kwargs / method invoke — never assign `.numberOfTuples`
+    // (session property set re-deserializes and hits Hash type errors).
+    const setName = dataArray.setName as ((n: string) => unknown) | undefined;
+    setName?.(SCALARS_ARRAY_NAME);
+    const setNumberOfComponents = dataArray.setNumberOfComponents as
+      | ((n: number) => unknown)
+      | undefined;
+    setNumberOfComponents?.(numberOfComponents);
 
     try {
       const setArray = dataArray.setArray as
@@ -308,6 +355,7 @@ export function bindVtkWasmVolume(
         return undefined;
       }
       // save=0 → VTK frees the pointer with the array.
+      // setArray also establishes NumberOfValues / NumberOfTuples from size.
       await callMaybeAsync(setArray(pointer, heap.toSizeType(numValues), 0));
     } catch (error) {
       try {
@@ -469,22 +517,19 @@ export function bindVtkWasmVolume(
   };
 
   const applyPartitions = async (mapper: VtkWasmObject) => {
+    // vtk-wasm Proxies throw TypeError on unknown method/property access when
+    // types are loaded — never use typeof/optional-chain probes.
     const [nx, ny, nz] = brickPlan.vtkPartitions;
-    if (typeof mapper.setPartitions === 'function') {
-      await callMaybeAsync(
-        (mapper.setPartitions as (...args: number[]) => unknown)(nx, ny, nz)
-      );
-    } else {
-      mapper.$set?.({ partitions: [nx, ny, nz] });
+    const setOk = await tryInvokeMapper(mapper, 'setPartitions', nx, ny, nz);
+    if (!setOk) {
+      try {
+        mapper.$set?.({ partitions: [nx, ny, nz] });
+      } catch {
+        // ImageResliceMapper and similar have no partitions property.
+      }
     }
-    await callMaybeAsync(
-      (mapper.setScalarModeToUsePointData as (() => unknown) | undefined)?.()
-    );
-    await callMaybeAsync(
-      (mapper.setArrayName as ((name: string) => unknown) | undefined)?.(
-        SCALARS_ARRAY_NAME
-      )
-    );
+    await tryInvokeMapper(mapper, 'setScalarModeToUsePointData');
+    await tryInvokeMapper(mapper, 'setArrayName', SCALARS_ARRAY_NAME);
   };
 
   return {

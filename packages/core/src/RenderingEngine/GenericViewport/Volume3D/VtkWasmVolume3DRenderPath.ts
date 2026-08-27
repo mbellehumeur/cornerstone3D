@@ -38,6 +38,7 @@ import {
   applyVtkWasmVolume3DPreset,
   applyViewportPresetToVtkWasmProperty,
   flushVtkWasmVolume3DPendingPreset,
+  getVtkWasmVolume3D,
   registerVtkWasmVolume3D,
   unregisterVtkWasmVolume3D,
   setVtkWasmVolume3DCanvasVisible,
@@ -123,8 +124,9 @@ export class VtkWasmVolume3DRenderPath
     const alreadyLoaded = Boolean(
       (imageVolume as { loadStatus?: { loaded?: boolean } }).loadStatus?.loaded
     );
+    let scalarsReady = false;
     if (alreadyLoaded) {
-      await binding.refreshScalars();
+      scalarsReady = await binding.refreshScalars();
     }
 
     const renderWindow = vtk.vtkRenderWindow({
@@ -148,7 +150,11 @@ export class VtkWasmVolume3DRenderPath
 
     await invoke(renderWindow, 'addRenderer', renderer);
     await invoke(mapper, 'setInputData', binding.imageData);
-    await binding.applyPartitions(mapper);
+    // SetPartitions only after a full scalar buffer is attached — otherwise VTK
+    // LoadTexture builds brick views larger than the (missing) AoS array.
+    if (scalarsReady) {
+      await binding.applyPartitions(mapper);
+    }
     await invoke(volume, 'setMapper', mapper);
     await invoke(volume, 'setProperty', property);
     await invoke(renderer, 'addVolume', volume);
@@ -205,11 +211,13 @@ export class VtkWasmVolume3DRenderPath
     }
 
     const uploadAndPresent = () => {
-      void binding.refreshScalars().then((ok) => {
-        if (ok) {
-          void this.renderAsync();
-          ctx.display.requestRender();
+      void binding.refreshScalars().then(async (ok) => {
+        if (!ok || !this.volumeMapper) {
+          return;
         }
+        await binding.applyPartitions(this.volumeMapper);
+        await this.renderAsync();
+        ctx.display.requestRender();
       });
     };
 
@@ -338,6 +346,33 @@ export class VtkWasmVolume3DRenderPath
     });
 
     await invoke(renderer, 'resetCameraClippingRange');
+  }
+
+  private async resizePresent(
+    ctx: Volume3DViewportRenderContext
+  ): Promise<void> {
+    if (!this.handle || !this.renderWindow) {
+      return;
+    }
+
+    const [w, h] = resizeVtkWasmCanvas(
+      this.handle.canvas,
+      ctx.viewport.element
+    );
+    await syncVtkWasmRenderWindowSize(this.renderWindow, w, h);
+
+    // Re-sync pose after SetSize — canvas bitmap clears and a stale wasm
+    // camera/clipping range can leave the volume blank until the next orbit.
+    const vtkCam = ctx.vtk.renderer.getActiveCamera();
+    await this.applyCameraToWasm({
+      position: vtkCam.getPosition?.() as Volume3DCamera['position'],
+      focalPoint: vtkCam.getFocalPoint?.() as Volume3DCamera['focalPoint'],
+      viewUp: vtkCam.getViewUp?.() as Volume3DCamera['viewUp'],
+      parallelScale: vtkCam.getParallelScale?.(),
+      parallelProjection: vtkCam.getParallelProjection?.(),
+      viewAngle: vtkCam.getViewAngle?.(),
+    });
+    await this.renderAsync();
   }
 
   private async renderAsync(): Promise<void> {

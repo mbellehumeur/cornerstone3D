@@ -17,6 +17,10 @@ import {
   getWebGPUViewportWindow,
   setWebGPUViewportCanvasVisible,
 } from './webgpuViewportRenderWindow';
+import {
+  VTK_WASM_PLANAR_CANVAS_CLASS,
+  VTK_WASM_VOLUME_RENDER_MODE,
+} from './VtkWasmVolumeSliceRenderPath';
 import type { EffectiveRenderBackend } from '../../../types/RenderBackendRegistry';
 import type {
   ActorEntry,
@@ -600,6 +604,15 @@ class PlanarViewport extends GenericViewport<
       const webgpuWindow = getWebGPUViewportWindow(this.id);
       if (webgpuWindow) {
         return webgpuWindow.view.getCanvas();
+      }
+    }
+
+    if (isPlanarVtkWasmRenderMode(renderMode)) {
+      const wasmCanvas = this.element.querySelector(
+        `.${VTK_WASM_PLANAR_CANVAS_CLASS}`
+      ) as HTMLCanvasElement | null;
+      if (wasmCanvas) {
+        return wasmCanvas;
       }
     }
 
@@ -1842,15 +1855,22 @@ class PlanarViewport extends GenericViewport<
     const surface = getRenderSurfaceForRenderMode(renderMode);
     const useCPUCanvas = surface === 'cpu';
     const useWebGPU = isPlanarWebGPURenderMode(renderMode);
+    const useVtkWasm = isPlanarVtkWasmRenderMode(renderMode);
     const viewportElement = this.element.querySelector(
       '.viewport-element'
     ) as HTMLDivElement | null;
     const webgpuWindow = getWebGPUViewportWindow(this.id);
+    const wasmCanvas = this.element.querySelector(
+      `.${VTK_WASM_PLANAR_CANVAS_CLASS}`
+    ) as HTMLCanvasElement | null;
 
     if (useWebGPU) {
       cpuCanvas.style.display = 'none';
       cpuCanvas.style.pointerEvents = 'none';
       vtkCanvas.style.display = 'none';
+      if (wasmCanvas) {
+        wasmCanvas.style.display = 'none';
+      }
       if (webgpuWindow) {
         attachWebGPUViewportCanvas(webgpuWindow, this.element);
       }
@@ -1860,8 +1880,28 @@ class PlanarViewport extends GenericViewport<
       return;
     }
 
+    if (useVtkWasm) {
+      cpuCanvas.style.display = 'none';
+      cpuCanvas.style.pointerEvents = 'none';
+      vtkCanvas.style.display = 'none';
+      if (webgpuWindow) {
+        setWebGPUViewportCanvasVisible(webgpuWindow, false);
+      }
+      if (wasmCanvas) {
+        wasmCanvas.style.display = 'block';
+        wasmCanvas.style.visibility = 'visible';
+      }
+      if (viewportElement) {
+        viewportElement.style.pointerEvents = 'none';
+      }
+      return;
+    }
+
     if (webgpuWindow) {
       setWebGPUViewportCanvasVisible(webgpuWindow, false);
+    }
+    if (wasmCanvas) {
+      wasmCanvas.style.display = 'none';
     }
 
     cpuCanvas.style.display = useCPUCanvas ? '' : 'none';
@@ -2750,6 +2790,12 @@ function isPlanarWebGPURenderMode(renderMode: string | undefined): boolean {
   // Keep string literals (not path-module imports) to avoid circular deps with
   // WebGPUImageMapperRenderPath / WebGPUVolumeSliceRenderPath.
   return renderMode === 'webgpuImage' || renderMode === 'webgpuVolume';
+}
+
+function isPlanarVtkWasmRenderMode(renderMode: string | undefined): boolean {
+  return (
+    renderMode === VTK_WASM_VOLUME_RENDER_MODE || renderMode === 'vtkWasmImage'
+  );
 }
 
 export default PlanarViewport;

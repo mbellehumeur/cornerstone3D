@@ -5,6 +5,27 @@ import {
   splitAxisExtents,
 } from '../src/RenderingEngine/helpers/volumeTextureBrickWasm';
 
+/** VTK SplitVolume: delta=(dim-1)/n, block i = [floor(i*delta), floor((i+1)*delta)]. */
+function vtkSplitAxisExtents(dim, n) {
+  const safeDim = Math.max(0, Math.floor(dim));
+  const parts = Math.max(1, Math.floor(n));
+  if (safeDim <= 0) {
+    return [[0, -1]];
+  }
+  if (safeDim === 1 || parts === 1) {
+    return [[0, safeDim - 1]];
+  }
+  const delta = (safeDim - 1) / parts;
+  const ranges = [];
+  for (let p = 0; p < parts; p++) {
+    const start = Math.floor(p * delta);
+    const end = Math.floor((p + 1) * delta);
+    ranges.push([start, Math.max(start, end)]);
+  }
+  ranges[ranges.length - 1][1] = safeDim - 1;
+  return ranges;
+}
+
 describe('volumeTextureBrickWasm', () => {
   describe('minimumPartitionsForAxis', () => {
     it('returns 1 when dim fits', () => {
@@ -18,11 +39,23 @@ describe('volumeTextureBrickWasm', () => {
   });
 
   describe('splitAxisExtents', () => {
-    it('covers the full axis without gaps', () => {
+    it('matches VTK SplitVolume for dim=512, n=8', () => {
+      expect(splitAxisExtents(512, 8)).toEqual(vtkSplitAxisExtents(512, 8));
+      expect(splitAxisExtents(512, 8)[0]).toEqual([0, 63]);
+      expect(splitAxisExtents(512, 8)[7]).toEqual([447, 511]);
+    });
+
+    it('matches VTK SplitVolume for non-divisible dim=300, n=8', () => {
+      expect(splitAxisExtents(300, 8)).toEqual(vtkSplitAxisExtents(300, 8));
+      expect(splitAxisExtents(300, 8)[0]).toEqual([0, 37]);
+      expect(splitAxisExtents(300, 8)[7][1]).toBe(299);
+    });
+
+    it('covers the full axis with VTK shared boundaries (dim=2900, n=2)', () => {
       const ranges = splitAxisExtents(2900, 2);
       expect(ranges).toEqual([
         [0, 1449],
-        [1450, 2899],
+        [1449, 2899],
       ]);
     });
   });
@@ -39,7 +72,7 @@ describe('volumeTextureBrickWasm', () => {
       expect(plan.bricks[0].textureSize[0]).toBeLessThanOrEqual(2048);
       expect(plan.bricks[1].textureSize[0]).toBeLessThanOrEqual(2048);
       expect(plan.bricks[0].extent).toEqual([0, 1449, 0, 511, 0, 511]);
-      expect(plan.bricks[1].extent).toEqual([1450, 2899, 0, 511, 0, 511]);
+      expect(plan.bricks[1].extent).toEqual([1449, 2899, 0, 511, 0, 511]);
     });
 
     it('keeps single partition when volume fits', () => {
@@ -63,6 +96,16 @@ describe('volumeTextureBrickWasm', () => {
       expect(plan.vtkPartitions[0]).toBe(2);
       expect(plan.vtkPartitions[1]).toBe(1);
       expect(plan.vtkPartitions[2]).toBe(1);
+    });
+
+    it('clamps fixed partitions to axis length', () => {
+      const plan = buildWasmVtkBrickPlan([4, 4, 4], {
+        strategy: 'fixed',
+        partitions: [8, 8, 8],
+        max3D: 2048,
+        maxPerAxis: 64,
+      });
+      expect(plan.vtkPartitions).toEqual([4, 4, 4]);
     });
 
     it('clamps target strategy to maxPerAxis', () => {
@@ -90,7 +133,7 @@ describe('volumeTextureBrickWasm', () => {
       expect(uploads[0].brickIndex).toBe(0);
       expect(uploads[1].brickIndex).toBe(1);
       expect(uploads[0].localExtent[0]).toBe(1400);
-      expect(uploads[1].localExtent[0]).toBe(0); // 1450 - 1450
+      expect(uploads[1].localExtent[0]).toBe(0); // 1449 - 1449
     });
   });
 });

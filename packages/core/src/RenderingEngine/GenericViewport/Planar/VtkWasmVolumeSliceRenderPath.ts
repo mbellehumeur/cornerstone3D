@@ -2,7 +2,7 @@ import { Events, ViewportStatus, ViewportType } from '../../../enums';
 import eventTarget from '../../../eventTarget';
 import triggerEvent from '../../../utilities/triggerEvent';
 import uuidv4 from '../../../utilities/uuidv4';
-import type { IImageVolume } from '../../../types';
+import type { IImageVolume, VOIRange } from '../../../types';
 import type {
   DataAddOptions,
   LoadedData,
@@ -14,6 +14,7 @@ import type {
   PlanarViewState,
   PlanarDataPresentation,
   PlanarPayload,
+  PlanarResolvedICamera,
   PlanarViewportRenderContext,
 } from './PlanarViewportTypes';
 import { triggerPlanarVolumeNewImage } from './planarImageEvents';
@@ -23,6 +24,7 @@ import {
   createVtkWasmViewportHandle,
   resizeVtkWasmCanvas,
   syncVtkWasmRenderWindowSize,
+  type VtkWasmObject,
   type VtkWasmViewportHandle,
 } from '../vtkWasmRuntime';
 import {
@@ -33,6 +35,7 @@ import { getVolumeScalarArray } from '../webgpuMapperImageData';
 import type { WasmVtkVolumeBrickPlan } from '../../helpers/volumeTextureBrickWasm';
 
 export const VTK_WASM_VOLUME_RENDER_MODE = 'vtkWasmVolume';
+export const VTK_WASM_PLANAR_CANVAS_CLASS = 'vtk-wasm-planar-canvas';
 
 type PlanarVtkWasmVolumeSliceRendering = {
   renderMode: typeof VTK_WASM_VOLUME_RENDER_MODE;
@@ -45,7 +48,7 @@ type PlanarVtkWasmVolumeSliceRendering = {
   mapper: unknown;
   currentImageIdIndex: number;
   maxImageIdIndex: number;
-  defaultVOIRange: undefined;
+  defaultVOIRange: VOIRange | undefined;
   dataPresentation: PlanarDataPresentation | undefined;
   brickPlan: WasmVtkVolumeBrickPlan;
   binding: VtkWasmVolumeBinding;
@@ -58,29 +61,51 @@ function asProjectionRendering(
   return rendering as unknown as PlanarRendering;
 }
 
+async function invoke(
+  target: VtkWasmObject | undefined,
+  method: string,
+  ...args: unknown[]
+): Promise<unknown> {
+  const fn = target?.[method];
+  if (typeof fn !== 'function') {
+    return undefined;
+  }
+  return await (fn as (...a: unknown[]) => unknown).apply(target, args);
+}
+
+function resolveVolumeVoiRange(
+  imageVolume: IImageVolume
+): VOIRange | undefined {
+  const voxelManager = imageVolume.voxelManager as
+    | { getRange?: () => number[] }
+    | undefined;
+  const scalarRange = voxelManager?.getRange?.();
+  if (
+    scalarRange?.length === 2 &&
+    Number.isFinite(scalarRange[0]) &&
+    Number.isFinite(scalarRange[1]) &&
+    scalarRange[1] > scalarRange[0]
+  ) {
+    return { lower: scalarRange[0], upper: scalarRange[1] };
+  }
+  return undefined;
+}
+
 /**
- * Planar MPR render path backed by vtk.wasm WebGL + VTK XYZ partition bricks.
+ * Planar MPR render path backed by vtk.wasm WebGL.
  * @internal
  */
 export class VtkWasmVolumeSliceRenderPath
   implements RenderPath<PlanarViewportRenderContext>
 {
   private handle?: VtkWasmViewportHandle;
-  private renderWindow?: ReturnType<
-    NonNullable<VtkWasmViewportHandle['vtk']['vtkRenderWindow']>
-  >;
-  private renderer?: ReturnType<
-    NonNullable<VtkWasmViewportHandle['vtk']['vtkRenderer']>
-  >;
-  private mapper?: ReturnType<
-    NonNullable<VtkWasmViewportHandle['vtk']['vtkImageResliceMapper']>
-  >;
-  private actor?: ReturnType<
-    NonNullable<VtkWasmViewportHandle['vtk']['vtkImageSlice']>
-  >;
-  private slicePlane?: ReturnType<
-    NonNullable<VtkWasmViewportHandle['vtk']['vtkPlane']>
-  >;
+  private renderWindow?: VtkWasmObject;
+  private renderer?: VtkWasmObject;
+  private mapper?: VtkWasmObject;
+  private actor?: VtkWasmObject;
+  private slicePlane?: VtkWasmObject;
+  private imageProperty?: VtkWasmObject;
+  private binding?: VtkWasmVolumeBinding;
 
   async addData(
     ctx: PlanarViewportRenderContext,
@@ -95,7 +120,7 @@ export class VtkWasmVolumeSliceRenderPath
 
     const handle = await createVtkWasmViewportHandle(
       ctx.viewport.element,
-      'vtk-wasm-planar-canvas'
+      VTK_WASM_PLANAR_CANVAS_CLASS
     );
     this.handle = handle;
     const [canvasW, canvasH] = resizeVtkWasmCanvas(
@@ -122,6 +147,7 @@ export class VtkWasmVolumeSliceRenderPath
       imageVolume,
       handle.session.typedArrayInterface
     );
+    this.binding = binding;
     const alreadyLoaded = Boolean(
       (imageVolume as { loadStatus?: { loaded?: boolean } }).loadStatus?.loaded
     );
@@ -132,42 +158,30 @@ export class VtkWasmVolumeSliceRenderPath
     const renderWindow = vtk.vtkRenderWindow({
       canvasSelector: handle.canvasKey,
       size: [canvasW, canvasH],
-    });
-    await syncVtkWasmRenderWindowSize(
-      renderWindow as Parameters<typeof syncVtkWasmRenderWindowSize>[0],
-      canvasW,
-      canvasH
-    );
-    const renderer = vtk.vtkRenderer();
-    const mapper = vtk.vtkImageResliceMapper();
-    const actor = vtk.vtkImageSlice();
-    const slicePlane = vtk.vtkPlane();
+    }) as VtkWasmObject;
+    await syncVtkWasmRenderWindowSize(renderWindow, canvasW, canvasH);
+    const renderer = vtk.vtkRenderer() as VtkWasmObject;
+    const mapper = vtk.vtkImageResliceMapper() as VtkWasmObject;
+    const actor = vtk.vtkImageSlice() as VtkWasmObject;
+    const slicePlane = vtk.vtkPlane() as VtkWasmObject;
 
-    await Promise.resolve(
-      (renderWindow.addRenderer as ((r: unknown) => unknown) | undefined)?.(
-        renderer
-      )
-    );
-    await Promise.resolve(
-      (mapper.setInputData as ((d: unknown) => unknown) | undefined)?.(
-        binding.imageData
-      )
-    );
-    await Promise.resolve(
-      (mapper.setSlicePlane as ((p: unknown) => unknown) | undefined)?.(
-        slicePlane
-      )
-    );
-    await Promise.resolve(
-      (actor.setMapper as ((m: unknown) => unknown) | undefined)?.(mapper)
-    );
-    await Promise.resolve(
-      (renderer.addActor as ((a: unknown) => unknown) | undefined)?.(actor)
-    );
+    await invoke(renderWindow, 'addRenderer', renderer);
+    await invoke(mapper, 'setInputData', binding.imageData);
+    await invoke(mapper, 'setSlicePlane', slicePlane);
+    await invoke(actor, 'setMapper', mapper);
+    await invoke(renderer, 'addActor', actor);
 
-    // Partitions primarily affect volume ray-cast; apply when mapper supports it
-    // so MPR and Volume3D share the same brick plan ABI.
-    await binding.applyPartitions(mapper);
+    const imageProperty = (await invoke(actor, 'getProperty')) as
+      | VtkWasmObject
+      | undefined;
+    this.imageProperty = imageProperty ?? (actor.property as VtkWasmObject);
+
+    const defaultVOIRange = resolveVolumeVoiRange(imageVolume);
+    if (defaultVOIRange) {
+      await this.applyVoiRange(defaultVOIRange);
+    }
+
+    // SetPartitions is volume ray-cast only; vtkImageResliceMapper has no such API.
 
     this.renderWindow = renderWindow;
     this.renderer = renderer;
@@ -176,14 +190,8 @@ export class VtkWasmVolumeSliceRenderPath
     this.slicePlane = slicePlane;
 
     ctx.display.activateRenderMode(VTK_WASM_VOLUME_RENDER_MODE);
-
-    const uploadAndPresent = () => {
-      void Promise.resolve(binding.refreshScalars()).then((ok) => {
-        if (ok) {
-          ctx.display.renderNow();
-        }
-      });
-    };
+    handle.canvas.style.visibility = 'visible';
+    handle.canvas.style.display = 'block';
 
     const rendering: PlanarVtkWasmVolumeSliceRendering = {
       renderMode: VTK_WASM_VOLUME_RENDER_MODE,
@@ -196,23 +204,48 @@ export class VtkWasmVolumeSliceRenderPath
       mapper: mapper as never,
       currentImageIdIndex: payload.initialImageIdIndex ?? 0,
       maxImageIdIndex: payload.imageIds.length - 1,
-      defaultVOIRange: undefined,
+      defaultVOIRange,
       dataPresentation: undefined,
       brickPlan: binding.brickPlan,
       binding,
-      removeStreamingSubscriptions: subscribeToVolumeEvents(
-        payload.volumeId,
-        (eventType) => {
-          if (eventType === Events.IMAGE_VOLUME_LOADING_COMPLETED) {
-            uploadAndPresent();
+    };
+
+    const uploadAndPresent = () => {
+      void Promise.resolve(binding.refreshScalars()).then(async (ok) => {
+        if (!ok) {
+          return;
+        }
+        if (!rendering.defaultVOIRange) {
+          const range = resolveVolumeVoiRange(imageVolume);
+          if (range) {
+            rendering.defaultVOIRange = range;
+            await this.applyVoiRange(range);
           }
         }
-      ),
+        await this.syncFromViewState(ctx, rendering, data.id);
+        ctx.display.renderNow();
+      });
     };
+
+    rendering.removeStreamingSubscriptions = subscribeToVolumeEvents(
+      payload.volumeId,
+      (eventType) => {
+        if (eventType === Events.IMAGE_VOLUME_LOADING_COMPLETED) {
+          uploadAndPresent();
+        }
+      }
+    );
 
     imageVolume.load?.(() => {
       uploadAndPresent();
     });
+
+    // Initial camera + slice plane so the first present is not an empty scene.
+    await this.syncFromViewState(ctx, rendering, data.id);
+
+    if (binding.hasScalars()) {
+      await invoke(renderWindow, 'render');
+    }
 
     triggerPlanarVolumeNewImage(ctx, {
       camera: ctx.viewport.getViewState(),
@@ -228,48 +261,134 @@ export class VtkWasmVolumeSliceRenderPath
         rendering.dataPresentation = props as
           | PlanarDataPresentation
           | undefined;
+        const voi =
+          rendering.dataPresentation?.voiRange ?? rendering.defaultVOIRange;
+        if (voi) {
+          void this.applyVoiRange(voi).then(() => this.render(ctx, data.id));
+        }
       },
       applyViewState: (camera) => {
-        this.applyViewState(ctx, rendering, data.id, camera);
+        void this.syncFromViewState(
+          ctx,
+          rendering,
+          data.id,
+          camera as PlanarViewState | undefined
+        ).then(() => this.render(ctx, data.id));
       },
       getFrameOfReferenceUID: () =>
         rendering.imageVolume.metadata?.FrameOfReferenceUID,
       getImageData: () => buildPlanarVolumeImageData(rendering.imageVolume),
-      render: () => this.render(ctx, data.id),
+      render: () => {
+        void this.renderAsync(ctx, data.id);
+      },
       resize: () => {
         if (this.handle) {
           const [w, h] = resizeVtkWasmCanvas(
             this.handle.canvas,
             ctx.viewport.element
           );
-          void syncVtkWasmRenderWindowSize(
-            this.renderWindow as Parameters<
-              typeof syncVtkWasmRenderWindowSize
-            >[0],
-            w,
-            h
-          ).then(() => this.render(ctx, data.id));
+          void syncVtkWasmRenderWindowSize(this.renderWindow, w, h).then(
+            async () => {
+              await this.syncFromViewState(ctx, rendering, data.id);
+              await this.renderAsync(ctx, data.id);
+            }
+          );
           return;
         }
-        this.render(ctx, data.id);
+        void this.renderAsync(ctx, data.id);
       },
       removeData: () => {
         rendering.removeStreamingSubscriptions?.();
         this.handle?.dispose();
         this.handle = undefined;
+        this.renderWindow = undefined;
+        this.renderer = undefined;
+        this.mapper = undefined;
+        this.actor = undefined;
+        this.slicePlane = undefined;
+        this.imageProperty = undefined;
+        this.binding = undefined;
       },
     };
   }
 
-  private applyViewState(
+  private async applyVoiRange(voiRange: VOIRange): Promise<void> {
+    const property = this.imageProperty;
+    if (!property) {
+      return;
+    }
+    const window = voiRange.upper - voiRange.lower;
+    const level = (voiRange.upper + voiRange.lower) / 2;
+    if (!(window > 0) || !Number.isFinite(level)) {
+      return;
+    }
+    await invoke(property, 'setColorWindow', window);
+    await invoke(property, 'setColorLevel', level);
+    property.$set?.({ colorWindow: window, colorLevel: level });
+  }
+
+  private async applyCameraToWasm(
+    camera: PlanarResolvedICamera
+  ): Promise<void> {
+    const renderer = this.renderer;
+    if (!renderer) {
+      return;
+    }
+
+    let cam = renderer.activeCamera as VtkWasmObject | undefined;
+    if (!cam) {
+      cam = (await invoke(renderer, 'getActiveCamera')) as
+        | VtkWasmObject
+        | undefined;
+    }
+    if (!cam) {
+      await invoke(renderer, 'resetCamera');
+      await invoke(renderer, 'resetCameraClippingRange');
+      return;
+    }
+
+    await invoke(cam, 'setParallelProjection', 1);
+    if (camera.viewUp) {
+      await invoke(cam, 'setViewUp', ...camera.viewUp);
+    }
+    if (camera.focalPoint) {
+      await invoke(cam, 'setFocalPoint', ...camera.focalPoint);
+    }
+    if (camera.position) {
+      await invoke(cam, 'setPosition', ...camera.position);
+    }
+    if (typeof camera.parallelScale === 'number') {
+      await invoke(cam, 'setParallelScale', camera.parallelScale);
+    }
+    // Do not call setDirectionOfProjection — vtkOpenGLCamera in vtk-wasm has
+    // no such method; position + focalPoint imply the look direction.
+
+    cam.$set?.({
+      parallelProjection: 1,
+      ...(camera.viewUp ? { viewUp: camera.viewUp } : {}),
+      ...(camera.focalPoint ? { focalPoint: camera.focalPoint } : {}),
+      ...(camera.position ? { position: camera.position } : {}),
+      ...(typeof camera.parallelScale === 'number'
+        ? { parallelScale: camera.parallelScale }
+        : {}),
+    });
+
+    await invoke(renderer, 'resetCameraClippingRange');
+  }
+
+  private async syncFromViewState(
     ctx: PlanarViewportRenderContext,
     rendering: PlanarVtkWasmVolumeSliceRendering,
     dataId: string,
-    cameraInput: unknown
-  ): void {
-    const camera = cameraInput as PlanarViewState | undefined;
+    cameraInput?: PlanarViewState
+  ): Promise<void> {
     ctx.display.activateRenderMode(VTK_WASM_VOLUME_RENDER_MODE);
+    if (this.handle?.canvas) {
+      this.handle.canvas.style.visibility = 'visible';
+      this.handle.canvas.style.display = 'block';
+    }
 
+    const camera = cameraInput ?? ctx.viewport.getViewState();
     const projection = resolvePlanarRenderPathProjection({
       ctx,
       dataId,
@@ -280,25 +399,40 @@ export class VtkWasmVolumeSliceRenderPath
       return;
     }
 
-    const cam = projection.activeSourceICamera;
+    const cam = projection.isSourceBinding
+      ? projection.resolvedICamera
+      : projection.activeSourceICamera;
+
     if (cam.focalPoint && cam.viewPlaneNormal) {
-      (this.slicePlane.setOrigin as ((...o: number[]) => void) | undefined)?.(
-        ...cam.focalPoint
-      );
-      (this.slicePlane.setNormal as ((...n: number[]) => void) | undefined)?.(
-        ...cam.viewPlaneNormal
-      );
+      await invoke(this.slicePlane, 'setOrigin', ...cam.focalPoint);
+      await invoke(this.slicePlane, 'setNormal', ...cam.viewPlaneNormal);
+      this.slicePlane.$set?.({
+        origin: cam.focalPoint,
+        normal: cam.viewPlaneNormal,
+      });
+    }
+
+    if (projection.isSourceBinding) {
+      await this.applyCameraToWasm(projection.resolvedICamera);
+    } else {
+      await this.applyCameraToWasm(projection.activeSourceICamera);
     }
 
     rendering.currentImageIdIndex = projection.currentImageIdIndex;
     rendering.maxImageIdIndex = projection.maxImageIdIndex;
   }
 
-  private render(ctx: PlanarViewportRenderContext, dataId: string): void {
+  private async renderAsync(
+    ctx: PlanarViewportRenderContext,
+    dataId: string
+  ): Promise<void> {
     if (!ctx.viewport.isCurrentDataId(dataId) || !this.renderWindow) {
       return;
     }
-    (this.renderWindow.render as (() => void) | undefined)?.();
+    if (!this.binding?.hasScalars()) {
+      return;
+    }
+    await invoke(this.renderWindow, 'render');
     ctx.display.markRendered();
     triggerEvent(ctx.viewport.element, Events.IMAGE_RENDERED, {
       element: ctx.viewport.element,
@@ -306,6 +440,10 @@ export class VtkWasmVolumeSliceRenderPath
       renderingEngineId: ctx.renderingEngineId,
       viewportStatus: ViewportStatus.RENDERED,
     });
+  }
+
+  private render(ctx: PlanarViewportRenderContext, dataId: string): void {
+    void this.renderAsync(ctx, dataId);
   }
 }
 

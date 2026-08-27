@@ -117,11 +117,18 @@ function resolveAxisCount(
   if (n < minForFit) {
     n = clampInt(minForFit, minPerAxis, maxPerAxis);
   }
+  // Never more partitions than voxels on this axis (SetPartitions(8) on dim=4 is invalid).
+  if (dim > 0) {
+    n = Math.min(n, Math.max(1, Math.floor(dim)));
+  }
   return n;
 }
 
 /**
- * Split `dim` into `n` contiguous inclusive ranges covering 0..dim-1.
+ * Split `dim` into `n` inclusive ranges covering 0..dim-1.
+ * Matches VTK `vtkVolumeTexture::SplitVolume` for point-data extent [0, dim-1]:
+ *   delta = (dim - 1) / n
+ *   block i: [floor(i*delta), floor((i+1)*delta)]
  */
 export function splitAxisExtents(
   dim: number,
@@ -132,12 +139,18 @@ export function splitAxisExtents(
   if (safeDim <= 0) {
     return [[0, -1]];
   }
+  if (safeDim === 1 || parts === 1) {
+    return [[0, safeDim - 1]];
+  }
+  const delta = (safeDim - 1) / parts;
   const ranges: Array<[number, number]> = [];
   for (let p = 0; p < parts; p++) {
-    const start = Math.floor((p * safeDim) / parts);
-    const end = Math.floor(((p + 1) * safeDim) / parts) - 1;
+    const start = Math.floor(p * delta);
+    const end = Math.floor((p + 1) * delta);
     ranges.push([start, Math.max(start, end)]);
   }
+  // Ensure last block ends at dim-1 (float edge cases).
+  ranges[ranges.length - 1][1] = safeDim - 1;
   return ranges;
 }
 
