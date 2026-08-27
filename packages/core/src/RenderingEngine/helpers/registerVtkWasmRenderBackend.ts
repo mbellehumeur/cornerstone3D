@@ -8,10 +8,14 @@ import {
   VtkWasmVolumeSlicePath,
   VTK_WASM_VOLUME_RENDER_MODE,
 } from '../GenericViewport/Planar/VtkWasmVolumeSliceRenderPath';
-import { isVtkWasmAvailable } from '../GenericViewport/vtkWasmRuntime';
+import {
+  isVtkWasmAvailable,
+  isVtkWasmWebgpuAvailable,
+} from '../GenericViewport/vtkWasmRuntime';
 
 export {
   isVtkWasmAvailable,
+  isVtkWasmWebgpuAvailable,
   VTK_WASM_VOLUME_RENDER_MODE,
   VTK_WASM_IMAGE_RENDER_MODE,
 };

@@ -27,6 +27,7 @@ import {
   resizeVtkWasmCanvas,
   syncVtkWasmRenderWindowSize,
   type VtkWasmObject,
+  type VtkWasmRenderingBackend,
   type VtkWasmViewportHandle,
 } from '../vtkWasmRuntime';
 import {
@@ -45,15 +46,35 @@ import {
 } from './vtkWasmVolume3DRegistry';
 
 export const VTK_WASM_VOLUME_3D_RENDER_MODE = 'vtkWasmVolume3d';
+export const VTK_WASM_WEBGPU_VOLUME_3D_RENDER_MODE = 'vtkWasmWebgpuVolume3d';
+
+export type VtkWasmVolume3DRenderModeId =
+  | typeof VTK_WASM_VOLUME_3D_RENDER_MODE
+  | typeof VTK_WASM_WEBGPU_VOLUME_3D_RENDER_MODE;
+
+export function isVtkWasmVolume3DRenderMode(
+  renderMode: unknown
+): renderMode is VtkWasmVolume3DRenderModeId {
+  return (
+    renderMode === VTK_WASM_VOLUME_3D_RENDER_MODE ||
+    renderMode === VTK_WASM_WEBGPU_VOLUME_3D_RENDER_MODE
+  );
+}
+
 const DEFAULT_VTK_WASM_PRESET_NAME = 'CT-Bone';
 
 type Volume3DVtkWasmRendering = {
-  renderMode: typeof VTK_WASM_VOLUME_3D_RENDER_MODE;
+  renderMode: VtkWasmVolume3DRenderModeId;
   actorEntryUID: string;
   imageVolume: IImageVolume;
   brickPlan: WasmVtkVolumeBrickPlan;
   binding: VtkWasmVolumeBinding;
   removeStreamingSubscriptions?: () => void;
+};
+
+type VtkWasmVolume3DRenderPathOptions = {
+  rendering: VtkWasmRenderingBackend;
+  renderMode: VtkWasmVolume3DRenderModeId;
 };
 
 async function invoke(
@@ -69,19 +90,26 @@ async function invoke(
 }
 
 /**
- * Volume3D DVR path using vtk.wasm WebGL + mapper.SetPartitions from
+ * Volume3D DVR path using vtk.wasm (WebGL or WebGPU) + mapper.SetPartitions from
  * volumeTextureBrickWasm (VTK XYZ bricks, not CS3D Z-slabs).
  * @internal
  */
 export class VtkWasmVolume3DRenderPath
   implements RenderPath<Volume3DViewportRenderContext>
 {
+  private readonly renderingBackend: VtkWasmRenderingBackend;
+  private readonly renderMode: VtkWasmVolume3DRenderModeId;
   private handle?: VtkWasmViewportHandle;
   private renderWindow?: VtkWasmObject;
   private wasmRenderer?: VtkWasmObject;
   private volumeMapper?: VtkWasmObject;
   private volume?: VtkWasmObject;
   private binding?: VtkWasmVolumeBinding;
+
+  constructor(options?: Partial<VtkWasmVolume3DRenderPathOptions>) {
+    this.renderingBackend = options?.rendering ?? 'webgl';
+    this.renderMode = options?.renderMode ?? VTK_WASM_VOLUME_3D_RENDER_MODE;
+  }
 
   async addData(
     ctx: Volume3DViewportRenderContext,
@@ -93,7 +121,8 @@ export class VtkWasmVolume3DRenderPath
 
     const handle = await createVtkWasmViewportHandle(
       ctx.viewport.element,
-      'vtk-wasm-volume3d-canvas'
+      'vtk-wasm-volume3d-canvas',
+      { rendering: this.renderingBackend }
     );
     this.handle = handle;
     const [canvasW, canvasH] = resizeVtkWasmCanvas(
@@ -188,7 +217,7 @@ export class VtkWasmVolume3DRenderPath
       setWebGPUViewportCanvasVisible(webgpuWindow, false);
     }
 
-    ctx.display.activateRenderMode(VTK_WASM_VOLUME_3D_RENDER_MODE);
+    ctx.display.activateRenderMode(this.renderMode);
     handle.canvas.style.visibility = 'visible';
 
     const initialCamera = getInitialVolume3DCamera(ctx, imageVolume);
@@ -222,7 +251,7 @@ export class VtkWasmVolume3DRenderPath
     };
 
     const rendering: Volume3DVtkWasmRendering = {
-      renderMode: VTK_WASM_VOLUME_3D_RENDER_MODE,
+      renderMode: this.renderMode,
       actorEntryUID: uuidv4(),
       imageVolume,
       brickPlan: binding.brickPlan,
@@ -404,7 +433,40 @@ export class VtkWasmVolume3DPath
   }
 
   createRenderPath() {
-    return new VtkWasmVolume3DRenderPath();
+    return new VtkWasmVolume3DRenderPath({
+      rendering: 'webgl',
+      renderMode: VTK_WASM_VOLUME_3D_RENDER_MODE,
+    });
+  }
+
+  selectContext(rootContext: Volume3DViewportRenderContext) {
+    return rootContext;
+  }
+}
+
+/** @internal */
+export class VtkWasmWebgpuVolume3DPath
+  implements
+    RenderPathDefinition<
+      Volume3DViewportRenderContext,
+      Volume3DViewportRenderContext
+    >
+{
+  readonly id = 'volume3d:vtk-wasm-webgpu-volume';
+  readonly type = ViewportType.VOLUME_3D_NEXT;
+
+  matches(data: LoadedData, options: DataAddOptions): boolean {
+    return (
+      data.type === 'image' &&
+      options.renderMode === VTK_WASM_WEBGPU_VOLUME_3D_RENDER_MODE
+    );
+  }
+
+  createRenderPath() {
+    return new VtkWasmVolume3DRenderPath({
+      rendering: 'webgpu',
+      renderMode: VTK_WASM_WEBGPU_VOLUME_3D_RENDER_MODE,
+    });
   }
 
   selectContext(rootContext: Volume3DViewportRenderContext) {

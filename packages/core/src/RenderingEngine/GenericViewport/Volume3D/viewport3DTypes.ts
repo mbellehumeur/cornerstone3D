@@ -34,6 +34,7 @@ export type Volume3DRenderMode =
   | 'mviewVolume3d'
   | 'slicerLiveVolume3d'
   | 'vtkWasmVolume3d'
+  | 'vtkWasmWebgpuVolume3d'
   | 'vtkGeometry3d';
 export type Volume3DRequestedRenderMode = Volume3DRenderMode | 'auto';
 
@@ -59,7 +60,8 @@ export interface Volume3DVolumePayload {
     | 'webgpuVolume3d'
     | 'mviewVolume3d'
     | 'slicerLiveVolume3d'
-    | 'vtkWasmVolume3d';
+    | 'vtkWasmVolume3d'
+    | 'vtkWasmWebgpuVolume3d';
   volumeId: string;
 }
 
@@ -178,7 +180,7 @@ export type Volume3DSlicerLiveRendering = MountedRendering<{
 
 /** @internal */
 export type Volume3DVtkWasmRendering = MountedRendering<{
-  renderMode: 'vtkWasmVolume3d';
+  renderMode: 'vtkWasmVolume3d' | 'vtkWasmWebgpuVolume3d';
   actorEntryUID: string;
   imageVolume: IImageVolume;
   removeStreamingSubscriptions?: () => void;

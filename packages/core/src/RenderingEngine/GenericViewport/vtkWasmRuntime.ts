@@ -1,5 +1,6 @@
 import { getConfiguration } from '../../init';
 import { peerImport } from '../../init';
+import { isWebGPURenderingAvailable } from './Planar/webgpuViewportRenderWindow';
 
 export type VtkWasmNamespace = {
   vtkRenderWindow?: (props?: object) => VtkWasmObject;
@@ -65,15 +66,28 @@ export type VtkWasmRuntime = {
   dispose: () => void;
 };
 
+/** Kitware loadAsync rendering backend. */
+export type VtkWasmRenderingBackend = 'webgl' | 'webgpu';
+
 type LoadAsync = (options: {
   url?: string;
   urlIsGzip?: boolean;
-  rendering?: 'webgl' | 'webgpu';
+  rendering?: VtkWasmRenderingBackend;
   exec?: 'sync' | 'async';
 }) => Promise<VtkWasmRuntime>;
 
-let runtimePromise: Promise<VtkWasmRuntime> | null = null;
-let cachedRuntime: VtkWasmRuntime | null = null;
+type VtkWasmLoadOptions = {
+  url: string;
+  urlIsGzip: boolean;
+  rendering: VtkWasmRenderingBackend;
+  exec: 'sync' | 'async';
+};
+
+/** Runtimes are cached per (url, rendering, exec) so WebGL and WebGPU coexist. */
+const runtimePromises = new Map<string, Promise<VtkWasmRuntime>>();
+const cachedRuntimes = new Map<string, VtkWasmRuntime>();
+
+let webgpuAvailabilityPromise: Promise<boolean> | null = null;
 
 const DEFAULT_VTK_WASM_BUNDLE_URL =
   'https://raw.githack.com/Kitware/vtk-wasm/dist/latest/vtk-wasm32-emscripten.tar.gz';
@@ -88,12 +102,13 @@ export function getVtkWasmBundleUrl(): string {
   );
 }
 
-function getVtkWasmLoadOptions(): {
-  url: string;
-  urlIsGzip: boolean;
-  rendering: 'webgl';
-  exec: 'sync';
-} {
+function runtimeCacheKey(options: VtkWasmLoadOptions): string {
+  return `${options.url}|${options.rendering}|${options.exec}`;
+}
+
+function getVtkWasmLoadOptions(
+  rendering: VtkWasmRenderingBackend = 'webgl'
+): VtkWasmLoadOptions {
   const cfg = getConfiguration()?.rendering?.vtkWasm;
   const url = cfg?.url ?? DEFAULT_SAME_ORIGIN_VTK_WASM_TAR;
   // Directory URLs must not be treated as gzip tar (kitware default is true).
@@ -102,8 +117,9 @@ function getVtkWasmLoadOptions(): {
   return {
     url,
     urlIsGzip,
-    rendering: 'webgl',
-    exec: 'sync',
+    rendering,
+    // WebGPU requires async method execution (JSPI).
+    exec: rendering === 'webgpu' ? 'async' : 'sync',
   };
 }
 
@@ -118,6 +134,31 @@ export async function isVtkWasmAvailable(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * True when vtk-wasm can load with `rendering: 'webgpu'` in this browser.
+ * Requires `navigator.gpu` and a successful one-shot WebGPU runtime load
+ * (catches missing JSPI / device failures). Result is cached for the session.
+ */
+export async function isVtkWasmWebgpuAvailable(): Promise<boolean> {
+  if (!isWebGPURenderingAvailable()) {
+    return false;
+  }
+  if (!webgpuAvailabilityPromise) {
+    webgpuAvailabilityPromise = (async () => {
+      try {
+        if (!(await isVtkWasmAvailable())) {
+          return false;
+        }
+        await loadVtkWasmRuntime('webgpu');
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+  }
+  return webgpuAvailabilityPromise;
 }
 
 async function resolveLoadAsync(): Promise<LoadAsync> {
@@ -151,24 +192,31 @@ async function resolveLoadAsync(): Promise<LoadAsync> {
 }
 
 /**
- * Load (or reuse) the vtk.wasm WebGL runtime.
+ * Load (or reuse) the vtk.wasm runtime for the given rendering backend.
  */
-export async function loadVtkWasmRuntime(): Promise<VtkWasmRuntime> {
-  if (cachedRuntime) {
-    return cachedRuntime;
+export async function loadVtkWasmRuntime(
+  rendering: VtkWasmRenderingBackend = 'webgl'
+): Promise<VtkWasmRuntime> {
+  const options = getVtkWasmLoadOptions(rendering);
+  const key = runtimeCacheKey(options);
+  const cached = cachedRuntimes.get(key);
+  if (cached) {
+    return cached;
   }
-  if (!runtimePromise) {
-    runtimePromise = (async () => {
+  let promise = runtimePromises.get(key);
+  if (!promise) {
+    promise = (async () => {
       const loadAsync = await resolveLoadAsync();
-      const runtime = await loadAsync(getVtkWasmLoadOptions());
-      cachedRuntime = runtime;
+      const runtime = await loadAsync(options);
+      cachedRuntimes.set(key, runtime);
       return runtime;
     })().catch((err) => {
-      runtimePromise = null;
+      runtimePromises.delete(key);
       throw err;
     });
+    runtimePromises.set(key, promise);
   }
-  return runtimePromise;
+  return promise;
 }
 
 export type VtkWasmViewportHandle = {
@@ -180,14 +228,21 @@ export type VtkWasmViewportHandle = {
   dispose: () => void;
 };
 
+export type CreateVtkWasmViewportHandleOptions = {
+  rendering?: VtkWasmRenderingBackend;
+};
+
 /**
- * Create a standalone WebGL session bound to an overlay canvas in `element`.
+ * Create a standalone session bound to an overlay canvas in `element`.
+ * `options.rendering` selects the Kitware loadAsync backend (webgl|webgpu).
  */
 export async function createVtkWasmViewportHandle(
   element: HTMLElement,
-  canvasClassName = 'vtk-wasm-canvas'
+  canvasClassName = 'vtk-wasm-canvas',
+  options?: CreateVtkWasmViewportHandleOptions
 ): Promise<VtkWasmViewportHandle> {
-  const runtime = await loadVtkWasmRuntime();
+  const rendering = options?.rendering ?? 'webgl';
+  const runtime = await loadVtkWasmRuntime(rendering);
   const canvas = document.createElement('canvas');
   canvas.className = canvasClassName;
   canvas.style.position = 'absolute';
@@ -265,6 +320,7 @@ export async function syncVtkWasmRenderWindowSize(
 
 /** @internal test helper */
 export function __resetVtkWasmRuntimeForTests(): void {
-  runtimePromise = null;
-  cachedRuntime = null;
+  runtimePromises.clear();
+  cachedRuntimes.clear();
+  webgpuAvailabilityPromise = null;
 }

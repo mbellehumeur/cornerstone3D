@@ -11,7 +11,11 @@ export {
 export { WEBGPU_VOLUME_3D_RENDER_MODE } from './WebGPUVolume3DRenderPath';
 export { MVIEW_VOLUME_3D_RENDER_MODE } from './MviewVolume3DRenderPath';
 export { SLICERLIVE_VOLUME_3D_RENDER_MODE } from './SlicerLiveVolume3DRenderPath';
-export { VTK_WASM_VOLUME_3D_RENDER_MODE } from './VtkWasmVolume3DRenderPath';
+export {
+  VTK_WASM_VOLUME_3D_RENDER_MODE,
+  VTK_WASM_WEBGPU_VOLUME_3D_RENDER_MODE,
+  isVtkWasmVolume3DRenderMode,
+} from './VtkWasmVolume3DRenderPath';
 export {
   applyMviewVolume3DPreset,
   beginMviewVolume3DInteraction,
