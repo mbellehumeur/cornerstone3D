@@ -35,6 +35,7 @@ import {
   createVtkWasmVolumeBinding,
   type VtkWasmVolumeBinding,
 } from '../vtkWasmVolumeBinding';
+import { setVtkWasmImageDataExtent } from '../vtkWasmImageDataFinalize';
 import type { WasmVtkVolumeBrickPlan } from '../../helpers/volumeTextureBrickWasm';
 import {
   applyViewportPresetToVtkWasmProperty,
@@ -464,7 +465,9 @@ export class VtkWasmVolume3DRenderPath
     }
     const input = binding.getBrickImageDatas?.()?.[0] ?? binding.imageData;
 
-    // If finalize left dims empty, force extent before the mapper samples.
+    // If finalize left dims empty, re-setExtent(array) only — never
+    // $set({ dimensions }) after Int16 attach (float AllocateScalars →
+    // texImage3D bpp mismatch under SetPartitions).
     let dims = await invoke(input, 'getDimensions');
     const dim0 = Array.isArray(dims) ? Number(dims[0]) : 0;
     if (!dim0 && binding.brickPlan?.dimensions) {
@@ -473,10 +476,7 @@ export class VtkWasmVolume3DRenderPath
       console.warn(
         `[vtkWasm] Volume3D forcing ImageData extent=${extent.join(',')} before setInputData`
       );
-      input.$set?.({
-        extent,
-        dimensions: [dx, dy, dz],
-      });
+      await setVtkWasmImageDataExtent(input, extent);
       await invoke(input, 'modified');
       dims = await invoke(input, 'getDimensions');
     }
@@ -495,6 +495,7 @@ export class VtkWasmVolume3DRenderPath
     const parts = binding.brickPlan?.vtkPartitions ?? [1, 1, 1];
     const needsPartitions = parts.some((n) => n > 1);
     if (binding.mode !== 'denseBricks' && needsPartitions) {
+      // applyPartitions verifies Int16 size/type before SetPartitions.
       await binding.applyPartitions(this.volumeMapper);
     }
     // Slightly larger than spacing/6 — avoids undersampling to black on some GPUs.
@@ -641,7 +642,8 @@ export class VtkWasmVolume3DRenderPath
       await invoke(mapper, 'setInputData', imageData);
       await invoke(mapper, 'setScalarModeToUsePointData');
       await invoke(mapper, 'setArrayName', 'Scalars');
-      await invoke(mapper, 'setSampleDistance', this.sampleDistance);
+      const sd = Math.max(this.sampleDistance, 0.5);
+      await invoke(mapper, 'setSampleDistance', sd);
       await invoke(mapper, 'setAutoAdjustSampleDistances', 0);
       await invoke(volume, 'setMapper', mapper);
       await invoke(volume, 'setProperty', property);

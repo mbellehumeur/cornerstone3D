@@ -3,6 +3,7 @@ import {
   buildWasmVtkBrickPlan,
   fullVolumeRegionToBrickUploads,
   shouldUseDenseWasmBricks,
+  wasmPartitionsNeedContiguousBricks,
   type WasmIjkBox,
   type WasmVtkVolumeBrickPlan,
 } from '../helpers/volumeTextureBrickWasm';
@@ -17,6 +18,7 @@ import { bindVtkWasmBrickedVolume } from './vtkWasmBrickedVolumeBinding';
 import {
   finalizeVtkWasmImageDataScalars,
   SCALARS_ARRAY_NAME,
+  verifyVtkWasmImageDataGpuReady,
 } from './vtkWasmImageDataFinalize';
 
 type MarshallableTypedArray =
@@ -611,6 +613,42 @@ export function bindVtkWasmVolume(
     // vtk-wasm Proxies throw TypeError on unknown method/property access when
     // types are loaded — never use typeof/optional-chain probes.
     const [nx, ny, nz] = brickPlan.vtkPartitions;
+    await tryInvokeMapper(mapper, 'setScalarModeToUsePointData');
+    await tryInvokeMapper(mapper, 'setArrayName', SCALARS_ARRAY_NAME);
+
+    if (nx <= 1 && ny <= 1 && nz <= 1) {
+      return;
+    }
+
+    // Gate SetPartitions on Int16 (or source) bpp + dims matching the view.
+    // Float AllocateScalars left active → brick texImage3D requests 4× bytes.
+    const imageDataMeta = imageVolume.imageData?.get?.('numberOfComponents') as
+      | { numberOfComponents?: number }
+      | undefined;
+    const numberOfComponents = Math.max(
+      1,
+      imageDataMeta?.numberOfComponents ?? 1
+    );
+    const expectedValueCount =
+      dimensions[0] * dimensions[1] * dimensions[2] * numberOfComponents;
+    const sourceScalars = getVolumeScalarArray(imageVolume);
+    const expectedBpe =
+      (sourceScalars as { BYTES_PER_ELEMENT?: number } | null)
+        ?.BYTES_PER_ELEMENT ?? 2;
+
+    const ready = await verifyVtkWasmImageDataGpuReady(imageData, {
+      expectedValueCount,
+      expectedBytesPerElement: expectedBpe,
+      typedArrayInterface,
+      liveScalars: scalarsArray,
+    });
+    if (!ready) {
+      console.warn(
+        `[vtkWasm] refusing SetPartitions(${nx},${ny},${nz}) — ImageData not GPU-ready; fix attach/refresh first`
+      );
+      return;
+    }
+
     const setOk = await tryInvokeMapper(mapper, 'setPartitions', nx, ny, nz);
     if (!setOk) {
       try {
@@ -619,8 +657,6 @@ export function bindVtkWasmVolume(
         // ImageResliceMapper and similar have no partitions property.
       }
     }
-    await tryInvokeMapper(mapper, 'setScalarModeToUsePointData');
-    await tryInvokeMapper(mapper, 'setArrayName', SCALARS_ARRAY_NAME);
   };
 
   return {
@@ -638,11 +674,12 @@ export function bindVtkWasmVolume(
 /**
  * Choose dense per-brick pool or single full-AoS upload.
  *
- * Dense is only for volumes that would OOM a contiguous WASM alloc
- * (`shouldUseDenseWasmBricks` / maxScalarBytes). Fixed partition grids still
- * control SetPartitions (single) or the dense brick plan (when over budget) —
- * they must not force dense, or small studies take a broken multi-ImageData
- * present path.
+ * Dense when:
+ * - full AoS would exceed maxScalarBytes, or
+ * - partitions need X/Y splits (WebGL cannot SetPartitions-stride upload;
+ *   see wasmPartitionsNeedContiguousBricks).
+ *
+ * Z-only SetPartitions on a single AoS remains valid under the scalar budget.
  */
 export function createVtkWasmVolumeBinding(
   vtk: VtkWasmNamespace,
@@ -669,11 +706,24 @@ export function createVtkWasmVolumeBinding(
     dimensions[2] *
     bytesPerElement *
     numberOfComponents;
-  const useDense = shouldUseDenseWasmBricks(
+
+  // Plan first so XY-partition WebGL limits can force dense under budget.
+  const planned = buildWasmVtkBrickPlan(dimensions);
+  const overBudget = shouldUseDenseWasmBricks(
     dimensions,
     bytesPerElement,
     numberOfComponents
   );
+  const needsContiguous = wasmPartitionsNeedContiguousBricks(
+    planned.vtkPartitions
+  );
+  const useDense = overBudget || needsContiguous;
+  if (needsContiguous && !overBudget) {
+    console.info(
+      `[vtkWasm] dense bricks required for partitions=${planned.vtkPartitions.join('x')} ` +
+        `(WebGL SetPartitions cannot stride-upload X/Y splits)`
+    );
+  }
 
   const binding = useDense
     ? (bindVtkWasmBrickedVolume(

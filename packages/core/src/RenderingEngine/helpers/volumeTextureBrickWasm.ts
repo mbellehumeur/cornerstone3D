@@ -141,6 +141,21 @@ export function shouldUseDenseWasmBricks(
 }
 
 /**
+ * VTK SetPartitions with X or Y splits uploads via GL_UNPACK_ROW_LENGTH /
+ * UNPACK_IMAGE_HEIGHT into a strided AoS buffer. WebGL's texImage3D TypedArray
+ * size check rejects that ("ArrayBufferView not big enough") even when Int16
+ * dims are correct. Z-only partitions are contiguous and safe with SetPartitions;
+ * any nx>1 or ny>1 requires contiguous per-brick ImageData (dense binding).
+ */
+export function wasmPartitionsNeedContiguousBricks(
+  partitions: readonly [number, number, number] | number[]
+): boolean {
+  const nx = Math.max(1, Math.floor(Number(partitions[0]) || 1));
+  const ny = Math.max(1, Math.floor(Number(partitions[1]) || 1));
+  return nx > 1 || ny > 1;
+}
+
+/**
  * Partitions needed on one axis so each brick size ≤ max3D.
  */
 export function minimumPartitionsForAxis(dim: number, max3D: number): number {

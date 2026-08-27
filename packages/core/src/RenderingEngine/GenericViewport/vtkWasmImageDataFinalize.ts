@@ -54,6 +54,154 @@ async function resolveScalars(
   return undefined;
 }
 
+/**
+ * vtk-wasm SetExtent takes a single Int32[6] array (see vtkCartesianGrid.json),
+ * not six separate args. Prefer camelCase then PascalCase.
+ */
+export async function setVtkWasmImageDataExtent(
+  imageData: VtkWasmObject,
+  extentArr: number[]
+): Promise<void> {
+  const plain = [
+    extentArr[0] | 0,
+    extentArr[1] | 0,
+    extentArr[2] | 0,
+    extentArr[3] | 0,
+    extentArr[4] | 0,
+    extentArr[5] | 0,
+  ];
+  imageData.$set?.({ extent: plain });
+
+  try {
+    const setExtent = (imageData as Record<string, unknown>).setExtent;
+    if (typeof setExtent === 'function') {
+      await callMaybeAsync(
+        (setExtent as (extent: number[]) => unknown).call(imageData, plain)
+      );
+      return;
+    }
+    const SetExtent = (imageData as Record<string, unknown>).SetExtent;
+    if (typeof SetExtent === 'function') {
+      await callMaybeAsync(
+        (SetExtent as (extent: number[]) => unknown).call(imageData, plain)
+      );
+    }
+  } catch (error) {
+    console.warn('[vtkWasm] setExtent(array) failed', error);
+  }
+}
+
+function parseDims3(dims: unknown): [number, number, number] {
+  if (Array.isArray(dims) && dims.length >= 3) {
+    return [Number(dims[0]), Number(dims[1]), Number(dims[2])];
+  }
+  if (dims && typeof dims === 'object') {
+    const o = dims as { 0?: number; 1?: number; 2?: number };
+    return [Number(o[0] ?? 0), Number(o[1] ?? 0), Number(o[2] ?? 0)];
+  }
+  return [0, 0, 0];
+}
+
+/**
+ * True when live ImageData dims × comps match the attached typed view and
+ * scalar bpp matches the source element size (blocks float texImage3D vs Int16).
+ */
+export async function verifyVtkWasmImageDataGpuReady(
+  imageData: VtkWasmObject,
+  options: {
+    expectedValueCount: number;
+    expectedBytesPerElement: number;
+    typedArrayInterface?: VtkWasmTypedArrayInterface;
+    liveScalars?: VtkWasmObject;
+  }
+): Promise<boolean> {
+  const {
+    expectedValueCount,
+    expectedBytesPerElement,
+    typedArrayInterface,
+    liveScalars: liveScalarsOpt,
+  } = options;
+
+  const dimsRaw =
+    (await callMaybeAsync(
+      (imageData.getDimensions as (() => unknown) | undefined)?.()
+    )) ?? imageData.dimensions;
+  const [dx, dy, dz] = parseDims3(dimsRaw);
+  if (!dx || !dy || !dz) {
+    console.warn(
+      `[vtkWasm] GPU-ready check: empty dims=${JSON.stringify(dimsRaw)}`
+    );
+    return false;
+  }
+
+  const pointData = await getPointData(imageData);
+  const liveScalars = liveScalarsOpt ?? (await resolveScalars(pointData));
+  if (!liveScalars || !typedArrayInterface?.toJSTypedArray) {
+    console.warn('[vtkWasm] GPU-ready check: no live scalars view');
+    return false;
+  }
+
+  let view: ArrayBufferView | undefined;
+  try {
+    view = typedArrayInterface.toJSTypedArray(liveScalars);
+  } catch (error) {
+    console.warn('[vtkWasm] GPU-ready check: toJSTypedArray failed', error);
+    return false;
+  }
+  const viewLen = (view as unknown as { length?: number } | undefined)?.length;
+  if (!view || typeof viewLen !== 'number') {
+    console.warn('[vtkWasm] GPU-ready check: invalid typed view');
+    return false;
+  }
+  const length = viewLen;
+  if (length !== expectedValueCount) {
+    console.warn(
+      `[vtkWasm] GPU-ready check: length ${length} != expected ${expectedValueCount}`
+    );
+    return false;
+  }
+
+  const comps = Math.max(
+    1,
+    Math.round(expectedValueCount / Math.max(1, dx * dy * dz))
+  );
+  if (dx * dy * dz * comps !== expectedValueCount) {
+    console.warn(
+      `[vtkWasm] GPU-ready check: dims ${dx}x${dy}x${dz}×${comps} != length ${expectedValueCount}`
+    );
+    return false;
+  }
+
+  const bpe = (view as { BYTES_PER_ELEMENT?: number }).BYTES_PER_ELEMENT;
+  if (typeof bpe === 'number' && bpe !== expectedBytesPerElement) {
+    console.warn(
+      `[vtkWasm] GPU-ready check: view bpp ${bpe} != expected ${expectedBytesPerElement} (float AllocateScalars still active?)`
+    );
+    return false;
+  }
+
+  // VTK_FLOAT=10, VTK_DOUBLE=11 — partitioned texImage3D will request 4×/8× bytes.
+  try {
+    const getScalarType = (imageData as Record<string, unknown>).getScalarType;
+    if (typeof getScalarType === 'function') {
+      const scalarType = await callMaybeAsync(
+        (getScalarType as () => unknown).call(imageData)
+      );
+      const st = Number(scalarType);
+      if (st === 10 || st === 11) {
+        console.warn(
+          `[vtkWasm] GPU-ready check: ImageData scalarType=${st} is float/double; refusing GPU upload`
+        );
+        return false;
+      }
+    }
+  } catch {
+    // Method missing / proxy throw — rely on view BYTES_PER_ELEMENT above.
+  }
+
+  return true;
+}
+
 export type FinalizeVtkWasmImageDataOptions = {
   imageData: VtkWasmObject;
   vtkArray: VtkWasmObject;
@@ -97,11 +245,13 @@ let didLogVerifyOk = false;
  * Finalize vtk-wasm ImageData scalars for GPU upload.
  *
  * Order (critical for this vtk-wasm build):
- * 1. Apply geometry first (may AllocateScalars as float — temporary).
+ * 1. Apply geometry first via setExtent(single array) (may AllocateScalars as
+ *    float — temporary). Prefer extent-only over SetDimensions.
  * 2. Attach filled typed array via setScalars (replaces float).
  * 3. Never call SetDimensions after attach — that clears active scalars /
- *    frees the Int16 object id.
- * 4. Verify live getScalars + mid sample against source.
+ *    frees the Int16 object id and causes texImage3D bpp mismatches under
+ *    SetPartitions.
+ * 4. Verify live getScalars + mid sample + GPU-ready asserts.
  *
  * Use `liveScalars` from the result; do not Modified/toJSTypedArray the
  * pre-attach array id after this returns.
@@ -126,43 +276,28 @@ export async function finalizeVtkWasmImageDataScalars(
   } = options;
 
   const [dx, dy, dz] = dimensions;
+  const extentArr = [
+    extent[0],
+    extent[1],
+    extent[2],
+    extent[3],
+    extent[4],
+    extent[5],
+  ];
+  const originArr = [origin[0], origin[1], origin[2]];
+  const spacingArr = [spacing[0], spacing[1], spacing[2]];
 
   // --- 1. Geometry first (once). Temporary float scalars are OK. ---
   if (!skipGeometry) {
-    const extentArr = [
-      extent[0],
-      extent[1],
-      extent[2],
-      extent[3],
-      extent[4],
-      extent[5],
-    ];
-    const originArr = [origin[0], origin[1], origin[2]];
-    const spacingArr = [spacing[0], spacing[1], spacing[2]];
-
-    // Prefer $set for extent — method setters were no-op'ing on some vtk-wasm
-    // builds, leaving dims=[0,0,0] / empty bounds and a blue-only viewport.
+    // Prefer SetExtent(single array) — six-arg SetExtent is a no-op on vtk-wasm
+    // and leaves dims empty, then setDimensions AllocateScalars as float.
     imageData.$set?.({
       extent: extentArr,
       origin: originArr,
       spacing: spacingArr,
     });
+    await setVtkWasmImageDataExtent(imageData, extentArr);
 
-    const setExtent = imageData.setExtent as
-      | ((...args: number[]) => unknown)
-      | undefined;
-    if (typeof setExtent === 'function') {
-      await callMaybeAsync(
-        setExtent(
-          extentArr[0],
-          extentArr[1],
-          extentArr[2],
-          extentArr[3],
-          extentArr[4],
-          extentArr[5]
-        )
-      );
-    }
     const setOrigin = imageData.setOrigin as
       | ((x: number, y: number, z: number) => unknown)
       | undefined;
@@ -179,17 +314,15 @@ export async function finalizeVtkWasmImageDataScalars(
     }
 
     // Verify; if still empty, force dimensions (may AllocateScalars float —
-    // setScalars below replaces them).
+    // setScalars below replaces them). Prefer extent-only when possible.
     const dimsAfter =
       (await callMaybeAsync(
         (imageData.getDimensions as (() => unknown) | undefined)?.()
       )) ?? imageData.dimensions;
-    const d0 = Array.isArray(dimsAfter)
-      ? Number(dimsAfter[0])
-      : Number((dimsAfter as { 0?: number })?.[0] ?? 0);
+    const [d0] = parseDims3(dimsAfter);
     if (!d0) {
       console.warn(
-        `[vtkWasm] finalize: dims still empty after extent $set; forcing setDimensions(${dx},${dy},${dz})`
+        `[vtkWasm] finalize: dims still empty after setExtent(array); forcing setDimensions(${dx},${dy},${dz})`
       );
       const setDimensions = imageData.setDimensions as
         | ((x: number, y: number, z: number) => unknown)
@@ -197,6 +330,7 @@ export async function finalizeVtkWasmImageDataScalars(
       if (typeof setDimensions === 'function') {
         await callMaybeAsync(setDimensions(dx, dy, dz));
       } else {
+        // Last resort before attach only — never after Int16 setScalars.
         imageData.$set?.({ dimensions: [dx, dy, dz] });
       }
     }
@@ -292,7 +426,9 @@ export async function finalizeVtkWasmImageDataScalars(
   await callMaybeAsync((imageData.modified as (() => unknown) | undefined)?.());
 
   // Final geometry check — mapper needs non-zero dims/bounds.
-  const dimsFinal =
+  // After Int16 attach: only re-setExtent(array). Never $set({ dimensions })
+  // (that AllocateScalars float → texImage3D bpp mismatch under SetPartitions).
+  let dimsFinal =
     (await callMaybeAsync(
       (imageData.getDimensions as (() => unknown) | undefined)?.()
     )) ?? imageData.dimensions;
@@ -300,28 +436,41 @@ export async function finalizeVtkWasmImageDataScalars(
     (await callMaybeAsync(
       (imageData.getBounds as (() => unknown) | undefined)?.()
     )) ?? imageData.bounds;
-  const dFinal = Array.isArray(dimsFinal)
-    ? [Number(dimsFinal[0]), Number(dimsFinal[1]), Number(dimsFinal[2])]
-    : [0, 0, 0];
+  let dFinal = parseDims3(dimsFinal);
   if (!dFinal[0] || !dFinal[1] || !dFinal[2]) {
     console.warn(
-      `[vtkWasm] finalize: dims still ${JSON.stringify(dimsFinal)} after scalars; re-$set extent`
+      `[vtkWasm] finalize: dims still ${JSON.stringify(dimsFinal)} after scalars; re-setExtent(array) only`
     );
+    await setVtkWasmImageDataExtent(imageData, extentArr);
     imageData.$set?.({
-      extent: [
-        extent[0],
-        extent[1],
-        extent[2],
-        extent[3],
-        extent[4],
-        extent[5],
-      ],
-      origin: [origin[0], origin[1], origin[2]],
-      spacing: [spacing[0], spacing[1], spacing[2]],
+      origin: originArr,
+      spacing: spacingArr,
     });
     await callMaybeAsync(
       (imageData.modified as (() => unknown) | undefined)?.()
     );
+    dimsFinal =
+      (await callMaybeAsync(
+        (imageData.getDimensions as (() => unknown) | undefined)?.()
+      )) ?? imageData.dimensions;
+    dFinal = parseDims3(dimsFinal);
+  }
+
+  const expectedBpe =
+    (sourceForVerify as { BYTES_PER_ELEMENT?: number } | undefined)
+      ?.BYTES_PER_ELEMENT ??
+    (view as { BYTES_PER_ELEMENT?: number }).BYTES_PER_ELEMENT ??
+    2;
+
+  const gpuReady = await verifyVtkWasmImageDataGpuReady(imageData, {
+    expectedValueCount,
+    expectedBytesPerElement: expectedBpe,
+    typedArrayInterface,
+    liveScalars: scalarsForVerify,
+  });
+  if (!gpuReady) {
+    console.warn('[vtkWasm] finalize: GPU-ready asserts failed after attach');
+    return { ok: false };
   }
 
   if (!didLogVerifyOk) {
@@ -343,7 +492,7 @@ export async function finalizeVtkWasmImageDataScalars(
     console.info(
       `[vtkWasm] scalars ready${logLabel ? ` ${logLabel}` : ''} dims=${dx}x${dy}x${dz} ` +
         `liveDims=${JSON.stringify(dimsLog)} bounds=${JSON.stringify(boundsFinal)} ` +
-        `length=${length} samples=[${samples.join(',')}]${
+        `length=${length} bpe=${expectedBpe} samples=[${samples.join(',')}]${
           srcMid !== undefined ? ` srcMid=${srcMid}` : ''
         }`
     );

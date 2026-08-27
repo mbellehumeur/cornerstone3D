@@ -32,6 +32,7 @@ export {
   ijkBoxVoxelCount,
   refineBrickPlanForByteBudget,
   shouldUseDenseWasmBricks,
+  wasmPartitionsNeedContiguousBricks,
   estimateVolumeScalarBytes,
   getWasmScalarBudgetBytes,
   DEFAULT_WASM_BRICK_MAX_PER_AXIS,
