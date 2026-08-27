@@ -111,8 +111,9 @@ export async function applyViewportPresetToVtkWasmProperty(
     await invoke(gfun, 'addPoint', gradientParts[0], gradientParts[1]);
     await invoke(gfun, 'addPoint', gradientParts[2], gradientParts[3]);
     await invoke(property, 'setGradientOpacity', 0, gfun);
-    // (component, disable) — 0 means use gradient opacity.
-    await invoke(property, 'setDisableGradientOpacity', 0, 0);
+    // Keep gradient opacity OFF until the wasm piecewise path is proven —
+    // a bad gradient TF blanks the entire volume (looks like "nothing rendered").
+    await invoke(property, 'setDisableGradientOpacity', 0, 1);
   }
 
   if (preset.interpolation === '1') {
@@ -162,6 +163,9 @@ export function setVtkWasmVolume3DCanvasVisible(
   }
   entry.canvas.style.display = visible ? 'block' : 'none';
   entry.canvas.style.visibility = visible ? 'visible' : 'hidden';
+  if (visible) {
+    entry.canvas.style.zIndex = '20';
+  }
 }
 
 /**

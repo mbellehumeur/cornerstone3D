@@ -2,17 +2,22 @@ import type { IImageVolume } from '../../types';
 import {
   buildWasmVtkBrickPlan,
   fullVolumeRegionToBrickUploads,
+  shouldUseDenseWasmBricks,
   type WasmIjkBox,
   type WasmVtkVolumeBrickPlan,
 } from '../helpers/volumeTextureBrickWasm';
+import clonePoint3 from '../../utilities/clonePoint3';
 import type {
   VtkWasmNamespace,
   VtkWasmObject,
   VtkWasmTypedArrayInterface,
 } from './vtkWasmRuntime';
 import { getVolumeScalarArray } from './webgpuMapperImageData';
-
-const SCALARS_ARRAY_NAME = 'Scalars';
+import { bindVtkWasmBrickedVolume } from './vtkWasmBrickedVolumeBinding';
+import {
+  finalizeVtkWasmImageDataScalars,
+  SCALARS_ARRAY_NAME,
+} from './vtkWasmImageDataFinalize';
 
 type MarshallableTypedArray =
   | Float32Array
@@ -24,9 +29,25 @@ type MarshallableTypedArray =
   | Int32Array
   | Uint32Array;
 
+export type VtkWasmRefreshScalarsOptions = {
+  /** Rebuild brick ImageData even if already uploaded (load-complete). */
+  force?: boolean;
+};
+
 export type VtkWasmVolumeBinding = {
+  mode?: 'single' | 'denseBricks';
   brickPlan: WasmVtkVolumeBrickPlan;
   imageData: VtkWasmObject;
+  /** Dense-brick MultiBlock (unused; prefer getBrickImageDatas). */
+  multiBlock?: VtkWasmObject;
+  /** @deprecated Prefer useMultiVolumeInput. */
+  useMultiBlockInput?: boolean;
+  /**
+   * Volume3D: one GPUVolumeRayCastMapper + vtkVolume per brick.
+   * False when the plan is a single brick (use one mapper like `single`).
+   */
+  useMultiVolumeInput?: boolean;
+  getBrickImageDatas?: () => VtkWasmObject[];
   /** True once point-data scalars have been successfully attached. */
   hasScalars: () => boolean;
   /** Apply SetPartitions on a volume mapper when supported. */
@@ -36,7 +57,19 @@ export type VtkWasmVolumeBinding = {
    * `setArray` and fills brick-by-brick — never `toVTKAoSArray` / JS TypedArray
    * through the serializer (those OOM on bricked volumes).
    */
-  refreshScalars: (dirtyBox?: WasmIjkBox) => Promise<boolean>;
+  refreshScalars: (
+    dirtyBox?: WasmIjkBox,
+    options?: VtkWasmRefreshScalarsOptions
+  ) => Promise<boolean>;
+  /**
+   * Dense-brick MPR: stitch bricks intersecting the world plane into imageData.
+   */
+  syncMprPlane?: (
+    originWorld: [number, number, number],
+    normalWorld: [number, number, number],
+    halfThicknessMm?: number
+  ) => Promise<boolean>;
+  dispose?: () => void;
 };
 
 function getExpectedScalarLength(
@@ -172,8 +205,10 @@ export function bindVtkWasmVolume(
   typedArrayInterface?: VtkWasmTypedArrayInterface
 ): VtkWasmVolumeBinding {
   const dimensions = imageVolume.dimensions as [number, number, number];
-  const spacing = imageVolume.spacing as [number, number, number];
-  const origin = imageVolume.origin as [number, number, number];
+  // Plain arrays only: TypedArrays JSON-serialize as objects and fail
+  // vtk-wasm DeserializeJSON (type must be array).
+  const spacing = clonePoint3(imageVolume.spacing);
+  const origin = clonePoint3(imageVolume.origin);
   const direction = (imageVolume.direction ??
     imageVolume.imageData?.getDirection?.()) as number[] | undefined;
   const brickPlan = buildWasmVtkBrickPlan(dimensions);
@@ -182,8 +217,9 @@ export function bindVtkWasmVolume(
     throw new Error('[vtkWasm] vtkImageData is not available in this bundle');
   }
 
+  // Do NOT pass dimensions into the ctor — that AllocateScalars as float and
+  // makes GPU volume texImage3D request 4× bytes against an Int16 buffer.
   const imageData = vtk.vtkImageData({
-    dimensions,
     spacing,
     origin,
   });
@@ -197,15 +233,9 @@ export function bindVtkWasmVolume(
     Math.max(0, dz - 1),
   ];
   imageData.$set?.({
-    dimensions,
     spacing,
     origin,
-    extent,
   });
-  const setExtent = imageData.setExtent as
-    | ((...args: number[]) => unknown)
-    | undefined;
-  setExtent?.(extent[0], extent[1], extent[2], extent[3], extent[4], extent[5]);
 
   if (direction && direction.length >= 9) {
     const dir9 = Array.from(direction.slice(0, 9));
@@ -229,7 +259,33 @@ export function bindVtkWasmVolume(
     }
   }
 
+  const applyDirection = (target: VtkWasmObject): void => {
+    if (!direction || direction.length < 9) {
+      return;
+    }
+    const dir9 = Array.from(direction.slice(0, 9));
+    const matrixCtor = vtk.vtkMatrix3x3;
+    if (typeof matrixCtor === 'function') {
+      const matrix = matrixCtor() as VtkWasmObject;
+      const setData = matrix.setData as
+        | ((data: number[]) => unknown)
+        | undefined;
+      setData?.(dir9);
+      const setDirectionMatrix = target.setDirectionMatrix as
+        | ((m: unknown) => unknown)
+        | undefined;
+      if (setDirectionMatrix) {
+        setDirectionMatrix(matrix);
+      } else {
+        target.$set?.({ directionMatrix: matrix });
+      }
+    } else {
+      target.$set?.({ direction: dir9 });
+    }
+  };
+
   let scalarsArray: VtkWasmObject | undefined;
+  let geometryPublished = false;
   let refreshInFlight: Promise<boolean> | null = null;
   let pendingDirtyBox: WasmIjkBox | undefined;
   let pendingRefresh = false;
@@ -241,29 +297,6 @@ export function bindVtkWasmVolume(
         (imageData.getPointData as (() => unknown) | undefined)?.()
       )) as VtkWasmObject | undefined)
     );
-  };
-
-  const attachScalars = async (vtkArray: VtkWasmObject): Promise<boolean> => {
-    const pointData = await getPointData();
-    if (!pointData?.setScalars) {
-      return false;
-    }
-    // Do not setNumberOfTuples here: setArray already sized the buffer; a
-    // property/$set of NumberOfTuples re-deserializes and can throw
-    // (Hash must be string), and SetNumberOfTuples may reallocate.
-
-    await callMaybeAsync(
-      (pointData.setScalars as (a: unknown) => unknown)(vtkArray)
-    );
-    await callMaybeAsync(
-      (pointData.setActiveScalars as ((name: string) => unknown) | undefined)?.(
-        SCALARS_ARRAY_NAME
-      )
-    );
-    await callMaybeAsync(
-      (imageData.modified as (() => unknown) | undefined)?.()
-    );
-    return true;
   };
 
   const getDestView = (
@@ -416,6 +449,44 @@ export function bindVtkWasmVolume(
     return true;
   };
 
+  const fillStandaloneArray = (
+    dest: MarshallableTypedArray & {
+      set: (array: ArrayLike<number>, offset?: number) => void;
+    },
+    typed: MarshallableTypedArray,
+    numberOfComponents: number,
+    dirtyBox?: WasmIjkBox
+  ): void => {
+    if (dirtyBox) {
+      const uploads = fullVolumeRegionToBrickUploads(dirtyBox, brickPlan);
+      if (uploads.length) {
+        for (const upload of uploads) {
+          copyIjkBoxIntoVolume(
+            typed,
+            dest,
+            dimensions,
+            upload.fullExtent,
+            numberOfComponents
+          );
+        }
+        return;
+      }
+    }
+    if (brickPlan.bricked && brickPlan.bricks.length > 1) {
+      for (const brick of brickPlan.bricks) {
+        copyIjkBoxIntoVolume(
+          typed,
+          dest,
+          dimensions,
+          brick.extent,
+          numberOfComponents
+        );
+      }
+      return;
+    }
+    dest.set(typed);
+  };
+
   const uploadScalarsOnce = async (dirtyBox?: WasmIjkBox): Promise<boolean> => {
     const scalars = getVolumeScalarArray(imageVolume);
     if (!scalars || scalars.length <= 0) {
@@ -435,6 +506,7 @@ export function bindVtkWasmVolume(
       1,
       imageDataMeta?.numberOfComponents ?? 1
     );
+    const numVoxels = dx * dy * dz;
 
     // Reuse existing pointer-backed buffer when possible (in-place brick fill).
     if (scalarsArray) {
@@ -455,40 +527,59 @@ export function bindVtkWasmVolume(
         );
         return true;
       }
+      // Dead / mismatched proxy — drop JS handle and recreate (do not $delete;
+      // ImageData may already own a replacement).
+      scalarsArray = undefined;
     }
 
-    const previous = scalarsArray;
     const next = await allocatePointerBackedArray(typed, numberOfComponents);
     if (!next) {
-      return !!previous;
+      return false;
     }
 
-    const attached = await attachScalars(next);
-    if (!attached) {
+    // Fill while `next` is a live standalone object (before setScalars).
+    const destBeforeAttach = typedArrayInterface?.toJSTypedArray?.(next) as
+      | (MarshallableTypedArray & {
+          set: (array: ArrayLike<number>, offset?: number) => void;
+        })
+      | undefined;
+    if (!destBeforeAttach || destBeforeAttach.length !== typed.length) {
       disposeVtkObject(next);
-      return !!previous;
+      return false;
+    }
+    fillStandaloneArray(destBeforeAttach, typed, numberOfComponents, dirtyBox);
+
+    // Attach → setNumberOfTuples → geometry → verify live scalars.
+    // Never keep/use the pre-geometry handle after finalize.
+    const finalized = await finalizeVtkWasmImageDataScalars({
+      imageData,
+      vtkArray: next,
+      numVoxels,
+      expectedValueCount: expectedLength,
+      dimensions,
+      extent: extent as [number, number, number, number, number, number],
+      origin,
+      spacing,
+      typedArrayInterface,
+      sourceForVerify: typed,
+      logLabel: 'mode=single',
+      skipGeometry: geometryPublished,
+      applyDirection,
+    });
+    if (!finalized.ok || !finalized.liveScalars) {
+      // Do not $delete `next` if ImageData may own it after a partial attach.
+      return false;
     }
 
-    scalarsArray = next;
-    if (!fillScalarsFromSource(typed, numberOfComponents, dirtyBox)) {
-      // Attached but could not view — still better than no scalars.
-      console.warn('[vtkWasm] attached scalars but failed to fill view');
-    } else {
-      await callMaybeAsync(
-        (scalarsArray.modified as (() => unknown) | undefined)?.()
-      );
-      await callMaybeAsync(
-        (imageData.modified as (() => unknown) | undefined)?.()
-      );
-    }
-
-    if (previous && previous !== next) {
-      disposeVtkObject(previous);
-    }
+    scalarsArray = finalized.liveScalars;
+    geometryPublished = true;
     return true;
   };
 
-  const refreshScalars = async (dirtyBox?: WasmIjkBox): Promise<boolean> => {
+  const refreshScalars = async (
+    dirtyBox?: WasmIjkBox,
+    _options?: { force?: boolean }
+  ): Promise<boolean> => {
     if (dirtyBox) {
       pendingDirtyBox = dirtyBox;
     } else {
@@ -533,12 +624,74 @@ export function bindVtkWasmVolume(
   };
 
   return {
+    mode: 'single',
     brickPlan,
     imageData,
+    useMultiBlockInput: false,
+    useMultiVolumeInput: false,
     hasScalars: () => !!scalarsArray,
     applyPartitions,
     refreshScalars,
   };
+}
+
+/**
+ * Choose dense per-brick pool or single full-AoS upload.
+ *
+ * Dense is only for volumes that would OOM a contiguous WASM alloc
+ * (`shouldUseDenseWasmBricks` / maxScalarBytes). Fixed partition grids still
+ * control SetPartitions (single) or the dense brick plan (when over budget) —
+ * they must not force dense, or small studies take a broken multi-ImageData
+ * present path.
+ */
+export function createVtkWasmVolumeBinding(
+  vtk: VtkWasmNamespace,
+  imageVolume: IImageVolume,
+  typedArrayInterface?: VtkWasmTypedArrayInterface
+): VtkWasmVolumeBinding {
+  const dimensions = imageVolume.dimensions as [number, number, number];
+  const scalars = getVolumeScalarArray(imageVolume);
+  const maybeBpe = (scalars as unknown as { BYTES_PER_ELEMENT?: number } | null)
+    ?.BYTES_PER_ELEMENT;
+  const bytesPerElement =
+    typeof maybeBpe === 'number' && maybeBpe > 0 ? maybeBpe : 2;
+  const imageDataMeta = imageVolume.imageData?.get?.('numberOfComponents') as
+    | { numberOfComponents?: number }
+    | undefined;
+  const numberOfComponents = Math.max(
+    1,
+    imageDataMeta?.numberOfComponents ?? 1
+  );
+
+  const scalarBytes =
+    dimensions[0] *
+    dimensions[1] *
+    dimensions[2] *
+    bytesPerElement *
+    numberOfComponents;
+  const useDense = shouldUseDenseWasmBricks(
+    dimensions,
+    bytesPerElement,
+    numberOfComponents
+  );
+
+  const binding = useDense
+    ? (bindVtkWasmBrickedVolume(
+        vtk,
+        imageVolume,
+        typedArrayInterface
+      ) as VtkWasmVolumeBinding)
+    : bindVtkWasmVolume(vtk, imageVolume, typedArrayInterface);
+
+  // One-shot path log so Volume3D / MPR issues are easy to attribute.
+  console.info(
+    `[vtkWasm] volume binding mode=${binding.mode ?? 'single'} ` +
+      `dims=${dimensions.join('x')} scalarBytes=${scalarBytes} ` +
+      `partitions=${binding.brickPlan.vtkPartitions.join('x')} ` +
+      `useMultiVolume=${binding.useMultiVolumeInput === true}`
+  );
+
+  return binding;
 }
 
 /**

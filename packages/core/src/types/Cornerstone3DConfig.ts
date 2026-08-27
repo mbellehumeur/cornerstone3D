@@ -127,6 +127,11 @@ interface Cornerstone3DConfig {
       urlIsGzip?: boolean;
       /** When false, never partition volumes for the wasm path. */
       volumeTextureBrickling?: boolean;
+      /**
+       * Prefer dense per-brick WASM uploads when full AoS would exceed this
+       * many bytes (default 512 MiB).
+       */
+      maxScalarBytes?: number;
       brickPartitions?: {
         strategy?: 'minimum' | 'target' | 'fixed';
         targetPerAxis?: number;

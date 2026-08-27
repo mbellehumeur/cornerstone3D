@@ -2,6 +2,7 @@ import { Events, ViewportType } from '../../../enums';
 import eventTarget from '../../../eventTarget';
 import type { IImageVolume } from '../../../types';
 import { VIEWPORT_PRESETS } from '../../../constants';
+import clonePoint3 from '../../../utilities/clonePoint3';
 import uuidv4 from '../../../utilities/uuidv4';
 import type {
   DataAddOptions,
@@ -31,12 +32,11 @@ import {
   type VtkWasmViewportHandle,
 } from '../vtkWasmRuntime';
 import {
-  bindVtkWasmVolume,
+  createVtkWasmVolumeBinding,
   type VtkWasmVolumeBinding,
 } from '../vtkWasmVolumeBinding';
 import type { WasmVtkVolumeBrickPlan } from '../../helpers/volumeTextureBrickWasm';
 import {
-  applyVtkWasmVolume3DPreset,
   applyViewportPresetToVtkWasmProperty,
   flushVtkWasmVolume3DPendingPreset,
   getVtkWasmVolume3D,
@@ -90,8 +90,9 @@ async function invoke(
 }
 
 /**
- * Volume3D DVR path using vtk.wasm (WebGL or WebGPU) + mapper.SetPartitions from
- * volumeTextureBrickWasm (VTK XYZ bricks, not CS3D Z-slabs).
+ * Volume3D DVR path using vtk.wasm (WebGL or WebGPU). Large volumes use a
+ * dense per-brick MultiBlock pool; small volumes use a single ImageData +
+ * mapper.SetPartitions from volumeTextureBrickWasm.
  * @internal
  */
 export class VtkWasmVolume3DRenderPath
@@ -104,7 +105,18 @@ export class VtkWasmVolume3DRenderPath
   private wasmRenderer?: VtkWasmObject;
   private volumeMapper?: VtkWasmObject;
   private volume?: VtkWasmObject;
+  /** Dense-brick Volume3D: one mapper+volume per brick. */
+  private brickMappers: VtkWasmObject[] = [];
+  private brickVolumes: VtkWasmObject[] = [];
+  private volumeProperty?: VtkWasmObject;
+  /** True after brick actors have been wired once for this binding. */
+  private brickVolumesSynced = false;
   private binding?: VtkWasmVolumeBinding;
+  private interactor?: VtkWasmObject;
+  private sampleDistance = 1;
+  private opacityUnitDistance = 1;
+
+  private volumeAddedToRenderer = false;
 
   constructor(options?: Partial<VtkWasmVolume3DRenderPathOptions>) {
     this.renderingBackend = options?.rendering ?? 'webgl';
@@ -142,7 +154,7 @@ export class VtkWasmVolume3DRenderPath
       throw new Error('[vtkWasm] GPU volume classes missing from wasm bundle');
     }
 
-    const binding = bindVtkWasmVolume(
+    const binding = createVtkWasmVolumeBinding(
       vtk,
       imageVolume,
       handle.session.typedArrayInterface
@@ -166,9 +178,9 @@ export class VtkWasmVolume3DRenderPath
     const renderer = vtk.vtkRenderer({
       background: [0, 0, 0],
     }) as VtkWasmObject;
-    const mapper = vtk.vtkGPUVolumeRayCastMapper() as VtkWasmObject;
-    const volume = vtk.vtkVolume() as VtkWasmObject;
+
     const property = vtk.vtkVolumeProperty() as VtkWasmObject;
+    this.volumeProperty = property;
 
     const defaultPreset = VIEWPORT_PRESETS.find(
       (entry) => entry.name === DEFAULT_VTK_WASM_PRESET_NAME
@@ -176,22 +188,83 @@ export class VtkWasmVolume3DRenderPath
     if (defaultPreset) {
       await applyViewportPresetToVtkWasmProperty(vtk, property, defaultPreset);
     }
+    await invoke(property, 'setDisableGradientOpacity', 0, 1);
 
     await invoke(renderWindow, 'addRenderer', renderer);
-    await invoke(mapper, 'setInputData', binding.imageData);
-    // SetPartitions only after a full scalar buffer is attached — otherwise VTK
-    // LoadTexture builds brick views larger than the (missing) AoS array.
-    if (scalarsReady) {
-      await binding.applyPartitions(mapper);
+
+    // Kitware standalone requires an interactor bound to the same canvasSelector.
+    if (typeof vtk.vtkRenderWindowInteractor === 'function') {
+      const interactor = vtk.vtkRenderWindowInteractor({
+        canvasSelector: handle.canvasKey,
+        renderWindow,
+      }) as VtkWasmObject;
+      this.interactor = interactor;
+      try {
+        const style = interactor.interactorStyle as VtkWasmObject | undefined;
+        await invoke(style, 'setCurrentStyleToTrackballCamera');
+      } catch {
+        // Style API varies by bundle; rendering still works without it.
+      }
+      await invoke(interactor, 'start');
     }
-    await invoke(volume, 'setMapper', mapper);
-    await invoke(volume, 'setProperty', property);
-    await invoke(renderer, 'addVolume', volume);
+
+    // Prove GL presents before volume scalars arrive.
+    await invoke(renderer, 'resetCamera');
+    await invoke(renderWindow, 'render');
+
+    const spacing = imageVolume.spacing as [number, number, number];
+    this.sampleDistance =
+      (Math.abs(spacing[0]) + Math.abs(spacing[1]) + Math.abs(spacing[2])) /
+        6 || 1;
+    this.opacityUnitDistance =
+      (Math.abs(spacing[0]) + Math.abs(spacing[1]) + Math.abs(spacing[2])) /
+        3 || 1;
+    await invoke(
+      property,
+      'setScalarOpacityUnitDistance',
+      0,
+      this.opacityUnitDistance
+    );
+
+    const useMultiVolume =
+      binding.useMultiVolumeInput === true &&
+      typeof binding.getBrickImageDatas === 'function';
+
+    if (useMultiVolume) {
+      // Never setInputData(binding.imageData) here — that is the MPR stub/slab.
+      if (scalarsReady) {
+        const ok = await this.syncBrickVolumes(
+          vtk,
+          renderer,
+          binding,
+          property
+        );
+        if (!ok) {
+          console.warn(
+            '[vtkWasm] dense Volume3D: no brick ImageData after refresh; skipping present'
+          );
+        }
+      }
+    } else {
+      // Create mapper/volume now; only addVolume after scalars exist — otherwise
+      // interactor.start() renders empty ImageData → "No scalars named """.
+      const mapper = vtk.vtkGPUVolumeRayCastMapper!() as VtkWasmObject;
+      const volume = vtk.vtkVolume() as VtkWasmObject;
+      await invoke(mapper, 'setSampleDistance', this.sampleDistance);
+      await invoke(mapper, 'setAutoAdjustSampleDistances', 0);
+      await invoke(mapper, 'setScalarModeToUsePointData');
+      await invoke(mapper, 'setArrayName', 'Scalars');
+      await invoke(volume, 'setMapper', mapper);
+      await invoke(volume, 'setProperty', property);
+      this.volumeMapper = mapper;
+      this.volume = volume;
+      if (scalarsReady) {
+        await this.wireSingleVolumeInput(binding, renderer, property);
+      }
+    }
 
     this.renderWindow = renderWindow;
     this.wasmRenderer = renderer;
-    this.volumeMapper = mapper;
-    this.volume = volume;
 
     registerVtkWasmVolume3D(ctx.viewportId, {
       canvas: handle.canvas,
@@ -209,8 +282,8 @@ export class VtkWasmVolume3DRenderPath
         void this.renderAsync();
       },
     });
-    // HP may have applied a preset before registration completed.
     flushVtkWasmVolume3DPendingPreset(ctx.viewportId);
+    await invoke(property, 'setDisableGradientOpacity', 0, 1);
 
     const webgpuWindow = getWebGPUViewportWindow(ctx.viewportId);
     if (webgpuWindow) {
@@ -218,7 +291,20 @@ export class VtkWasmVolume3DRenderPath
     }
 
     ctx.display.activateRenderMode(this.renderMode);
+    handle.canvas.style.display = 'block';
     handle.canvas.style.visibility = 'visible';
+    handle.canvas.style.zIndex = '20';
+    handle.canvas.style.pointerEvents = 'none';
+    handle.canvas.style.backgroundColor = 'transparent';
+    console.info(
+      `[vtkWasm] Volume3D canvas mounted ` +
+        `key=${handle.canvasKey} ` +
+        `bitmap=${handle.canvas.width}x${handle.canvas.height} ` +
+        `client=${handle.canvas.clientWidth}x${handle.canvas.clientHeight} ` +
+        `parent=${ctx.viewport.element.clientWidth}x${ctx.viewport.element.clientHeight} ` +
+        `inDom=${document.body.contains(handle.canvas)} ` +
+        `display=${handle.canvas.style.display} z=${handle.canvas.style.zIndex}`
+    );
 
     const initialCamera = getInitialVolume3DCamera(ctx, imageVolume);
     if (initialCamera) {
@@ -240,14 +326,66 @@ export class VtkWasmVolume3DRenderPath
     }
 
     const uploadAndPresent = () => {
-      void binding.refreshScalars().then(async (ok) => {
-        if (!ok || !this.volumeMapper) {
-          return;
-        }
-        await binding.applyPartitions(this.volumeMapper);
-        await this.renderAsync();
-        ctx.display.requestRender();
-      });
+      void binding
+        .refreshScalars(undefined, { force: true })
+        .then(async (ok) => {
+          if (!ok || !this.wasmRenderer || !this.handle) {
+            return;
+          }
+          if (binding.useMultiVolumeInput) {
+            // New brick ImageData instances — must rebind, not early-out on count.
+            this.brickVolumesSynced = false;
+            const synced = await this.syncBrickVolumes(
+              this.handle.vtk,
+              this.wasmRenderer,
+              binding,
+              this.volumeProperty ?? property
+            );
+            if (!synced) {
+              console.warn(
+                '[vtkWasm] dense Volume3D upload produced no brick ImageData'
+              );
+              return;
+            }
+          } else if (this.volumeMapper && this.volume) {
+            await this.wireSingleVolumeInput(
+              binding,
+              this.wasmRenderer,
+              this.volumeProperty ?? property
+            );
+          }
+          if (this.volumeProperty) {
+            await invoke(
+              this.volumeProperty,
+              'setDisableGradientOpacity',
+              0,
+              1
+            );
+          }
+          // Frame from CS volume bounds (known-good). Wasm ImageData bounds can
+          // be empty/wrong after proxy finalize.
+          if (this.wasmRenderer) {
+            await this.frameCameraToImageVolume(imageVolume);
+          }
+          if (this.handle?.canvas) {
+            this.handle.canvas.style.display = 'block';
+            this.handle.canvas.style.visibility = 'visible';
+            this.handle.canvas.style.pointerEvents = 'none';
+            this.handle.canvas.style.backgroundColor = 'transparent';
+          }
+          ctx.display.activateRenderMode(this.renderMode);
+          const canvas = this.handle?.canvas;
+          console.info(
+            `[vtkWasm] Volume3D present ok mode=${binding.mode ?? 'single'} ` +
+              `hasScalars=${binding.hasScalars()} ` +
+              `volumeAdded=${this.volumeAddedToRenderer} ` +
+              `partitions=${binding.brickPlan.vtkPartitions.join('x')} ` +
+              `canvas=${canvas?.width ?? 0}x${canvas?.height ?? 0}`
+          );
+          await this.renderAsync();
+          await this.renderAsync();
+          ctx.display.requestRender();
+        });
     };
 
     const rendering: Volume3DVtkWasmRendering = {
@@ -290,16 +428,229 @@ export class VtkWasmVolume3DRenderPath
       },
       removeData: () => {
         rendering.removeStreamingSubscriptions?.();
+        rendering.binding.dispose?.();
         unregisterVtkWasmVolume3D(ctx.viewportId);
+        this.clearBrickVolumes();
+        try {
+          this.interactor?.$delete?.();
+        } catch {
+          // ignore
+        }
+        this.interactor = undefined;
         this.handle?.dispose();
         this.handle = undefined;
         this.renderWindow = undefined;
         this.wasmRenderer = undefined;
         this.volumeMapper = undefined;
         this.volume = undefined;
+        this.volumeProperty = undefined;
         this.binding = undefined;
+        this.volumeAddedToRenderer = false;
       },
     };
+  }
+
+  /**
+   * Bind scalar-backed ImageData to the single-volume mapper and add to the
+   * renderer once. Safe to call repeatedly after refreshScalars.
+   */
+  private async wireSingleVolumeInput(
+    binding: VtkWasmVolumeBinding,
+    renderer: VtkWasmObject,
+    property: VtkWasmObject
+  ): Promise<void> {
+    if (!this.volumeMapper || !this.volume || !binding.hasScalars()) {
+      return;
+    }
+    const input = binding.getBrickImageDatas?.()?.[0] ?? binding.imageData;
+
+    // If finalize left dims empty, force extent before the mapper samples.
+    let dims = await invoke(input, 'getDimensions');
+    const dim0 = Array.isArray(dims) ? Number(dims[0]) : 0;
+    if (!dim0 && binding.brickPlan?.dimensions) {
+      const [dx, dy, dz] = binding.brickPlan.dimensions;
+      const extent = [0, dx - 1, 0, dy - 1, 0, dz - 1];
+      console.warn(
+        `[vtkWasm] Volume3D forcing ImageData extent=${extent.join(',')} before setInputData`
+      );
+      input.$set?.({
+        extent,
+        dimensions: [dx, dy, dz],
+      });
+      await invoke(input, 'modified');
+      dims = await invoke(input, 'getDimensions');
+    }
+    const spacing = await invoke(input, 'getSpacing');
+    const origin = await invoke(input, 'getOrigin');
+    const bounds = await invoke(input, 'getBounds');
+    console.info(
+      `[vtkWasm] Volume3D ImageData geom dims=${JSON.stringify(dims)} ` +
+        `spacing=${JSON.stringify(spacing)} origin=${JSON.stringify(origin)} ` +
+        `bounds=${JSON.stringify(bounds)}`
+    );
+
+    await invoke(this.volumeMapper, 'setInputData', input);
+    await invoke(this.volumeMapper, 'setScalarModeToUsePointData');
+    await invoke(this.volumeMapper, 'setArrayName', 'Scalars');
+    const parts = binding.brickPlan?.vtkPartitions ?? [1, 1, 1];
+    const needsPartitions = parts.some((n) => n > 1);
+    if (binding.mode !== 'denseBricks' && needsPartitions) {
+      await binding.applyPartitions(this.volumeMapper);
+    }
+    // Slightly larger than spacing/6 — avoids undersampling to black on some GPUs.
+    const sd = Math.max(this.sampleDistance, 0.5);
+    await invoke(this.volumeMapper, 'setSampleDistance', sd);
+    await invoke(this.volumeMapper, 'setAutoAdjustSampleDistances', 0);
+    await invoke(this.volume, 'setMapper', this.volumeMapper);
+    await invoke(this.volume, 'setProperty', property);
+    await invoke(this.volume, 'setVisibility', 1);
+    await invoke(this.volumeMapper, 'modified');
+    await invoke(this.volume, 'modified');
+    if (!this.volumeAddedToRenderer) {
+      await invoke(renderer, 'addVolume', this.volume);
+      // Some wasm builds route volumes through view-prop list only.
+      await invoke(renderer, 'addViewProp', this.volume);
+      this.volumeAddedToRenderer = true;
+      console.info(`[vtkWasm] Volume3D addVolume ok sampleDistance=${sd}`);
+    }
+  }
+
+  /**
+   * Position the wasm camera from Cornerstone ImageData bounds (not wasm
+   * proxy bounds, which may be unset after scalar finalize).
+   */
+  private async frameCameraToImageVolume(
+    imageVolume: IImageVolume
+  ): Promise<void> {
+    const renderer = this.wasmRenderer;
+    if (!renderer) {
+      return;
+    }
+
+    const vtkImage = imageVolume.imageData as
+      | { getBounds?: () => number[] }
+      | undefined;
+    const bounds = vtkImage?.getBounds?.();
+    if (!bounds || bounds.length < 6) {
+      await invoke(renderer, 'resetCamera');
+      await invoke(renderer, 'resetCameraClippingRange');
+      return;
+    }
+
+    const cx = (bounds[0] + bounds[1]) * 0.5;
+    const cy = (bounds[2] + bounds[3]) * 0.5;
+    const cz = (bounds[4] + bounds[5]) * 0.5;
+    const dx = Math.max(1e-3, bounds[1] - bounds[0]);
+    const dy = Math.max(1e-3, bounds[3] - bounds[2]);
+    const dz = Math.max(1e-3, bounds[5] - bounds[4]);
+    const radius = 0.5 * Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const parallelScale = Math.max(dy, dz) * 0.55;
+    const distance = radius * 2.5;
+
+    let cam = renderer.activeCamera as VtkWasmObject | undefined;
+    if (!cam) {
+      cam = (await invoke(renderer, 'getActiveCamera')) as
+        | VtkWasmObject
+        | undefined;
+    }
+    if (!cam) {
+      await invoke(renderer, 'resetCamera');
+      await invoke(renderer, 'resetCameraClippingRange');
+      return;
+    }
+
+    await invoke(cam, 'setParallelProjection', 1);
+    await invoke(cam, 'setFocalPoint', cx, cy, cz);
+    // View along -Y (approx coronal) — stable default for CT.
+    await invoke(cam, 'setPosition', cx, cy - distance, cz);
+    await invoke(cam, 'setViewUp', 0, 0, 1);
+    await invoke(cam, 'setParallelScale', parallelScale);
+    cam.$set?.({
+      parallelProjection: 1,
+      focalPoint: [cx, cy, cz],
+      position: [cx, cy - distance, cz],
+      viewUp: [0, 0, 1],
+      parallelScale,
+    });
+    await invoke(renderer, 'resetCameraClippingRange');
+    console.info(
+      `[vtkWasm] Volume3D camera frame center=[${cx.toFixed(1)},${cy.toFixed(1)},${cz.toFixed(1)}] ` +
+        `parallelScale=${parallelScale.toFixed(1)} dist=${distance.toFixed(1)} ` +
+        `bounds=[${bounds.map((v) => v.toFixed(1)).join(',')}]`
+    );
+  }
+
+  private clearBrickVolumes(): void {
+    for (const vol of this.brickVolumes) {
+      try {
+        vol.$delete?.();
+      } catch {
+        // ignore
+      }
+    }
+    for (const mapper of this.brickMappers) {
+      try {
+        mapper.$delete?.();
+      } catch {
+        // ignore
+      }
+    }
+    this.brickVolumes = [];
+    this.brickMappers = [];
+    this.brickVolumesSynced = false;
+  }
+
+  /**
+   * One vtkGPUVolumeRayCastMapper + vtkVolume per dense brick (shared property).
+   * Rebinds setInputData when brick ImageData instances are replaced after upload.
+   * @returns false when no brick ImageData is available yet
+   */
+  private async syncBrickVolumes(
+    vtk: VtkWasmViewportHandle['vtk'],
+    renderer: VtkWasmObject,
+    binding: VtkWasmVolumeBinding,
+    property: VtkWasmObject
+  ): Promise<boolean> {
+    const images = binding.getBrickImageDatas?.() ?? [];
+    if (!images.length || !vtk.vtkGPUVolumeRayCastMapper || !vtk.vtkVolume) {
+      return false;
+    }
+
+    // Same actor count: rebind inputs (refresh replaces ImageData objects).
+    if (
+      this.brickVolumesSynced &&
+      this.brickVolumes.length === images.length &&
+      this.brickMappers.length === images.length
+    ) {
+      for (let i = 0; i < images.length; i++) {
+        await invoke(this.brickMappers[i], 'setInputData', images[i]);
+        await invoke(this.brickMappers[i], 'modified');
+        await invoke(this.brickVolumes[i], 'modified');
+      }
+      return true;
+    }
+
+    for (const vol of this.brickVolumes) {
+      await invoke(renderer, 'removeVolume', vol);
+    }
+    this.clearBrickVolumes();
+
+    for (const imageData of images) {
+      const mapper = vtk.vtkGPUVolumeRayCastMapper() as VtkWasmObject;
+      const volume = vtk.vtkVolume() as VtkWasmObject;
+      await invoke(mapper, 'setInputData', imageData);
+      await invoke(mapper, 'setScalarModeToUsePointData');
+      await invoke(mapper, 'setArrayName', 'Scalars');
+      await invoke(mapper, 'setSampleDistance', this.sampleDistance);
+      await invoke(mapper, 'setAutoAdjustSampleDistances', 0);
+      await invoke(volume, 'setMapper', mapper);
+      await invoke(volume, 'setProperty', property);
+      await invoke(renderer, 'addVolume', volume);
+      this.brickMappers.push(mapper);
+      this.brickVolumes.push(volume);
+    }
+    this.brickVolumesSynced = true;
+    return true;
   }
 
   private applyViewState(
@@ -359,13 +710,17 @@ export class VtkWasmVolume3DRenderPath
       await invoke(cam, 'setViewAngle', camera.viewAngle);
     }
 
+    // Plain arrays only: TypedArrays JSON-serialize as objects and fail
+    // vtk-wasm DeserializeJSON (type must be array).
     cam.$set?.({
       ...(camera.parallelProjection !== undefined
         ? { parallelProjection: camera.parallelProjection ? 1 : 0 }
         : {}),
-      ...(camera.viewUp ? { viewUp: camera.viewUp } : {}),
-      ...(camera.focalPoint ? { focalPoint: camera.focalPoint } : {}),
-      ...(camera.position ? { position: camera.position } : {}),
+      ...(camera.viewUp ? { viewUp: clonePoint3(camera.viewUp) } : {}),
+      ...(camera.focalPoint
+        ? { focalPoint: clonePoint3(camera.focalPoint) }
+        : {}),
+      ...(camera.position ? { position: clonePoint3(camera.position) } : {}),
       ...(camera.parallelScale !== undefined
         ? { parallelScale: camera.parallelScale }
         : {}),
@@ -410,7 +765,18 @@ export class VtkWasmVolume3DRenderPath
     if (!this.binding?.hasScalars()) {
       return;
     }
-    await invoke(this.renderWindow, 'render');
+    const rw = this.renderWindow;
+    if (!rw) {
+      return;
+    }
+    const renderFn =
+      (rw.render as ((...a: unknown[]) => unknown) | undefined) ??
+      (rw.Render as ((...a: unknown[]) => unknown) | undefined);
+    if (typeof renderFn !== 'function') {
+      console.warn('[vtkWasm] Volume3D: renderWindow.render missing');
+      return;
+    }
+    await renderFn.call(rw);
   }
 }
 

@@ -4,6 +4,7 @@ import { isWebGPURenderingAvailable } from './Planar/webgpuViewportRenderWindow'
 
 export type VtkWasmNamespace = {
   vtkRenderWindow?: (props?: object) => VtkWasmObject;
+  vtkRenderWindowInteractor?: (props?: object) => VtkWasmObject;
   vtkRenderer?: (props?: object) => VtkWasmObject;
   vtkCamera?: (props?: object) => VtkWasmObject;
   vtkImageData?: (props?: object) => VtkWasmObject;
@@ -250,7 +251,14 @@ export async function createVtkWasmViewportHandle(
   canvas.style.width = '100%';
   canvas.style.height = '100%';
   canvas.style.display = 'block';
-  canvas.style.zIndex = '1';
+  canvas.style.visibility = 'visible';
+  // High z-index so we sit above the hidden vtk-js canvas / empty viewport chrome.
+  canvas.style.zIndex = '20';
+  // Let Cornerstone tools (on the viewport element) own input. If this canvas
+  // captures events, vtkRenderWindowInteractor Trackball fights TrackballRotate.
+  canvas.style.pointerEvents = 'none';
+  canvas.style.backgroundColor = 'transparent';
+  canvas.tabIndex = -1;
   element.appendChild(canvas);
 
   const session = runtime.createStandaloneSession();

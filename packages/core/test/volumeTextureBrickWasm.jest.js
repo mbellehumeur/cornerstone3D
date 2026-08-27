@@ -1,9 +1,16 @@
 import {
+  brickExtentsAabb,
+  bricksIntersectingIjkPlane,
   buildWasmVtkBrickPlan,
   fullVolumeRegionToBrickUploads,
+  ijkBoxVoxelCount,
   minimumPartitionsForAxis,
+  refineBrickPlanForByteBudget,
+  shouldUseDenseWasmBricks,
   splitAxisExtents,
+  estimateVolumeScalarBytes,
 } from '../src/RenderingEngine/helpers/volumeTextureBrickWasm';
+import { copyIjkBoxIntoDenseBrick } from '../src/RenderingEngine/GenericViewport/vtkWasmBrickedVolumeBinding';
 
 /** VTK SplitVolume: delta=(dim-1)/n, block i = [floor(i*delta), floor((i+1)*delta)]. */
 function vtkSplitAxisExtents(dim, n) {
@@ -120,6 +127,21 @@ describe('volumeTextureBrickWasm', () => {
       expect(plan.bricks).toHaveLength(64);
     });
 
+    it('fixed 8x8x8 yields 512 bricks for large CT', () => {
+      const plan = buildWasmVtkBrickPlan([512, 512, 2948], {
+        strategy: 'fixed',
+        partitions: [8, 8, 8],
+        max3D: 2048,
+      });
+      expect(plan.vtkPartitions).toEqual([8, 8, 8]);
+      expect(plan.bricks).toHaveLength(512);
+      for (const b of plan.bricks) {
+        expect(
+          b.textureSize[0] * b.textureSize[1] * b.textureSize[2]
+        ).toBeLessThan(512 * 512 * 2948);
+      }
+    });
+
     it('maps dirty regions to brick uploads', () => {
       const plan = buildWasmVtkBrickPlan([2900, 512, 512], {
         strategy: 'minimum',
@@ -134,6 +156,80 @@ describe('volumeTextureBrickWasm', () => {
       expect(uploads[1].brickIndex).toBe(1);
       expect(uploads[0].localExtent[0]).toBe(1400);
       expect(uploads[1].localExtent[0]).toBe(0); // 1449 - 1449
+    });
+  });
+
+  describe('dense brick helpers', () => {
+    it('estimates Int16 CT bytes', () => {
+      expect(estimateVolumeScalarBytes([512, 512, 2948], 2)).toBe(1545601024);
+    });
+
+    it('flags large volumes for dense bricks', () => {
+      expect(shouldUseDenseWasmBricks([512, 512, 100], 2)).toBe(false);
+      expect(shouldUseDenseWasmBricks([512, 512, 2948], 2)).toBe(true);
+    });
+
+    it('intersects axial plane with a subset of 8x8x8 bricks', () => {
+      const plan = buildWasmVtkBrickPlan([512, 512, 2948], {
+        strategy: 'fixed',
+        partitions: [8, 8, 8],
+        max3D: 2048,
+      });
+      const hits = bricksIntersectingIjkPlane(
+        plan,
+        [256, 256, 1474],
+        [0, 0, 1],
+        2
+      );
+      expect(hits.length).toBeGreaterThan(0);
+      expect(hits.length).toBeLessThan(plan.bricks.length);
+      const aabb = brickExtentsAabb(hits);
+      expect(aabb).not.toBeNull();
+      expect(ijkBoxVoxelCount(aabb)).toBeLessThan(512 * 512 * 2948);
+    });
+
+    it('refines plan so bricks fit a byte budget', () => {
+      const plan = buildWasmVtkBrickPlan([512, 512, 2948], {
+        strategy: 'minimum',
+        max3D: 2048,
+      });
+      const refined = refineBrickPlanForByteBudget(
+        plan,
+        2,
+        1,
+        64 * 1024 * 1024
+      );
+      let maxBytes = 0;
+      for (const b of refined.bricks) {
+        const [sx, sy, sz] = b.textureSize;
+        maxBytes = Math.max(maxBytes, sx * sy * sz * 2);
+      }
+      expect(maxBytes).toBeLessThanOrEqual(64 * 1024 * 1024);
+    });
+
+    it('does not refine fixed partition grids', () => {
+      const plan = buildWasmVtkBrickPlan([512, 512, 2948], {
+        strategy: 'fixed',
+        partitions: [8, 8, 8],
+        max3D: 2048,
+      });
+      const refined = refineBrickPlanForByteBudget(plan, 2, 1, 1024);
+      expect(refined.vtkPartitions).toEqual([8, 8, 8]);
+      expect(refined.bricks).toHaveLength(512);
+    });
+
+    it('copies IJK box into a dense brick buffer', () => {
+      const dims = [4, 4, 4];
+      const src = new Int16Array(4 * 4 * 4);
+      for (let i = 0; i < src.length; i++) {
+        src[i] = i;
+      }
+      const extent = [1, 2, 1, 2, 1, 2];
+      const dest = new Int16Array(2 * 2 * 2);
+      copyIjkBoxIntoDenseBrick(src, dest, dims, extent, 1);
+      // source (i,j,k)=(1,1,1) → index ((1*4+1)*4+1)=21
+      expect(dest[0]).toBe(21);
+      expect(dest.length).toBe(8);
     });
   });
 });

@@ -1,5 +1,6 @@
 import { Events, ViewportStatus, ViewportType } from '../../../enums';
 import eventTarget from '../../../eventTarget';
+import clonePoint3 from '../../../utilities/clonePoint3';
 import triggerEvent from '../../../utilities/triggerEvent';
 import uuidv4 from '../../../utilities/uuidv4';
 import type { IImageVolume, VOIRange } from '../../../types';
@@ -28,7 +29,7 @@ import {
   type VtkWasmViewportHandle,
 } from '../vtkWasmRuntime';
 import {
-  bindVtkWasmVolume,
+  createVtkWasmVolumeBinding,
   type VtkWasmVolumeBinding,
 } from '../vtkWasmVolumeBinding';
 import { getVolumeScalarArray } from '../webgpuMapperImageData';
@@ -142,7 +143,7 @@ export class VtkWasmVolumeSliceRenderPath
       );
     }
 
-    const binding = bindVtkWasmVolume(
+    const binding = createVtkWasmVolumeBinding(
       vtk,
       imageVolume,
       handle.session.typedArrayInterface
@@ -152,7 +153,14 @@ export class VtkWasmVolumeSliceRenderPath
       (imageVolume as { loadStatus?: { loaded?: boolean } }).loadStatus?.loaded
     );
     if (alreadyLoaded) {
-      await binding.refreshScalars();
+      if (binding.syncMprPlane) {
+        // Dense bricks: stitch a default mid-volume plane; real plane arrives
+        // in syncFromViewState. Avoids full-volume heap.alloc for multi-brick.
+        const midWorld = getVolumeMidWorld(imageVolume);
+        await binding.syncMprPlane(midWorld, [0, 0, 1]);
+      } else {
+        await binding.refreshScalars(undefined, { force: true });
+      }
     }
 
     const renderWindow = vtk.vtkRenderWindow({
@@ -211,9 +219,41 @@ export class VtkWasmVolumeSliceRenderPath
     };
 
     const uploadAndPresent = () => {
-      void Promise.resolve(binding.refreshScalars()).then(async (ok) => {
+      void Promise.resolve(
+        binding.syncMprPlane
+          ? (async () => {
+              // Force brick upload first so single-brick imageData is ready.
+              await binding.refreshScalars(undefined, { force: true });
+              const cam = ctx.viewport.getViewState?.() as
+                | {
+                    focalPoint?: number[];
+                    viewPlaneNormal?: number[];
+                  }
+                | undefined;
+              if (cam?.focalPoint && cam?.viewPlaneNormal) {
+                return binding.syncMprPlane!(
+                  cam.focalPoint as [number, number, number],
+                  cam.viewPlaneNormal as [number, number, number]
+                );
+              }
+              return binding.syncMprPlane!(
+                getVolumeMidWorld(imageVolume),
+                [0, 0, 1]
+              );
+            })()
+          : binding.refreshScalars(undefined, { force: true })
+      ).then(async (ok) => {
         if (!ok) {
           return;
+        }
+        // Rebind after upload — single-path mutates ImageData in place; dense
+        // MPR swaps a fresh ImageData instance (or single-brick ImageData).
+        if (this.mapper) {
+          await invoke(this.mapper, 'setInputData', binding.imageData);
+          await invoke(this.mapper, 'modified');
+        }
+        if (this.actor) {
+          await invoke(this.actor, 'modified');
         }
         if (!rendering.defaultVOIRange) {
           const range = resolveVolumeVoiRange(imageVolume);
@@ -299,6 +339,7 @@ export class VtkWasmVolumeSliceRenderPath
       },
       removeData: () => {
         rendering.removeStreamingSubscriptions?.();
+        rendering.binding.dispose?.();
         this.handle?.dispose();
         this.handle = undefined;
         this.renderWindow = undefined;
@@ -363,11 +404,15 @@ export class VtkWasmVolumeSliceRenderPath
     // Do not call setDirectionOfProjection — vtkOpenGLCamera in vtk-wasm has
     // no such method; position + focalPoint imply the look direction.
 
+    // Plain arrays only: TypedArrays JSON-serialize as objects and fail
+    // vtk-wasm DeserializeJSON (type must be array).
     cam.$set?.({
       parallelProjection: 1,
-      ...(camera.viewUp ? { viewUp: camera.viewUp } : {}),
-      ...(camera.focalPoint ? { focalPoint: camera.focalPoint } : {}),
-      ...(camera.position ? { position: camera.position } : {}),
+      ...(camera.viewUp ? { viewUp: clonePoint3(camera.viewUp) } : {}),
+      ...(camera.focalPoint
+        ? { focalPoint: clonePoint3(camera.focalPoint) }
+        : {}),
+      ...(camera.position ? { position: clonePoint3(camera.position) } : {}),
       ...(typeof camera.parallelScale === 'number'
         ? { parallelScale: camera.parallelScale }
         : {}),
@@ -404,12 +449,26 @@ export class VtkWasmVolumeSliceRenderPath
       : projection.activeSourceICamera;
 
     if (cam.focalPoint && cam.viewPlaneNormal) {
-      await invoke(this.slicePlane, 'setOrigin', ...cam.focalPoint);
-      await invoke(this.slicePlane, 'setNormal', ...cam.viewPlaneNormal);
+      const origin = clonePoint3(cam.focalPoint);
+      const normal = clonePoint3(cam.viewPlaneNormal);
+      await invoke(this.slicePlane, 'setOrigin', ...origin);
+      await invoke(this.slicePlane, 'setNormal', ...normal);
+      // Plain arrays only: TypedArrays JSON-serialize as objects and fail
+      // vtk-wasm DeserializeJSON (type must be array).
       this.slicePlane.$set?.({
-        origin: cam.focalPoint,
-        normal: cam.viewPlaneNormal,
+        origin,
+        normal,
       });
+      if (rendering.binding.syncMprPlane) {
+        const ok = await rendering.binding.syncMprPlane(origin, normal);
+        if (ok) {
+          await invoke(
+            this.mapper,
+            'setInputData',
+            rendering.binding.imageData
+          );
+        }
+      }
     }
 
     if (projection.isSourceBinding) {
@@ -556,4 +615,45 @@ function buildPlanarVolumeImageData(imageVolume: IImageVolume) {
     hasPixelSpacing: true,
     getScalarData: () => getVolumeScalarArray(imageVolume),
   };
+}
+
+/** Mid-volume world point, respecting patient direction when available. */
+function getVolumeMidWorld(
+  imageVolume: IImageVolume
+): [number, number, number] {
+  const dims = imageVolume.dimensions as [number, number, number];
+  const midIjk: [number, number, number] = [
+    0.5 * (dims[0] - 1),
+    0.5 * (dims[1] - 1),
+    0.5 * (dims[2] - 1),
+  ];
+  const imageData = imageVolume.imageData as
+    | {
+        indexToWorld?: (
+          ijk: [number, number, number]
+        ) => [number, number, number] | ArrayLike<number>;
+      }
+    | undefined;
+  if (typeof imageData?.indexToWorld === 'function') {
+    const w = imageData.indexToWorld(midIjk);
+    return [Number(w[0]), Number(w[1]), Number(w[2])];
+  }
+  const origin = imageVolume.origin as [number, number, number];
+  const spacing = imageVolume.spacing as [number, number, number];
+  const direction = imageVolume.direction as number[] | undefined;
+  if (direction && direction.length >= 9) {
+    const d = direction;
+    const [i, j, k] = midIjk;
+    const [sx, sy, sz] = spacing;
+    return [
+      origin[0] + (d[0] * i * sx + d[1] * j * sy + d[2] * k * sz),
+      origin[1] + (d[3] * i * sx + d[4] * j * sy + d[5] * k * sz),
+      origin[2] + (d[6] * i * sx + d[7] * j * sy + d[8] * k * sz),
+    ];
+  }
+  return [
+    origin[0] + midIjk[0] * spacing[0],
+    origin[1] + midIjk[1] * spacing[1],
+    origin[2] + midIjk[2] * spacing[2],
+  ];
 }
