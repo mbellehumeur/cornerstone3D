@@ -18,9 +18,13 @@ import type {
   PlanarResolvedICamera,
   PlanarViewportRenderContext,
 } from './PlanarViewportTypes';
+import { getDefaultVolumeVOIRange } from '../../helpers/setDefaultVolumeVOI';
 import { triggerPlanarVolumeNewImage } from './planarImageEvents';
+import {
+  getCpuEquivalentParallelScale,
+  getOrthogonalVolumeSliceLayout,
+} from './planarAdapterCoordinateTransforms';
 import { resolvePlanarRenderPathProjection } from './planarRenderPathProjection';
-import { createPlanarPresentationScaleMatrix } from './planarRenderCamera';
 import type { PlanarRendering } from './planarRuntimeTypes';
 import {
   createVtkWasmViewportHandle,
@@ -95,7 +99,7 @@ async function invoke(
   }
 }
 
-function resolveVolumeVoiRange(imageVolume: IImageVolume): VOIRange {
+function fallbackVolumeVoiRange(imageVolume: IImageVolume): VOIRange {
   const voxelManager = imageVolume.voxelManager as
     | { getRange?: () => number[] }
     | undefined;
@@ -111,6 +115,39 @@ function resolveVolumeVoiRange(imageVolume: IImageVolume): VOIRange {
   // CT soft-tissue fallback — wasm ImageProperty defaults (255/127.5) blank HU data.
   return { lower: -160, upper: 240 };
 }
+
+async function resolveDefaultVolumeVoiRange(
+  imageVolume: IImageVolume
+): Promise<VOIRange> {
+  const fromMetadata = await getDefaultVolumeVOIRange(imageVolume);
+  if (
+    fromMetadata &&
+    Number.isFinite(fromMetadata.lower) &&
+    Number.isFinite(fromMetadata.upper) &&
+    fromMetadata.upper > fromMetadata.lower
+  ) {
+    return fromMetadata;
+  }
+  return fallbackVolumeVoiRange(imageVolume);
+}
+
+function effectiveVolumeVoiRange(
+  imageVolume: IImageVolume,
+  rendering?: Pick<
+    PlanarVtkWasmVolumeSliceRendering,
+    'dataPresentation' | 'defaultVOIRange'
+  >,
+  defaultVoiForRebind?: VOIRange
+): VOIRange {
+  return (
+    rendering?.dataPresentation?.voiRange ??
+    rendering?.defaultVOIRange ??
+    defaultVoiForRebind ??
+    fallbackVolumeVoiRange(imageVolume)
+  );
+}
+
+const DEFAULT_PLANAR_VIEW_UP: [number, number, number] = [0, -1, 0];
 
 function getVolumeWorldBounds(
   imageVolume: IImageVolume
@@ -172,6 +209,8 @@ export class VtkWasmVolumeSliceRenderPath
   private didLogMprDiagnostics = false;
   /** CPU fallback canvas — wasm ImageReslice paints RGB=0 in this bundle. */
   private cpuCanvas?: HTMLCanvasElement;
+  private lastBlitViewUp?: [number, number, number];
+  private lastBlitParallelScale?: number;
 
   async addData(
     ctx: PlanarViewportRenderContext,
@@ -252,7 +291,7 @@ export class VtkWasmVolumeSliceRenderPath
       | undefined;
     this.imageProperty = imageProperty ?? (actor.property as VtkWasmObject);
 
-    const defaultVOIRange = resolveVolumeVoiRange(imageVolume);
+    const defaultVOIRange = await resolveDefaultVolumeVoiRange(imageVolume);
     this.defaultVoiForRebind = defaultVOIRange;
     if (defaultVOIRange) {
       await this.applyVoiRange(defaultVOIRange);
@@ -342,12 +381,27 @@ export class VtkWasmVolumeSliceRenderPath
           );
           return;
         }
-        rendering.defaultVOIRange =
-          rendering.defaultVOIRange ?? resolveVolumeVoiRange(imageVolume);
-        await this.applyVoiRange(rendering.defaultVOIRange);
+        if (!rendering.defaultVOIRange) {
+          rendering.defaultVOIRange =
+            await resolveDefaultVolumeVoiRange(imageVolume);
+          this.defaultVoiForRebind = rendering.defaultVOIRange;
+        }
+        await this.applyVoiRange(
+          effectiveVolumeVoiRange(
+            imageVolume,
+            rendering,
+            this.defaultVoiForRebind
+          )
+        );
         // Camera + plane first, then rebind + frame + direct wasm render.
         await this.syncFromViewState(ctx, rendering, data.id);
-        await this.presentMpr(binding, imageVolume);
+        await this.presentMpr(binding, imageVolume, {
+          voiRange: effectiveVolumeVoiRange(
+            imageVolume,
+            rendering,
+            this.defaultVoiForRebind
+          ),
+        });
         ctx.display.markRendered();
       });
     };
@@ -367,7 +421,13 @@ export class VtkWasmVolumeSliceRenderPath
 
     // Initial camera + slice plane so the first present is not an empty scene.
     await this.syncFromViewState(ctx, rendering, data.id);
-    await this.presentMpr(binding, imageVolume);
+    await this.presentMpr(binding, imageVolume, {
+      voiRange: effectiveVolumeVoiRange(
+        imageVolume,
+        rendering,
+        this.defaultVoiForRebind
+      ),
+    });
 
     triggerPlanarVolumeNewImage(ctx, {
       camera: ctx.viewport.getViewState(),
@@ -410,7 +470,11 @@ export class VtkWasmVolumeSliceRenderPath
               imageVolume,
               origin,
               normal,
-              voi
+              voi,
+              {
+                viewUp: this.lastBlitViewUp,
+                parallelScale: this.lastBlitParallelScale,
+              }
             );
             this.render(ctx, data.id);
           });
@@ -424,7 +488,13 @@ export class VtkWasmVolumeSliceRenderPath
           camera as PlanarViewState | undefined
         ).then(async () => {
           if (!this.mprInputBound) {
-            await this.presentMpr(binding, imageVolume);
+            await this.presentMpr(binding, imageVolume, {
+              voiRange: effectiveVolumeVoiRange(
+                imageVolume,
+                rendering,
+                this.defaultVoiForRebind
+              ),
+            });
           } else {
             const slab = binding.getMprImageData?.() ?? binding.imageData;
             let normal: [number, number, number] = [0, 0, 1];
@@ -443,10 +513,11 @@ export class VtkWasmVolumeSliceRenderPath
               }
             }
             await this.frameCameraToSlab(slab, normal);
-            const voi =
-              rendering.defaultVOIRange ??
-              this.defaultVoiForRebind ??
-              resolveVolumeVoiRange(imageVolume);
+            const voi = effectiveVolumeVoiRange(
+              imageVolume,
+              rendering,
+              this.defaultVoiForRebind
+            );
             let origin = getVolumeMidWorld(imageVolume);
             if (this.slicePlane) {
               origin = await getSlicePlaneOrigin(this.slicePlane, origin);
@@ -455,7 +526,11 @@ export class VtkWasmVolumeSliceRenderPath
               imageVolume,
               origin,
               normal,
-              voi
+              voi,
+              {
+                viewUp: this.lastBlitViewUp,
+                parallelScale: this.lastBlitParallelScale,
+              }
             );
             await this.forceWasmRender();
           }
@@ -503,6 +578,8 @@ export class VtkWasmVolumeSliceRenderPath
         this.mprInputBound = false;
         this.useImageMapper = false;
         this.didLogMprDiagnostics = false;
+        this.lastBlitViewUp = undefined;
+        this.lastBlitParallelScale = undefined;
         this.cpuCanvas?.remove();
         this.cpuCanvas = undefined;
       },
@@ -747,9 +824,12 @@ export class VtkWasmVolumeSliceRenderPath
   private async presentMpr(
     binding: VtkWasmVolumeBinding,
     imageVolume: IImageVolume,
-    viewPlaneNormal?: [number, number, number]
+    options?: {
+      viewPlaneNormal?: [number, number, number];
+      voiRange?: VOIRange;
+    }
   ): Promise<void> {
-    let normal = viewPlaneNormal;
+    let normal = options?.viewPlaneNormal;
     if (!normal && this.slicePlane) {
       const n = (await invoke(this.slicePlane, 'getNormal')) as
         | number[]
@@ -783,12 +863,19 @@ export class VtkWasmVolumeSliceRenderPath
     await this.frameCameraToSlab(slabInput, normal);
     await this.forceWasmRender();
 
-    const voi = this.defaultVoiForRebind ?? resolveVolumeVoiRange(imageVolume);
+    const voi =
+      options?.voiRange ??
+      this.defaultVoiForRebind ??
+      fallbackVolumeVoiRange(imageVolume);
     const renderOk = await this.blitVolumeSliceToCpuCanvas(
       imageVolume,
       planeOrigin,
       normal,
-      voi
+      voi,
+      {
+        viewUp: this.lastBlitViewUp,
+        parallelScale: this.lastBlitParallelScale,
+      }
     );
 
     if (!this.didLogPresent && this.handle?.canvas) {
@@ -1030,7 +1117,11 @@ export class VtkWasmVolumeSliceRenderPath
     imageVolume: IImageVolume,
     originWorld: [number, number, number],
     normalWorld: [number, number, number],
-    voiRange: VOIRange
+    voiRange: VOIRange,
+    camera?: {
+      parallelScale?: number;
+      viewUp?: [number, number, number];
+    }
   ): Promise<boolean> {
     const canvas = this.cpuCanvas;
     if (!canvas) {
@@ -1039,10 +1130,13 @@ export class VtkWasmVolumeSliceRenderPath
     if (canvas.parentElement) {
       resizeVtkWasmCanvas(canvas, canvas.parentElement);
     }
+    const viewUp =
+      camera?.viewUp ?? this.lastBlitViewUp ?? DEFAULT_PLANAR_VIEW_UP;
     const slice = extractOrthogonalVolumeSlice(
       imageVolume,
       originWorld,
-      normalWorld
+      normalWorld,
+      viewUp
     );
     if (!slice) {
       console.warn('[vtkWasm] MPR CPU blit: slice extract failed');
@@ -1069,12 +1163,20 @@ export class VtkWasmVolumeSliceRenderPath
     }
     dest.fillStyle = '#000';
     dest.fillRect(0, 0, canvas.width, canvas.height);
-    const scale = Math.min(
-      canvas.width / slice.width,
-      canvas.height / slice.height
-    );
-    const dw = slice.width * scale;
-    const dh = slice.height * scale;
+
+    const fitScale = getCpuEquivalentParallelScale({
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
+      columns: slice.width,
+      rows: slice.height,
+      columnPixelSpacing: slice.worldWidth / Math.max(slice.width, 1),
+      rowPixelSpacing: slice.worldHeight / Math.max(slice.height, 1),
+    });
+    const parallelScale =
+      camera?.parallelScale ?? this.lastBlitParallelScale ?? fitScale;
+    const mmToPx = canvas.height / (2 * Math.max(parallelScale, 0.001));
+    const dw = slice.worldWidth * mmToPx;
+    const dh = slice.worldHeight * mmToPx;
     const dx = (canvas.width - dw) * 0.5;
     const dy = (canvas.height - dh) * 0.5;
     dest.imageSmoothingEnabled = true;
@@ -1212,6 +1314,13 @@ export class VtkWasmVolumeSliceRenderPath
       ? projection.resolvedICamera
       : projection.activeSourceICamera;
 
+    if (cam.viewUp) {
+      this.lastBlitViewUp = clonePoint3(cam.viewUp);
+    }
+    if (typeof cam.parallelScale === 'number') {
+      this.lastBlitParallelScale = cam.parallelScale;
+    }
+
     if (cam.focalPoint && cam.viewPlaneNormal) {
       const origin = clonePoint3(cam.focalPoint);
       const normal = clonePoint3(cam.viewPlaneNormal);
@@ -1230,14 +1339,6 @@ export class VtkWasmVolumeSliceRenderPath
       await this.applyCameraToWasm(projection.resolvedICamera);
     } else {
       await this.applyCameraToWasm(projection.activeSourceICamera);
-    }
-
-    const activeCam = projection.isSourceBinding
-      ? projection.resolvedICamera
-      : projection.activeSourceICamera;
-    if (this.actor && activeCam) {
-      const matrix = createPlanarPresentationScaleMatrix(activeCam);
-      await invoke(this.actor, 'setUserMatrix', Array.from(matrix));
     }
 
     rendering.currentImageIdIndex = projection.currentImageIdIndex;
@@ -1456,56 +1557,81 @@ function worldToIjkFromVolume(
 function extractOrthogonalVolumeSlice(
   imageVolume: IImageVolume,
   originWorld: [number, number, number],
-  normalWorld: [number, number, number]
+  normalWorld: [number, number, number],
+  viewUp: [number, number, number] = DEFAULT_PLANAR_VIEW_UP
 ):
-  | { width: number; height: number; data: Int16Array | Float32Array }
+  | {
+      width: number;
+      height: number;
+      data: Int16Array | Float32Array;
+      worldWidth: number;
+      worldHeight: number;
+    }
   | undefined {
   const scalars = getVolumeScalarArray(imageVolume);
   if (!scalars?.length) {
     return undefined;
   }
   const dims = imageVolume.dimensions as [number, number, number];
-  const [dx, dy, dz] = dims;
+  const spacing = imageVolume.spacing as [number, number, number];
+  const direction = imageVolume.direction as number[] | undefined;
+  if (!direction || direction.length < 9) {
+    return undefined;
+  }
   const ijk = worldToIjkFromVolume(imageVolume, originWorld);
-  const ax = Math.abs(normalWorld[0]);
-  const ay = Math.abs(normalWorld[1]);
-  const az = Math.abs(normalWorld[2]);
+  const layout = getOrthogonalVolumeSliceLayout({
+    dimensions: dims,
+    spacing,
+    direction,
+    viewPlaneNormal: normalWorld,
+    viewUp,
+    sliceIndexIjk: ijk,
+  });
+  if (!layout) {
+    return undefined;
+  }
+
+  const [dx, dy, dz] = dims;
   const src = scalars as Int16Array | Float32Array;
   const comps = Math.max(1, Math.round(scalars.length / (dx * dy * dz)));
+  const {
+    columnAxisIndex,
+    rowAxisIndex,
+    sliceAxisIndex,
+    sliceIndex,
+    columns,
+    rows,
+    columnPixelSpacing,
+    rowPixelSpacing,
+  } = layout;
 
   const sample = (i: number, j: number, k: number): number => {
     const idx = ((k * dy + j) * dx + i) * comps;
     return Number(src[idx] ?? 0);
   };
 
-  if (az >= ax && az >= ay) {
-    const k = Math.min(dz - 1, Math.max(0, Math.round(ijk[2])));
-    const out = new Int16Array(dx * dy);
-    for (let j = 0; j < dy; j++) {
-      for (let i = 0; i < dx; i++) {
-        out[j * dx + i] = sample(i, j, k);
-      }
-    }
-    return { width: dx, height: dy, data: out };
-  }
-  if (ax >= ay) {
-    const i = Math.min(dx - 1, Math.max(0, Math.round(ijk[0])));
-    const out = new Int16Array(dy * dz);
-    for (let k = 0; k < dz; k++) {
-      for (let j = 0; j < dy; j++) {
-        out[k * dy + j] = sample(i, j, k);
-      }
-    }
-    return { width: dy, height: dz, data: out };
-  }
-  const j = Math.min(dy - 1, Math.max(0, Math.round(ijk[1])));
-  const out = new Int16Array(dx * dz);
-  for (let k = 0; k < dz; k++) {
-    for (let i = 0; i < dx; i++) {
-      out[k * dx + i] = sample(i, j, k);
+  const out = new Int16Array(columns * rows);
+  const ijkSample: [number, number, number] = [0, 0, 0];
+  ijkSample[sliceAxisIndex] = sliceIndex;
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < columns; col++) {
+      ijkSample[columnAxisIndex] = col;
+      ijkSample[rowAxisIndex] = row;
+      out[row * columns + col] = sample(
+        ijkSample[0],
+        ijkSample[1],
+        ijkSample[2]
+      );
     }
   }
-  return { width: dx, height: dz, data: out };
+
+  return {
+    width: columns,
+    height: rows,
+    data: out,
+    worldWidth: columns * columnPixelSpacing,
+    worldHeight: rows * rowPixelSpacing,
+  };
 }
 
 function windowLevelSliceToRgba(

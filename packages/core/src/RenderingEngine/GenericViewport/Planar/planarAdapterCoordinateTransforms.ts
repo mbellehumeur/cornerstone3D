@@ -199,21 +199,18 @@ export function getCpuEquivalentParallelScale(args: {
   return Math.max(physicalHeight, physicalWidth / aspectRatio) * 0.5;
 }
 
-export function getOrthogonalVolumeSliceGeometry(args: {
-  dimensions: Point3;
+function resolveOrthogonalVolumeSliceAxes(args: {
   direction: number[] | ArrayLike<number>;
-  spacing: Point3;
   viewPlaneNormal: Point3;
   viewUp: Point3;
 }):
   | {
-      columnPixelSpacing: number;
-      columns: number;
-      rowPixelSpacing: number;
-      rows: number;
+      columnAxisIndex: 0 | 1 | 2;
+      rowAxisIndex: 0 | 1 | 2;
+      sliceAxisIndex: 0 | 1 | 2;
     }
   | undefined {
-  const { dimensions, direction, spacing, viewPlaneNormal, viewUp } = args;
+  const { direction, viewPlaneNormal, viewUp } = args;
   const directionArray = Array.from(direction);
   const rowAxis = directionArray.slice(0, 3) as Point3;
   const colAxis = directionArray.slice(3, 6) as Point3;
@@ -250,7 +247,80 @@ export function getOrthogonalVolumeSliceGeometry(args: {
     return;
   }
 
+  const sliceAxisIndex = ([0, 1, 2] as const).find(
+    (axisIndex) => axisIndex !== columnAxisIndex && axisIndex !== rowAxisIndex
+  ) as 0 | 1 | 2;
+
+  return { columnAxisIndex, rowAxisIndex, sliceAxisIndex };
+}
+
+export function getOrthogonalVolumeSliceGeometry(args: {
+  dimensions: Point3;
+  direction: number[] | ArrayLike<number>;
+  spacing: Point3;
+  viewPlaneNormal: Point3;
+  viewUp: Point3;
+}):
+  | {
+      columnPixelSpacing: number;
+      columns: number;
+      rowPixelSpacing: number;
+      rows: number;
+    }
+  | undefined {
+  const { dimensions, spacing, ...axisArgs } = args;
+  const axes = resolveOrthogonalVolumeSliceAxes(axisArgs);
+  if (!axes) {
+    return;
+  }
+
+  const { columnAxisIndex, rowAxisIndex } = axes;
+
   return {
+    columns: dimensions[columnAxisIndex],
+    rows: dimensions[rowAxisIndex],
+    columnPixelSpacing: spacing[columnAxisIndex],
+    rowPixelSpacing: spacing[rowAxisIndex],
+  };
+}
+
+export function getOrthogonalVolumeSliceLayout(args: {
+  dimensions: Point3;
+  direction: number[] | ArrayLike<number>;
+  spacing: Point3;
+  viewPlaneNormal: Point3;
+  viewUp: Point3;
+  sliceIndexIjk: Point3;
+}):
+  | {
+      columnAxisIndex: 0 | 1 | 2;
+      columnPixelSpacing: number;
+      columns: number;
+      rowAxisIndex: 0 | 1 | 2;
+      rowPixelSpacing: number;
+      rows: number;
+      sliceAxisIndex: 0 | 1 | 2;
+      sliceIndex: number;
+    }
+  | undefined {
+  const { dimensions, spacing, sliceIndexIjk, ...axisArgs } = args;
+  const axes = resolveOrthogonalVolumeSliceAxes(axisArgs);
+  if (!axes) {
+    return;
+  }
+
+  const { columnAxisIndex, rowAxisIndex, sliceAxisIndex } = axes;
+  const sliceDim = dimensions[sliceAxisIndex];
+  const sliceIndex = Math.min(
+    sliceDim - 1,
+    Math.max(0, Math.round(sliceIndexIjk[sliceAxisIndex]))
+  );
+
+  return {
+    columnAxisIndex,
+    rowAxisIndex,
+    sliceAxisIndex,
+    sliceIndex,
     columns: dimensions[columnAxisIndex],
     rows: dimensions[rowAxisIndex],
     columnPixelSpacing: spacing[columnAxisIndex],
