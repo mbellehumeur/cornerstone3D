@@ -113,7 +113,6 @@ export class VtkWasmVolume3DRenderPath
   /** True after brick actors have been wired once for this binding. */
   private brickVolumesSynced = false;
   private binding?: VtkWasmVolumeBinding;
-  private interactor?: VtkWasmObject;
   private sampleDistance = 1;
   private opacityUnitDistance = 1;
 
@@ -193,23 +192,10 @@ export class VtkWasmVolume3DRenderPath
 
     await invoke(renderWindow, 'addRenderer', renderer);
 
-    // Kitware standalone requires an interactor bound to the same canvasSelector.
-    if (typeof vtk.vtkRenderWindowInteractor === 'function') {
-      const interactor = vtk.vtkRenderWindowInteractor({
-        canvasSelector: handle.canvasKey,
-        renderWindow,
-      }) as VtkWasmObject;
-      this.interactor = interactor;
-      try {
-        const style = interactor.interactorStyle as VtkWasmObject | undefined;
-        await invoke(style, 'setCurrentStyleToTrackballCamera');
-      } catch {
-        // Style API varies by bundle; rendering still works without it.
-      }
-      await invoke(interactor, 'start');
-    }
-
     // Prove GL presents before volume scalars arrive.
+    // No vtkRenderWindowInteractor: Cornerstone owns input (canvas is
+    // pointer-events:none) and we present via renderAsync(). Starting the
+    // wasm event loop left a rAF tick that crashed on canvas detach.
     await invoke(renderer, 'resetCamera');
     await invoke(renderWindow, 'render');
 
@@ -227,11 +213,27 @@ export class VtkWasmVolume3DRenderPath
       this.opacityUnitDistance
     );
 
+    const useMultiBlock =
+      binding.useMultiBlockInput === true && !!binding.multiBlock;
     const useMultiVolume =
+      !useMultiBlock &&
       binding.useMultiVolumeInput === true &&
       typeof binding.getBrickImageDatas === 'function';
 
-    if (useMultiVolume) {
+    if (useMultiBlock) {
+      const mapper = vtk.vtkMultiBlockVolumeMapper!() as VtkWasmObject;
+      const volume = vtk.vtkVolume() as VtkWasmObject;
+      // MultiBlockVolumeMapper has no SetSampleDistance (GPU ray-cast only).
+      await invoke(mapper, 'setScalarModeToUsePointData');
+      await invoke(mapper, 'setArrayName', 'Scalars');
+      await invoke(volume, 'setMapper', mapper);
+      await invoke(volume, 'setProperty', property);
+      this.volumeMapper = mapper;
+      this.volume = volume;
+      if (scalarsReady) {
+        await this.wireMultiBlockVolumeInput(binding, renderer, property);
+      }
+    } else if (useMultiVolume) {
       // Never setInputData(binding.imageData) here — that is the MPR stub/slab.
       if (scalarsReady) {
         const ok = await this.syncBrickVolumes(
@@ -248,7 +250,7 @@ export class VtkWasmVolume3DRenderPath
       }
     } else {
       // Create mapper/volume now; only addVolume after scalars exist — otherwise
-      // interactor.start() renders empty ImageData → "No scalars named """.
+      // an early render hits empty ImageData → "No scalars named """.
       const mapper = vtk.vtkGPUVolumeRayCastMapper!() as VtkWasmObject;
       const volume = vtk.vtkVolume() as VtkWasmObject;
       await invoke(mapper, 'setSampleDistance', this.sampleDistance);
@@ -333,7 +335,26 @@ export class VtkWasmVolume3DRenderPath
           if (!ok || !this.wasmRenderer || !this.handle) {
             return;
           }
-          if (binding.useMultiVolumeInput) {
+          if (binding.useMultiBlockInput && binding.multiBlock) {
+            if (!this.volumeMapper || !this.volume) {
+              const mapper = this.handle.vtk
+                .vtkMultiBlockVolumeMapper!() as VtkWasmObject;
+              const volume = this.handle.vtk.vtkVolume!() as VtkWasmObject;
+              this.volumeMapper = mapper;
+              this.volume = volume;
+              await invoke(volume, 'setMapper', mapper);
+              await invoke(
+                volume,
+                'setProperty',
+                this.volumeProperty ?? property
+              );
+            }
+            await this.wireMultiBlockVolumeInput(
+              binding,
+              this.wasmRenderer,
+              this.volumeProperty ?? property
+            );
+          } else if (binding.useMultiVolumeInput) {
             // New brick ImageData instances — must rebind, not early-out on count.
             this.brickVolumesSynced = false;
             const synced = await this.syncBrickVolumes(
@@ -381,6 +402,8 @@ export class VtkWasmVolume3DRenderPath
               `hasScalars=${binding.hasScalars()} ` +
               `volumeAdded=${this.volumeAddedToRenderer} ` +
               `partitions=${binding.brickPlan.vtkPartitions.join('x')} ` +
+              `useMultiBlock=${binding.useMultiBlockInput === true} ` +
+              `useMultiVolume=${binding.useMultiVolumeInput === true} ` +
               `canvas=${canvas?.width ?? 0}x${canvas?.height ?? 0}`
           );
           await this.renderAsync();
@@ -432,12 +455,6 @@ export class VtkWasmVolume3DRenderPath
         rendering.binding.dispose?.();
         unregisterVtkWasmVolume3D(ctx.viewportId);
         this.clearBrickVolumes();
-        try {
-          this.interactor?.$delete?.();
-        } catch {
-          // ignore
-        }
-        this.interactor = undefined;
         this.handle?.dispose();
         this.handle = undefined;
         this.renderWindow = undefined;
@@ -449,6 +466,65 @@ export class VtkWasmVolume3DRenderPath
         this.volumeAddedToRenderer = false;
       },
     };
+  }
+
+  /**
+   * Dense multi-brick: one vtkMultiBlockVolumeMapper + vtkVolume over the
+   * binding's vtkMultiBlockDataSet (seamless composite vs N actors).
+   */
+  private async wireMultiBlockVolumeInput(
+    binding: VtkWasmVolumeBinding,
+    renderer: VtkWasmObject,
+    property: VtkWasmObject
+  ): Promise<void> {
+    if (
+      !this.volumeMapper ||
+      !this.volume ||
+      !binding.multiBlock ||
+      !binding.hasScalars()
+    ) {
+      return;
+    }
+
+    const mb = binding.multiBlock;
+    // SetInputData is typed to ImageData only — use SetInputDataObject.
+    let bound = false;
+    try {
+      const setInputDataObject = this.volumeMapper.setInputDataObject as
+        | ((port: number, data: VtkWasmObject) => unknown)
+        | undefined;
+      if (typeof setInputDataObject === 'function') {
+        await invoke(this.volumeMapper, 'setInputDataObject', 0, mb);
+        bound = true;
+      }
+    } catch {
+      bound = false;
+    }
+    if (!bound) {
+      try {
+        await invoke(this.volumeMapper, 'setInputData', mb);
+        bound = true;
+      } catch (error) {
+        console.warn('[vtkWasm] MultiBlockVolumeMapper setInput failed', error);
+        return;
+      }
+    }
+
+    await invoke(this.volumeMapper, 'setScalarModeToUsePointData');
+    await invoke(this.volumeMapper, 'setArrayName', 'Scalars');
+    // No setSampleDistance — not on vtkMultiBlockVolumeMapper.
+    await invoke(this.volume, 'setMapper', this.volumeMapper);
+    await invoke(this.volume, 'setProperty', property);
+    await invoke(this.volume, 'setVisibility', 1);
+    await invoke(this.volumeMapper, 'modified');
+    await invoke(this.volume, 'modified');
+
+    if (!this.volumeAddedToRenderer) {
+      await invoke(renderer, 'addVolume', this.volume);
+      await invoke(renderer, 'addViewProp', this.volume);
+      this.volumeAddedToRenderer = true;
+      console.info('[vtkWasm] Volume3D addVolume ok (MultiBlock)');
+    }
   }
 
   /**

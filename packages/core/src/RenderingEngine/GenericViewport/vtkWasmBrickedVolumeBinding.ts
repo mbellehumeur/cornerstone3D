@@ -1,6 +1,8 @@
 import type { IImageVolume } from '../../types';
 import {
   buildWasmVtkBrickPlan,
+  estimateVolumeScalarBytes,
+  getWasmScalarBudgetBytes,
   ijkBoxVoxelCount,
   refineBrickPlanForByteBudget,
   type WasmIjkBox,
@@ -34,13 +36,22 @@ export type VtkWasmBrickedVolumeBinding = {
   brickPlan: WasmVtkVolumeBrickPlan;
   /** Stitched / active ImageData for ImageResliceMapper (MPR). */
   imageData: VtkWasmObject;
-  /** @deprecated MultiBlockVolumeMapper path — prefer getBrickImageDatas(). */
+  /**
+   * Multi-brick Volume3D: vtkMultiBlockDataSet of contiguous brick ImageDatas
+   * for vtkMultiBlockVolumeMapper (one volume actor).
+   */
   multiBlock: VtkWasmObject | undefined;
-  useMultiBlockInput: false;
-  /** Volume3D: one GPUVolumeRayCastMapper per brick when multi-brick. */
+  /** True when Volume3D should feed multiBlock to vtkMultiBlockVolumeMapper. */
+  useMultiBlockInput: boolean;
+  /**
+   * Fallback Volume3D path: one GPUVolumeRayCastMapper per brick when
+   * MultiBlock mapper is unavailable.
+   */
   useMultiVolumeInput: boolean;
   getBrickImageDatas: () => VtkWasmObject[];
   hasScalars: () => boolean;
+  /** True once ImageReslice has a real slab (stitched or single-brick), not the empty stub. */
+  hasMprInput: () => boolean;
   /** No-op — geometry is already split into bricks. */
   applyPartitions: (mapper: VtkWasmObject) => void | Promise<void>;
   /**
@@ -228,8 +239,9 @@ type BrickSlot = {
 };
 
 /**
- * Dense per-brick ImageData pool for large volumes. Avoids one full-volume
- * `heap.alloc`. Volume3D consumes MultiBlock; MPR stitches plane-hit bricks.
+ * Dense per-brick ImageData pool for large volumes / XY-partitioned WebGL.
+ * Avoids one full-volume `heap.alloc`. Volume3D prefers MultiBlockVolumeMapper;
+ * MPR stitches plane-hit bricks.
  */
 export function bindVtkWasmBrickedVolume(
   vtk: VtkWasmNamespace,
@@ -264,6 +276,49 @@ export function bindVtkWasmBrickedVolume(
       numberOfComponents
     );
   }
+
+  const isSingleBrick = brickPlan.bricks.length <= 1;
+  const multiBlockMapperAvailable =
+    typeof vtk.vtkMultiBlockVolumeMapper === 'function';
+  const multiBlockCtor = vtk.vtkMultiBlockDataSet;
+  const multiBlock =
+    !isSingleBrick && typeof multiBlockCtor === 'function'
+      ? (multiBlockCtor() as VtkWasmObject)
+      : undefined;
+  const useMultiBlockInput =
+    !isSingleBrick && !!multiBlock && multiBlockMapperAvailable;
+  const useMultiVolumeInput = !isSingleBrick && !useMultiBlockInput;
+  if (!isSingleBrick && !useMultiBlockInput) {
+    console.warn(
+      '[vtkWasm] vtkMultiBlockVolumeMapper/DataSet unavailable; falling back to per-brick volumes'
+    );
+  }
+
+  const syncMultiBlockDataset = async (): Promise<void> => {
+    if (!multiBlock) {
+      return;
+    }
+    const uploaded = slots.filter((s) => s.uploaded);
+    const setNumberOfBlocks = multiBlock.setNumberOfBlocks as
+      | ((n: number) => unknown)
+      | undefined;
+    const setBlock = multiBlock.setBlock as
+      | ((i: number, block: VtkWasmObject) => unknown)
+      | undefined;
+    if (typeof setNumberOfBlocks === 'function') {
+      await callMaybeAsync(setNumberOfBlocks.call(multiBlock, uploaded.length));
+    }
+    if (typeof setBlock === 'function') {
+      for (let i = 0; i < uploaded.length; i++) {
+        await callMaybeAsync(
+          setBlock.call(multiBlock, i, uploaded[i].imageData)
+        );
+      }
+    }
+    await callMaybeAsync(
+      (multiBlock.modified as (() => unknown) | undefined)?.()
+    );
+  };
 
   const applyDirection = (imageData: VtkWasmObject): void => {
     if (!direction || direction.length < 9) {
@@ -369,8 +424,8 @@ export function bindVtkWasmBrickedVolume(
 
   // MPR double-buffer: always swap in a complete ImageData; never resize the
   // instance currently wired to ImageResliceMapper mid-update.
+  // Do NOT pass dimensions into the ctor — that AllocateScalars as float.
   let mprImageData: VtkWasmObject = vtk.vtkImageData({
-    dimensions: [1, 1, 1],
     spacing,
     origin,
   }) as VtkWasmObject;
@@ -378,7 +433,10 @@ export function bindVtkWasmBrickedVolume(
   let refreshInFlight: Promise<boolean> | null = null;
   let pendingRefresh = false;
   let anyUploaded = false;
+  let mprSlabReady = false;
   let lastMprKey = '';
+  /** When volume fits the WASM budget, MPR uses one full ImageData (no thin slabs). */
+  let mprFullVolumeReady = false;
 
   const allocatePointerBackedArray = async (
     numValues: number,
@@ -525,6 +583,9 @@ export function bindVtkWasmBrickedVolume(
       }
     }
     anyUploaded = okCount > 0;
+    if (anyUploaded) {
+      await syncMultiBlockDataset();
+    }
     return anyUploaded;
   };
 
@@ -626,6 +687,7 @@ export function bindVtkWasmBrickedVolume(
       disposeVtkObject(previousImage);
     }
     anyUploaded = true;
+    mprSlabReady = true;
     return true;
   };
 
@@ -634,6 +696,12 @@ export function bindVtkWasmBrickedVolume(
     options?: { force?: boolean }
   ): Promise<boolean> => {
     const force = options?.force === true;
+    if (force) {
+      // Force brick rebuild invalidates any prior MPR stitch cache.
+      lastMprKey = '';
+      mprFullVolumeReady = false;
+      mprSlabReady = false;
+    }
     pendingRefresh = true;
     while (pendingRefresh) {
       if (!refreshInFlight) {
@@ -644,6 +712,9 @@ export function bindVtkWasmBrickedVolume(
             // Volume3D: upload every dense brick.
             // MPR single-brick can reuse these; multi-brick MPR stitches via syncMprPlane.
             ok = await uploadAllBricks(force);
+            if (ok && isSingleBrick) {
+              mprSlabReady = true;
+            }
           }
           return ok;
         })().finally(() => {
@@ -665,8 +736,52 @@ export function bindVtkWasmBrickedVolume(
       const ok = await uploadAllBricks(false);
       if (ok) {
         lastMprKey = '';
+        mprSlabReady = true;
+        mprFullVolumeReady = true;
       }
       return ok;
+    }
+
+    // Under budget: stitch the **full** volume once. Thin slabs can miss the
+    // slice plane / confuse ImageReslice; small studies used to work this way
+    // on the single binding path. Volume3D still uses the brick MultiBlock.
+    if (mprFullVolumeReady) {
+      // Full volume already bound — plane changes only need mapper slicePlane.
+      return true;
+    }
+
+    const sample = getVolumeScalarArray(imageVolume);
+    const bpe =
+      sample && 'BYTES_PER_ELEMENT' in sample
+        ? (sample as MarshallableTypedArray).BYTES_PER_ELEMENT
+        : 2;
+    const fullBytes = estimateVolumeScalarBytes(
+      dimensions,
+      bpe,
+      numberOfComponents
+    );
+    if (fullBytes > 0 && fullBytes <= getWasmScalarBudgetBytes()) {
+      const fullBox: WasmIjkBox = [
+        0,
+        Math.max(0, dimensions[0] - 1),
+        0,
+        Math.max(0, dimensions[1] - 1),
+        0,
+        Math.max(0, dimensions[2] - 1),
+      ];
+      const ok = await stitchBricksIntoMpr(fullBox);
+      if (ok) {
+        mprFullVolumeReady = true;
+        lastMprKey = '';
+        console.info(
+          `[vtkWasm] MPR full-volume input ready dims=${dimensions.join('x')} ` +
+            `(under scalar budget; plane-only updates afterwards)`
+        );
+        return true;
+      }
+      console.warn(
+        '[vtkWasm] MPR full-volume stitch failed; falling back to thin slab'
+      );
     }
 
     const planeIjk = worldToIjk(imageVolume, originWorld);
@@ -679,7 +794,7 @@ export function bindVtkWasmBrickedVolume(
     const key = `${planeIjk.map((v) => v.toFixed(2)).join(',')}|${normalIjk
       .map((v) => v.toFixed(3))
       .join(',')}|${halfThicknessIndex.toFixed(2)}`;
-    if (key === lastMprKey && anyUploaded) {
+    if (key === lastMprKey && mprSlabReady) {
       return true;
     }
 
@@ -693,11 +808,15 @@ export function bindVtkWasmBrickedVolume(
     const ok = await stitchBricksIntoMpr(stitchBox);
     if (ok) {
       lastMprKey = key;
+      console.info(
+        `[vtkWasm] MPR slab ready dims=${stitchBox[1] - stitchBox[0] + 1}x` +
+          `${stitchBox[3] - stitchBox[2] + 1}x${stitchBox[5] - stitchBox[4] + 1}`
+      );
+    } else {
+      console.warn('[vtkWasm] MPR syncMprPlane stitch failed');
     }
     return ok;
   };
-
-  const isSingleBrick = brickPlan.bricks.length <= 1;
 
   return {
     mode: 'denseBricks',
@@ -710,14 +829,15 @@ export function bindVtkWasmBrickedVolume(
       return mprImageData;
     },
     get multiBlock() {
-      return undefined;
+      return multiBlock;
     },
-    useMultiBlockInput: false,
-    // Multi-mapper Volume3D only when there is more than one brick.
-    useMultiVolumeInput: !isSingleBrick,
+    useMultiBlockInput,
+    useMultiVolumeInput,
     getBrickImageDatas: () =>
       slots.filter((s) => s.uploaded).map((s) => s.imageData),
     hasScalars: () => anyUploaded,
+    hasMprInput: () =>
+      isSingleBrick ? !!(slots[0]?.uploaded && mprSlabReady) : mprSlabReady,
     applyPartitions: async () => {
       // Dense bricks replace SetPartitions.
     },
@@ -736,8 +856,12 @@ export function bindVtkWasmBrickedVolume(
       ) {
         disposeVtkObject(mprImageData);
       }
+      disposeVtkObject(multiBlock);
       mprScalars = undefined;
       anyUploaded = false;
+      mprSlabReady = false;
+      mprFullVolumeReady = false;
+      lastMprKey = '';
     },
   };
 }

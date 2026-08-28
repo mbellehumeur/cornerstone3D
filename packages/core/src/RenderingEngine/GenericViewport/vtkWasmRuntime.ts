@@ -15,6 +15,7 @@ export type VtkWasmNamespace = {
   vtkColorTransferFunction?: (props?: object) => VtkWasmObject;
   vtkImageSlice?: (props?: object) => VtkWasmObject;
   vtkImageResliceMapper?: (props?: object) => VtkWasmObject;
+  vtkImageMapper?: (props?: object) => VtkWasmObject;
   vtkPlane?: (props?: object) => VtkWasmObject;
   vtkDataArray?: (props?: object) => VtkWasmObject;
   vtkMatrix3x3?: (props?: object) => VtkWasmObject;

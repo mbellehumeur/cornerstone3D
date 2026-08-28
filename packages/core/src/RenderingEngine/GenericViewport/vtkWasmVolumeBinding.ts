@@ -2,6 +2,7 @@ import type { IImageVolume } from '../../types';
 import {
   buildWasmVtkBrickPlan,
   fullVolumeRegionToBrickUploads,
+  ijkBoxVoxelCount,
   shouldUseDenseWasmBricks,
   wasmPartitionsNeedContiguousBricks,
   type WasmIjkBox,
@@ -14,7 +15,10 @@ import type {
   VtkWasmTypedArrayInterface,
 } from './vtkWasmRuntime';
 import { getVolumeScalarArray } from './webgpuMapperImageData';
-import { bindVtkWasmBrickedVolume } from './vtkWasmBrickedVolumeBinding';
+import {
+  bindVtkWasmBrickedVolume,
+  copyIjkBoxIntoDenseBrick,
+} from './vtkWasmBrickedVolumeBinding';
 import {
   finalizeVtkWasmImageDataScalars,
   SCALARS_ARRAY_NAME,
@@ -40,18 +44,26 @@ export type VtkWasmVolumeBinding = {
   mode?: 'single' | 'denseBricks';
   brickPlan: WasmVtkVolumeBrickPlan;
   imageData: VtkWasmObject;
-  /** Dense-brick MultiBlock (unused; prefer getBrickImageDatas). */
+  /**
+   * Dense multi-brick Volume3D: vtkMultiBlockDataSet for
+   * vtkMultiBlockVolumeMapper (preferred over per-brick volumes).
+   */
   multiBlock?: VtkWasmObject;
-  /** @deprecated Prefer useMultiVolumeInput. */
+  /** Prefer MultiBlockVolumeMapper when true (multi-brick dense). */
   useMultiBlockInput?: boolean;
   /**
-   * Volume3D: one GPUVolumeRayCastMapper + vtkVolume per brick.
-   * False when the plan is a single brick (use one mapper like `single`).
+   * Fallback Volume3D: one GPUVolumeRayCastMapper + vtkVolume per brick
+   * when MultiBlock mapper is unavailable. False for single-brick plans.
    */
   useMultiVolumeInput?: boolean;
   getBrickImageDatas?: () => VtkWasmObject[];
   /** True once point-data scalars have been successfully attached. */
   hasScalars: () => boolean;
+  /**
+   * True when ImageReslice can bind a real volume/slab (not the dense MPR stub).
+   * Single path: same as hasScalars. Dense multi-brick: after syncMprPlane stitch.
+   */
+  hasMprInput?: () => boolean;
   /** Apply SetPartitions on a volume mapper when supported. */
   applyPartitions: (mapper: VtkWasmObject) => void | Promise<void>;
   /**
@@ -71,6 +83,8 @@ export type VtkWasmVolumeBinding = {
     normalWorld: [number, number, number],
     halfThicknessMm?: number
   ) => Promise<boolean>;
+  /** MPR display ImageData (thin slab); Volume3D keeps using {@link imageData}. */
+  getMprImageData?: () => VtkWasmObject;
   dispose?: () => void;
 };
 
@@ -132,6 +146,74 @@ async function callMaybeAsync(result: unknown): Promise<unknown> {
   return await result;
 }
 
+async function allocatePointerBackedArrayForCount(
+  numValues: number,
+  typedPrototype: MarshallableTypedArray,
+  numberOfComponents: number,
+  vtk: VtkWasmNamespace,
+  typedArrayInterface?: VtkWasmTypedArrayInterface
+): Promise<VtkWasmObject | undefined> {
+  const heap = typedArrayInterface;
+  if (!heap?.alloc || !heap.toSizeType) {
+    console.warn(
+      '[vtkWasm] typedArrayInterface.alloc unavailable; cannot upload MPR slab'
+    );
+    return undefined;
+  }
+  const ctorName = vtkArrayCtorName(typedPrototype);
+  const arrayCtor = vtk[ctorName];
+  if (!arrayCtor) {
+    console.warn(`[vtkWasm] missing ${ctorName}; MPR slab not uploaded`);
+    return undefined;
+  }
+  const byteLength = numValues * typedPrototype.BYTES_PER_ELEMENT;
+  let pointer: number | bigint;
+  try {
+    pointer = heap.alloc(byteLength);
+  } catch (error) {
+    console.warn('[vtkWasm] heap.alloc failed for MPR slab', error);
+    return undefined;
+  }
+  if (pointer === undefined || pointer === null) {
+    return undefined;
+  }
+  const dataArray = arrayCtor({
+    numberOfComponents,
+    name: SCALARS_ARRAY_NAME,
+  }) as VtkWasmObject;
+  const setName = dataArray.setName as ((n: string) => unknown) | undefined;
+  setName?.(SCALARS_ARRAY_NAME);
+  const setNumberOfComponents = dataArray.setNumberOfComponents as
+    | ((n: number) => unknown)
+    | undefined;
+  setNumberOfComponents?.(numberOfComponents);
+  try {
+    const setArray = dataArray.setArray as
+      | ((
+          array: number | bigint,
+          size: number | bigint,
+          save: number
+        ) => unknown)
+      | undefined;
+    if (!setArray) {
+      heap.free?.(pointer);
+      disposeVtkObject(dataArray);
+      return undefined;
+    }
+    await callMaybeAsync(setArray(pointer, heap.toSizeType(numValues), 0));
+  } catch (error) {
+    try {
+      heap.free?.(pointer);
+    } catch {
+      // ignore
+    }
+    disposeVtkObject(dataArray);
+    console.warn('[vtkWasm] MPR slab setArray(pointer) failed', error);
+    return undefined;
+  }
+  return dataArray;
+}
+
 /**
  * Invoke a vtk-wasm method if present. Returns false when the Proxy rejects
  * the name (typed builds throw instead of returning undefined).
@@ -164,6 +246,103 @@ function disposeVtkObject(obj: VtkWasmObject | undefined): void {
   } catch {
     // ignore
   }
+}
+
+function worldToIjkForMpr(
+  imageVolume: IImageVolume,
+  world: [number, number, number]
+): [number, number, number] {
+  const imageData = imageVolume.imageData as
+    | {
+        worldToIndex?: (
+          w: [number, number, number]
+        ) => [number, number, number] | ArrayLike<number>;
+      }
+    | undefined;
+  if (typeof imageData?.worldToIndex === 'function') {
+    const ijk = imageData.worldToIndex(world);
+    return [Number(ijk[0]), Number(ijk[1]), Number(ijk[2])];
+  }
+  const origin = imageVolume.origin as [number, number, number];
+  const spacing = imageVolume.spacing as [number, number, number];
+  return [
+    (world[0] - origin[0]) / spacing[0],
+    (world[1] - origin[1]) / spacing[1],
+    (world[2] - origin[2]) / spacing[2],
+  ];
+}
+
+function worldNormalToIjkForMpr(
+  imageVolume: IImageVolume,
+  originWorld: [number, number, number],
+  normalWorld: [number, number, number]
+): [number, number, number] {
+  const p0 = worldToIjkForMpr(imageVolume, originWorld);
+  const p1 = worldToIjkForMpr(imageVolume, [
+    originWorld[0] + normalWorld[0],
+    originWorld[1] + normalWorld[1],
+    originWorld[2] + normalWorld[2],
+  ]);
+  return [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+}
+
+function brickWorldOriginForMpr(
+  volumeOrigin: [number, number, number],
+  spacing: [number, number, number],
+  direction: number[] | undefined,
+  ijk: [number, number, number]
+): [number, number, number] {
+  const [i, j, k] = ijk;
+  const [sx, sy, sz] = spacing;
+  if (direction && direction.length >= 9) {
+    const d = direction;
+    return [
+      volumeOrigin[0] + (d[0] * i * sx + d[1] * j * sy + d[2] * k * sz),
+      volumeOrigin[1] + (d[3] * i * sx + d[4] * j * sy + d[5] * k * sz),
+      volumeOrigin[2] + (d[6] * i * sx + d[7] * j * sy + d[8] * k * sz),
+    ];
+  }
+  return [
+    volumeOrigin[0] + i * sx,
+    volumeOrigin[1] + j * sy,
+    volumeOrigin[2] + k * sz,
+  ];
+}
+
+function thinSlabBoxAroundPlaneForMpr(
+  dimensions: [number, number, number],
+  planeIjk: [number, number, number],
+  normalIjk: [number, number, number],
+  halfThicknessIndex: number
+): WasmIjkBox {
+  const nLen = Math.hypot(normalIjk[0], normalIjk[1], normalIjk[2]) || 1;
+  const n: [number, number, number] = [
+    normalIjk[0] / nLen,
+    normalIjk[1] / nLen,
+    normalIjk[2] / nLen,
+  ];
+  let axis: 0 | 1 | 2 = 0;
+  if (Math.abs(n[1]) > Math.abs(n[axis])) {
+    axis = 1;
+  }
+  if (Math.abs(n[2]) > Math.abs(n[axis])) {
+    axis = 2;
+  }
+  const halfT = Math.max(1, Math.ceil(halfThicknessIndex));
+  const box: WasmIjkBox = [
+    0,
+    Math.max(0, dimensions[0] - 1),
+    0,
+    Math.max(0, dimensions[1] - 1),
+    0,
+    Math.max(0, dimensions[2] - 1),
+  ];
+  const c = planeIjk[axis];
+  const lo = Math.max(0, Math.floor(c - halfT));
+  const hi = Math.min(dimensions[axis] - 1, Math.ceil(c + halfT));
+  box[axis * 2] = lo;
+  box[axis * 2 + 1] = Math.max(lo, hi);
+  return box;
 }
 
 /**
@@ -659,6 +838,169 @@ export function bindVtkWasmVolume(
     }
   };
 
+  const imageDataMeta = imageVolume.imageData?.get?.('numberOfComponents') as
+    | { numberOfComponents?: number }
+    | undefined;
+  const numberOfComponents = Math.max(
+    1,
+    imageDataMeta?.numberOfComponents ?? 1
+  );
+
+  let mprImageData: VtkWasmObject | undefined;
+  let mprScalars: VtkWasmObject | undefined;
+  let mprSlabReady = false;
+  let lastMprKey = '';
+
+  const buildSlabImageData = async (
+    box: WasmIjkBox,
+    vtkArray: VtkWasmObject,
+    sourceForVerify?: ArrayLike<number>
+  ): Promise<
+    { imageData: VtkWasmObject; liveScalars: VtkWasmObject } | undefined
+  > => {
+    const sx = box[1] - box[0] + 1;
+    const sy = box[3] - box[2] + 1;
+    const sz = box[5] - box[4] + 1;
+    if (sx <= 0 || sy <= 0 || sz <= 0) {
+      return undefined;
+    }
+    const slabOrigin = brickWorldOriginForMpr(origin, spacing, direction, [
+      box[0],
+      box[2],
+      box[4],
+    ]);
+    const extent: [number, number, number, number, number, number] = [
+      0,
+      Math.max(0, sx - 1),
+      0,
+      Math.max(0, sy - 1),
+      0,
+      Math.max(0, sz - 1),
+    ];
+    const dims: [number, number, number] = [sx, sy, sz];
+    const expectedValueCount = sx * sy * sz * numberOfComponents;
+    const numVoxels = sx * sy * sz;
+
+    const slabImage = vtk.vtkImageData({
+      spacing,
+      origin: slabOrigin,
+    }) as VtkWasmObject;
+    applyDirection(slabImage);
+
+    const finalized = await finalizeVtkWasmImageDataScalars({
+      imageData: slabImage,
+      vtkArray,
+      numVoxels,
+      expectedValueCount,
+      dimensions: dims,
+      extent,
+      origin: slabOrigin,
+      spacing,
+      typedArrayInterface,
+      sourceForVerify,
+      logLabel: 'mode=single-mpr-slab',
+      applyDirection,
+    });
+    if (!finalized.ok || !finalized.liveScalars) {
+      disposeVtkObject(slabImage);
+      return undefined;
+    }
+    return { imageData: slabImage, liveScalars: finalized.liveScalars };
+  };
+
+  const syncMprPlane = async (
+    originWorld: [number, number, number],
+    normalWorld: [number, number, number],
+    halfThicknessMm = 2
+  ): Promise<boolean> => {
+    if (!(await refreshScalars(undefined, { force: false }))) {
+      return false;
+    }
+
+    const planeIjk = worldToIjkForMpr(imageVolume, originWorld);
+    const normalIjk = worldNormalToIjkForMpr(
+      imageVolume,
+      originWorld,
+      normalWorld
+    );
+    const spacingAvg =
+      (Math.abs(spacing[0]) + Math.abs(spacing[1]) + Math.abs(spacing[2])) / 3;
+    const halfThicknessIndex =
+      spacingAvg > 0 ? Math.max(1, halfThicknessMm / spacingAvg) : 1;
+
+    const key = `${planeIjk.map((v) => v.toFixed(2)).join(',')}|${normalIjk
+      .map((v) => v.toFixed(3))
+      .join(',')}|${halfThicknessIndex.toFixed(2)}`;
+    if (key === lastMprKey && mprSlabReady) {
+      return true;
+    }
+
+    const stitchBox = thinSlabBoxAroundPlaneForMpr(
+      dimensions,
+      planeIjk,
+      normalIjk,
+      halfThicknessIndex
+    );
+    const scalars = getVolumeScalarArray(imageVolume);
+    if (!scalars || scalars.length <= 0) {
+      return false;
+    }
+    const typed = toMarshallableTypedArray(scalars);
+    const stitchVoxels = ijkBoxVoxelCount(stitchBox);
+    if (stitchVoxels <= 0) {
+      return false;
+    }
+    const stitchValues = stitchVoxels * numberOfComponents;
+
+    const nextScalars = await allocatePointerBackedArrayForCount(
+      stitchValues,
+      typed,
+      numberOfComponents,
+      vtk,
+      typedArrayInterface
+    );
+    if (!nextScalars) {
+      return false;
+    }
+    const dest = typedArrayInterface?.toJSTypedArray?.(nextScalars) as
+      | (MarshallableTypedArray & {
+          set: (array: ArrayLike<number>, offset?: number) => void;
+        })
+      | undefined;
+    if (!dest || dest.length !== stitchValues) {
+      disposeVtkObject(nextScalars);
+      return false;
+    }
+    copyIjkBoxIntoDenseBrick(
+      typed,
+      dest,
+      dimensions,
+      stitchBox,
+      numberOfComponents
+    );
+
+    const built = await buildSlabImageData(stitchBox, nextScalars, dest);
+    if (!built) {
+      disposeVtkObject(nextScalars);
+      console.warn('[vtkWasm] MPR single slab finalize failed');
+      return false;
+    }
+
+    const previous = mprImageData;
+    mprImageData = built.imageData;
+    mprScalars = built.liveScalars;
+    if (previous && previous !== built.imageData) {
+      disposeVtkObject(previous);
+    }
+    mprSlabReady = true;
+    lastMprKey = key;
+    console.info(
+      `[vtkWasm] MPR single slab ready dims=${stitchBox[1] - stitchBox[0] + 1}x` +
+        `${stitchBox[3] - stitchBox[2] + 1}x${stitchBox[5] - stitchBox[4] + 1}`
+    );
+    return true;
+  };
+
   return {
     mode: 'single',
     brickPlan,
@@ -666,8 +1008,24 @@ export function bindVtkWasmVolume(
     useMultiBlockInput: false,
     useMultiVolumeInput: false,
     hasScalars: () => !!scalarsArray,
+    hasMprInput: () => mprSlabReady && !!mprScalars,
+    getMprImageData: () =>
+      mprSlabReady && mprImageData ? mprImageData : imageData,
     applyPartitions,
-    refreshScalars,
+    refreshScalars: async (dirtyBox?, options?) => {
+      if (options?.force) {
+        lastMprKey = '';
+        mprSlabReady = false;
+      }
+      return refreshScalars(dirtyBox, options);
+    },
+    syncMprPlane,
+    dispose: () => {
+      disposeVtkObject(mprImageData);
+      mprImageData = undefined;
+      mprScalars = undefined;
+      mprSlabReady = false;
+    },
   };
 }
 
@@ -738,6 +1096,7 @@ export function createVtkWasmVolumeBinding(
     `[vtkWasm] volume binding mode=${binding.mode ?? 'single'} ` +
       `dims=${dimensions.join('x')} scalarBytes=${scalarBytes} ` +
       `partitions=${binding.brickPlan.vtkPartitions.join('x')} ` +
+      `useMultiBlock=${binding.useMultiBlockInput === true} ` +
       `useMultiVolume=${binding.useMultiVolumeInput === true}`
   );
 

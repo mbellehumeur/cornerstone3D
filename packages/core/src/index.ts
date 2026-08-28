@@ -132,6 +132,8 @@ import GenericVolumeViewport3D, {
   SLICERLIVE_VOLUME_3D_RENDER_MODE,
   WEBGPU_VOLUME_3D_RENDER_MODE,
   VTK_WASM_VOLUME_3D_RENDER_MODE,
+  VTK_WASM_WEBGPU_VOLUME_3D_RENDER_MODE,
+  isVtkWasmVolume3DRenderMode,
 } from './RenderingEngine/GenericViewport/Volume3D';
 export type {
   MviewVolume3DPresentQuality,
@@ -314,6 +316,7 @@ import {
 import {
   registerVtkWasmRenderBackend,
   isVtkWasmAvailable,
+  isVtkWasmWebgpuAvailable,
   VTK_WASM_RENDER_BACKEND,
   VTK_WASM_VOLUME_RENDER_MODE,
   VTK_WASM_IMAGE_RENDER_MODE,
@@ -507,9 +510,10 @@ export {
   // WebGPU render backend (experimental)
   registerWebGPURenderBackend,
   isWebGPURenderingAvailable,
-  // vtk.wasm WebGL render backend (experimental)
+  // vtk.wasm WebGL/WebGPU render backend (experimental)
   registerVtkWasmRenderBackend,
   isVtkWasmAvailable,
+  isVtkWasmWebgpuAvailable,
   VTK_WASM_RENDER_BACKEND,
   VTK_WASM_VOLUME_RENDER_MODE,
   VTK_WASM_IMAGE_RENDER_MODE,
@@ -598,6 +602,8 @@ export {
   SLICERLIVE_VOLUME_3D_RENDER_MODE,
   WEBGPU_VOLUME_3D_RENDER_MODE,
   VTK_WASM_VOLUME_3D_RENDER_MODE,
+  VTK_WASM_WEBGPU_VOLUME_3D_RENDER_MODE,
+  isVtkWasmVolume3DRenderMode,
   isStatsOverlayVisible,
   toggleStatsOverlay,
   setStatsOverlayEnabled,
