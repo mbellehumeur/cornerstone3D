@@ -1,6 +1,17 @@
 import type { RenderingEngineModeType } from '../types';
 import type { RenderBackendValue } from '../enums';
 
+/** vtk-wasm XYZ partition planner options (global or per-path override). */
+export type WasmVtkBrickPartitionConfig = {
+  strategy?: 'minimum' | 'target' | 'fixed';
+  targetPerAxis?: number;
+  partitions?: [number, number, number];
+  maxPerAxis?: number;
+  minPerAxis?: number;
+  applyToAllAxes?: boolean;
+  max3D?: number;
+};
+
 interface Cornerstone3DConfig {
   /**
    * Whether the device is mobile or not.
@@ -132,15 +143,11 @@ interface Cornerstone3DConfig {
        * many bytes (default 512 MiB).
        */
       maxScalarBytes?: number;
-      brickPartitions?: {
-        strategy?: 'minimum' | 'target' | 'fixed';
-        targetPerAxis?: number;
-        partitions?: [number, number, number];
-        maxPerAxis?: number;
-        minPerAxis?: number;
-        applyToAllAxes?: boolean;
-        max3D?: number;
-      };
+      brickPartitions?: WasmVtkBrickPartitionConfig;
+      /** MPR / planar slice path override (merged on top of brickPartitions). */
+      brickPartitionsMpr?: WasmVtkBrickPartitionConfig;
+      /** Volume3D path override (merged on top of brickPartitions). */
+      brickPartitionsVolume3d?: WasmVtkBrickPartitionConfig;
     };
     /**
      * When true, legacy viewport types (STACK, ORTHOGRAPHIC, VIDEO, ECG,

@@ -6,6 +6,7 @@ import {
   shouldUseDenseWasmBricks,
   wasmPartitionsNeedContiguousBricks,
   type WasmIjkBox,
+  type WasmVtkBrickPartitionOptions,
   type WasmVtkVolumeBrickPlan,
 } from '../helpers/volumeTextureBrickWasm';
 import clonePoint3 from '../../utilities/clonePoint3';
@@ -39,6 +40,12 @@ export type VtkWasmRefreshScalarsOptions = {
   /** Rebuild brick ImageData even if already uploaded (load-complete). */
   force?: boolean;
 };
+
+export type BindVtkWasmVolumeOptions = {
+  brickPartitionOptions?: WasmVtkBrickPartitionOptions;
+};
+
+export type CreateVtkWasmVolumeBindingOptions = BindVtkWasmVolumeOptions;
 
 export type VtkWasmVolumeBinding = {
   mode?: 'single' | 'denseBricks';
@@ -383,7 +390,8 @@ function copyIjkBoxIntoVolume(
 export function bindVtkWasmVolume(
   vtk: VtkWasmNamespace,
   imageVolume: IImageVolume,
-  typedArrayInterface?: VtkWasmTypedArrayInterface
+  typedArrayInterface?: VtkWasmTypedArrayInterface,
+  options?: BindVtkWasmVolumeOptions
 ): VtkWasmVolumeBinding {
   const dimensions = imageVolume.dimensions as [number, number, number];
   // Plain arrays only: TypedArrays JSON-serialize as objects and fail
@@ -392,7 +400,10 @@ export function bindVtkWasmVolume(
   const origin = clonePoint3(imageVolume.origin);
   const direction = (imageVolume.direction ??
     imageVolume.imageData?.getDirection?.()) as number[] | undefined;
-  const brickPlan = buildWasmVtkBrickPlan(dimensions);
+  const brickPlan = buildWasmVtkBrickPlan(
+    dimensions,
+    options?.brickPartitionOptions
+  );
 
   if (!vtk.vtkImageData) {
     throw new Error('[vtkWasm] vtkImageData is not available in this bundle');
@@ -1042,7 +1053,8 @@ export function bindVtkWasmVolume(
 export function createVtkWasmVolumeBinding(
   vtk: VtkWasmNamespace,
   imageVolume: IImageVolume,
-  typedArrayInterface?: VtkWasmTypedArrayInterface
+  typedArrayInterface?: VtkWasmTypedArrayInterface,
+  options?: CreateVtkWasmVolumeBindingOptions
 ): VtkWasmVolumeBinding {
   const dimensions = imageVolume.dimensions as [number, number, number];
   const scalars = getVolumeScalarArray(imageVolume);
@@ -1065,8 +1077,13 @@ export function createVtkWasmVolumeBinding(
     bytesPerElement *
     numberOfComponents;
 
+  const partitionOptions = options?.brickPartitionOptions;
+  const bindOptions: BindVtkWasmVolumeOptions = {
+    brickPartitionOptions: partitionOptions,
+  };
+
   // Plan first so XY-partition WebGL limits can force dense under budget.
-  const planned = buildWasmVtkBrickPlan(dimensions);
+  const planned = buildWasmVtkBrickPlan(dimensions, partitionOptions);
   const overBudget = shouldUseDenseWasmBricks(
     dimensions,
     bytesPerElement,
@@ -1087,13 +1104,15 @@ export function createVtkWasmVolumeBinding(
     ? (bindVtkWasmBrickedVolume(
         vtk,
         imageVolume,
-        typedArrayInterface
+        typedArrayInterface,
+        bindOptions
       ) as VtkWasmVolumeBinding)
-    : bindVtkWasmVolume(vtk, imageVolume, typedArrayInterface);
+    : bindVtkWasmVolume(vtk, imageVolume, typedArrayInterface, bindOptions);
 
   // One-shot path log so Volume3D / MPR issues are easy to attribute.
   console.info(
     `[vtkWasm] volume binding mode=${binding.mode ?? 'single'} ` +
+      `strategy=${binding.brickPlan.strategy} ` +
       `dims=${dimensions.join('x')} scalarBytes=${scalarBytes} ` +
       `partitions=${binding.brickPlan.vtkPartitions.join('x')} ` +
       `useMultiBlock=${binding.useMultiBlockInput === true} ` +

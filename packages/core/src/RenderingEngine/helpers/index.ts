@@ -31,6 +31,7 @@ export {
   brickExtentsAabb,
   ijkBoxVoxelCount,
   refineBrickPlanForByteBudget,
+  readWasmBrickPartitionOptionsForPath,
   shouldUseDenseWasmBricks,
   wasmPartitionsNeedContiguousBricks,
   estimateVolumeScalarBytes,
@@ -38,15 +39,22 @@ export {
   DEFAULT_WASM_BRICK_MAX_PER_AXIS,
   DEFAULT_WASM_SCALAR_BUDGET_BYTES,
   DEFAULT_WASM_MAX_BRICK_BYTES,
+  VTK_WASM_BRICK_PRESET_IDS,
+  VTK_WASM_BRICK_PRESETS,
+  VTK_WASM_BRICK_PRESET_LABELS,
+  isVtkWasmBrickPresetId,
+  resolveVtkWasmBrickPresetFromOptions,
 } from './volumeTextureBrickWasm';
 export type {
   WasmVtkBrickPartitions,
   WasmVtkBrickPartitionStrategy,
   WasmVtkBrickPartitionOptions,
+  WasmVtkBrickPartitionPath,
   WasmVtkVolumeBrick,
   WasmVtkVolumeBrickPlan,
   WasmIjkBox,
   WasmBrickRegionUpload,
+  VtkWasmBrickPresetId,
 } from './volumeTextureBrickWasm';
 export {
   computeFittedVolumeSampleDistance,

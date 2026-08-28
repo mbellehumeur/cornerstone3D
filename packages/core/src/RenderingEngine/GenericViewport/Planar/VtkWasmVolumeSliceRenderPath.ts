@@ -20,10 +20,8 @@ import type {
 } from './PlanarViewportTypes';
 import { getDefaultVolumeVOIRange } from '../../helpers/setDefaultVolumeVOI';
 import { triggerPlanarVolumeNewImage } from './planarImageEvents';
-import {
-  getCpuEquivalentParallelScale,
-  getOrthogonalVolumeSliceLayout,
-} from './planarAdapterCoordinateTransforms';
+import { getCpuEquivalentParallelScale } from './planarAdapterCoordinateTransforms';
+import { extractOrthogonalVolumeSlice } from './orthogonalVolumeSliceExtract';
 import { resolvePlanarRenderPathProjection } from './planarRenderPathProjection';
 import type { PlanarRendering } from './planarRuntimeTypes';
 import {
@@ -43,7 +41,10 @@ import {
   setVtkWasmImageDataExtent,
 } from '../vtkWasmImageDataFinalize';
 import { getVolumeScalarArray } from '../webgpuMapperImageData';
-import type { WasmVtkVolumeBrickPlan } from '../../helpers/volumeTextureBrickWasm';
+import {
+  readWasmBrickPartitionOptionsForPath,
+  type WasmVtkVolumeBrickPlan,
+} from '../../helpers/volumeTextureBrickWasm';
 
 export const VTK_WASM_VOLUME_RENDER_MODE = 'vtkWasmVolume';
 export const VTK_WASM_PLANAR_CANVAS_CLASS = 'vtk-wasm-planar-canvas';
@@ -251,7 +252,10 @@ export class VtkWasmVolumeSliceRenderPath
     const binding = createVtkWasmVolumeBinding(
       vtk,
       imageVolume,
-      handle.session.typedArrayInterface
+      handle.session.typedArrayInterface,
+      {
+        brickPartitionOptions: readWasmBrickPartitionOptionsForPath('mpr'),
+      }
     );
     this.binding = binding;
     const alreadyLoaded = Boolean(
@@ -1528,110 +1532,6 @@ async function getSlicePlaneOrigin(
     }
   }
   return fallback;
-}
-
-function worldToIjkFromVolume(
-  imageVolume: IImageVolume,
-  world: [number, number, number]
-): [number, number, number] {
-  const imageData = imageVolume.imageData as
-    | {
-        worldToIndex?: (
-          w: [number, number, number]
-        ) => [number, number, number] | ArrayLike<number>;
-      }
-    | undefined;
-  if (typeof imageData?.worldToIndex === 'function') {
-    const ijk = imageData.worldToIndex(world);
-    return [Number(ijk[0]), Number(ijk[1]), Number(ijk[2])];
-  }
-  const origin = imageVolume.origin as [number, number, number];
-  const spacing = imageVolume.spacing as [number, number, number];
-  return [
-    (world[0] - origin[0]) / spacing[0],
-    (world[1] - origin[1]) / spacing[1],
-    (world[2] - origin[2]) / spacing[2],
-  ];
-}
-
-function extractOrthogonalVolumeSlice(
-  imageVolume: IImageVolume,
-  originWorld: [number, number, number],
-  normalWorld: [number, number, number],
-  viewUp: [number, number, number] = DEFAULT_PLANAR_VIEW_UP
-):
-  | {
-      width: number;
-      height: number;
-      data: Int16Array | Float32Array;
-      worldWidth: number;
-      worldHeight: number;
-    }
-  | undefined {
-  const scalars = getVolumeScalarArray(imageVolume);
-  if (!scalars?.length) {
-    return undefined;
-  }
-  const dims = imageVolume.dimensions as [number, number, number];
-  const spacing = imageVolume.spacing as [number, number, number];
-  const direction = imageVolume.direction as number[] | undefined;
-  if (!direction || direction.length < 9) {
-    return undefined;
-  }
-  const ijk = worldToIjkFromVolume(imageVolume, originWorld);
-  const layout = getOrthogonalVolumeSliceLayout({
-    dimensions: dims,
-    spacing,
-    direction,
-    viewPlaneNormal: normalWorld,
-    viewUp,
-    sliceIndexIjk: ijk,
-  });
-  if (!layout) {
-    return undefined;
-  }
-
-  const [dx, dy, dz] = dims;
-  const src = scalars as Int16Array | Float32Array;
-  const comps = Math.max(1, Math.round(scalars.length / (dx * dy * dz)));
-  const {
-    columnAxisIndex,
-    rowAxisIndex,
-    sliceAxisIndex,
-    sliceIndex,
-    columns,
-    rows,
-    columnPixelSpacing,
-    rowPixelSpacing,
-  } = layout;
-
-  const sample = (i: number, j: number, k: number): number => {
-    const idx = ((k * dy + j) * dx + i) * comps;
-    return Number(src[idx] ?? 0);
-  };
-
-  const out = new Int16Array(columns * rows);
-  const ijkSample: [number, number, number] = [0, 0, 0];
-  ijkSample[sliceAxisIndex] = sliceIndex;
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < columns; col++) {
-      ijkSample[columnAxisIndex] = col;
-      ijkSample[rowAxisIndex] = row;
-      out[row * columns + col] = sample(
-        ijkSample[0],
-        ijkSample[1],
-        ijkSample[2]
-      );
-    }
-  }
-
-  return {
-    width: columns,
-    height: rows,
-    data: out,
-    worldWidth: columns * columnPixelSpacing,
-    worldHeight: rows * rowPixelSpacing,
-  };
 }
 
 function windowLevelSliceToRgba(

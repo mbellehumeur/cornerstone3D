@@ -71,6 +71,25 @@ function readConfigOptions(): WasmVtkBrickPartitionOptions {
   return { ...cfg };
 }
 
+export type WasmVtkBrickPartitionPath = 'mpr' | 'volume3d';
+
+/**
+ * Merge global `brickPartitions` with a path-specific override
+ * (`brickPartitionsMpr` or `brickPartitionsVolume3d`).
+ */
+export function readWasmBrickPartitionOptionsForPath(
+  path: WasmVtkBrickPartitionPath,
+  overrides?: WasmVtkBrickPartitionOptions
+): WasmVtkBrickPartitionOptions {
+  const vtkWasm = getConfiguration()?.rendering?.vtkWasm ?? {};
+  const global = vtkWasm.brickPartitions ?? {};
+  const pathCfg =
+    path === 'mpr'
+      ? vtkWasm.brickPartitionsMpr
+      : vtkWasm.brickPartitionsVolume3d;
+  return { ...global, ...pathCfg, ...overrides };
+}
+
 export function isWasmVolumeTextureBricklingEnabled(): boolean {
   const flag = getConfiguration()?.rendering?.vtkWasm?.volumeTextureBrickling;
   return flag !== false;
@@ -537,6 +556,70 @@ export function ijkBoxVoxelCount(box: WasmIjkBox): number {
 /**
  * Map a dirty full-volume IJK box to per-brick upload descriptors.
  */
+export type VtkWasmBrickPresetId = 'minimal' | '2x2x2' | '4x4x4' | '8x8x8';
+
+export const VTK_WASM_BRICK_PRESET_IDS: readonly VtkWasmBrickPresetId[] = [
+  'minimal',
+  '2x2x2',
+  '4x4x4',
+  '8x8x8',
+];
+
+export const VTK_WASM_BRICK_PRESETS: Record<
+  VtkWasmBrickPresetId,
+  WasmVtkBrickPartitionOptions
+> = {
+  minimal: { strategy: 'minimum' },
+  '2x2x2': { strategy: 'fixed', partitions: [2, 2, 2] },
+  '4x4x4': { strategy: 'fixed', partitions: [4, 4, 4] },
+  '8x8x8': { strategy: 'fixed', partitions: [8, 8, 8] },
+};
+
+export const VTK_WASM_BRICK_PRESET_LABELS: Record<
+  VtkWasmBrickPresetId,
+  string
+> = {
+  minimal: 'Minimal',
+  '2x2x2': '2×2×2',
+  '4x4x4': '4×4×4',
+  '8x8x8': '8×8×8',
+};
+
+export function isVtkWasmBrickPresetId(id: string): id is VtkWasmBrickPresetId {
+  return Object.prototype.hasOwnProperty.call(VTK_WASM_BRICK_PRESETS, id);
+}
+
+/**
+ * Map merged brick-partition options back to a UI preset id, when possible.
+ */
+export function resolveVtkWasmBrickPresetFromOptions(
+  options: WasmVtkBrickPartitionOptions
+): VtkWasmBrickPresetId | undefined {
+  const strategy = options.strategy ?? 'minimum';
+  if (strategy === 'minimum') {
+    return 'minimal';
+  }
+  if (
+    strategy === 'fixed' &&
+    Array.isArray(options.partitions) &&
+    options.partitions.length === 3
+  ) {
+    const [x, y, z] = options.partitions;
+    if (x === y && y === z) {
+      if (x === 2) {
+        return '2x2x2';
+      }
+      if (x === 4) {
+        return '4x4x4';
+      }
+      if (x === 8) {
+        return '8x8x8';
+      }
+    }
+  }
+  return undefined;
+}
+
 export function fullVolumeRegionToBrickUploads(
   ijkBox: WasmIjkBox,
   plan: WasmVtkVolumeBrickPlan

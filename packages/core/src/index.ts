@@ -296,9 +296,23 @@ import {
   getProjectionScaleMatrix,
   buildZBrickPlan,
   buildWasmVtkBrickPlan,
+  readWasmBrickPartitionOptionsForPath,
   isVolumeTextureBricklingEnabled,
   isWasmVolumeTextureBricklingEnabled,
+  VTK_WASM_BRICK_PRESET_IDS,
+  VTK_WASM_BRICK_PRESETS,
+  VTK_WASM_BRICK_PRESET_LABELS,
+  isVtkWasmBrickPresetId,
+  resolveVtkWasmBrickPresetFromOptions,
 } from './RenderingEngine/helpers';
+export type { VtkWasmBrickPresetId } from './RenderingEngine/helpers';
+import {
+  formatVtkWasmBrickLabel,
+  resolveVtkWasmBrickSummary,
+  summaryFromBrickPlan,
+} from './RenderingEngine/GenericViewport/vtkWasmBrickDisplay';
+import type { VtkWasmBrickSummary } from './RenderingEngine/GenericViewport/vtkWasmBrickDisplay';
+export type { VtkWasmBrickSummary };
 import {
   registerViewportType,
   isRegisteredViewportType,
@@ -499,8 +513,17 @@ export {
   getProjectionScaleMatrix,
   buildZBrickPlan,
   buildWasmVtkBrickPlan,
+  readWasmBrickPartitionOptionsForPath,
   isVolumeTextureBricklingEnabled,
   isWasmVolumeTextureBricklingEnabled,
+  VTK_WASM_BRICK_PRESET_IDS,
+  VTK_WASM_BRICK_PRESETS,
+  VTK_WASM_BRICK_PRESET_LABELS,
+  isVtkWasmBrickPresetId,
+  resolveVtkWasmBrickPresetFromOptions,
+  formatVtkWasmBrickLabel,
+  resolveVtkWasmBrickSummary,
+  summaryFromBrickPlan,
   registerViewportType,
   isRegisteredViewportType,
   registerRenderBackend,

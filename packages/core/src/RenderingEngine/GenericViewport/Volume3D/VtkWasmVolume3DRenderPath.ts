@@ -36,7 +36,10 @@ import {
   type VtkWasmVolumeBinding,
 } from '../vtkWasmVolumeBinding';
 import { setVtkWasmImageDataExtent } from '../vtkWasmImageDataFinalize';
-import type { WasmVtkVolumeBrickPlan } from '../../helpers/volumeTextureBrickWasm';
+import {
+  readWasmBrickPartitionOptionsForPath,
+  type WasmVtkVolumeBrickPlan,
+} from '../../helpers/volumeTextureBrickWasm';
 import {
   applyViewportPresetToVtkWasmProperty,
   flushVtkWasmVolume3DPendingPreset,
@@ -157,7 +160,10 @@ export class VtkWasmVolume3DRenderPath
     const binding = createVtkWasmVolumeBinding(
       vtk,
       imageVolume,
-      handle.session.typedArrayInterface
+      handle.session.typedArrayInterface,
+      {
+        brickPartitionOptions: readWasmBrickPartitionOptionsForPath('volume3d'),
+      }
     );
     this.binding = binding;
     // Single-shot upload: only marshal when the volume is already complete.

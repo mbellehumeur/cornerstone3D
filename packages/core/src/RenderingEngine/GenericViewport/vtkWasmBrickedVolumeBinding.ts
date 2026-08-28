@@ -6,6 +6,7 @@ import {
   ijkBoxVoxelCount,
   refineBrickPlanForByteBudget,
   type WasmIjkBox,
+  type WasmVtkBrickPartitionOptions,
   type WasmVtkVolumeBrick,
   type WasmVtkVolumeBrickPlan,
 } from '../helpers/volumeTextureBrickWasm';
@@ -246,7 +247,8 @@ type BrickSlot = {
 export function bindVtkWasmBrickedVolume(
   vtk: VtkWasmNamespace,
   imageVolume: IImageVolume,
-  typedArrayInterface?: VtkWasmTypedArrayInterface
+  typedArrayInterface?: VtkWasmTypedArrayInterface,
+  options?: { brickPartitionOptions?: WasmVtkBrickPartitionOptions }
 ): VtkWasmBrickedVolumeBinding {
   if (!vtk.vtkImageData) {
     throw new Error('[vtkWasm] vtkImageData is not available in this bundle');
@@ -261,7 +263,10 @@ export function bindVtkWasmBrickedVolume(
     imageVolume.imageData?.getDirection?.()) as number[] | undefined;
   const numberOfComponents = getNumberOfComponents(imageVolume);
 
-  let brickPlan = buildWasmVtkBrickPlan(dimensions);
+  let brickPlan = buildWasmVtkBrickPlan(
+    dimensions,
+    options?.brickPartitionOptions
+  );
   // Fixed grids are authoritative — never re-partition for a byte budget
   // (that would allocate a different brick layout than the configured grid).
   if (brickPlan.strategy !== 'fixed') {

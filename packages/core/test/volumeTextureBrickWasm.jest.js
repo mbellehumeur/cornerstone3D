@@ -9,6 +9,9 @@ import {
   shouldUseDenseWasmBricks,
   splitAxisExtents,
   estimateVolumeScalarBytes,
+  VTK_WASM_BRICK_PRESETS,
+  resolveVtkWasmBrickPresetFromOptions,
+  isVtkWasmBrickPresetId,
 } from '../src/RenderingEngine/helpers/volumeTextureBrickWasm';
 import { copyIjkBoxIntoDenseBrick } from '../src/RenderingEngine/GenericViewport/vtkWasmBrickedVolumeBinding';
 
@@ -80,6 +83,18 @@ describe('volumeTextureBrickWasm', () => {
       expect(plan.bricks[1].textureSize[0]).toBeLessThanOrEqual(2048);
       expect(plan.bricks[0].extent).toEqual([0, 1449, 0, 511, 0, 511]);
       expect(plan.bricks[1].extent).toEqual([1449, 2899, 0, 511, 0, 511]);
+    });
+
+    it('uses minimum strategy for 2500x512x512 → (2,1,1), 2 bricks', () => {
+      const plan = buildWasmVtkBrickPlan([2500, 512, 512], {
+        strategy: 'minimum',
+        max3D: 2048,
+      });
+      expect(plan.vtkPartitions).toEqual([2, 1, 1]);
+      expect(plan.bricked).toBe(true);
+      expect(plan.bricks).toHaveLength(2);
+      expect(plan.bricks[0].textureSize[0]).toBeLessThanOrEqual(2048);
+      expect(plan.bricks[1].textureSize[0]).toBeLessThanOrEqual(2048);
     });
 
     it('keeps single partition when volume fits', () => {
@@ -230,6 +245,107 @@ describe('volumeTextureBrickWasm', () => {
       // source (i,j,k)=(1,1,1) → index ((1*4+1)*4+1)=21
       expect(dest[0]).toBe(21);
       expect(dest.length).toBe(8);
+    });
+  });
+
+  describe('readWasmBrickPartitionOptionsForPath', () => {
+    it('merges global and MPR override', () => {
+      const initModule = require('../src/init');
+      const spy = jest.spyOn(initModule, 'getConfiguration').mockReturnValue({
+        rendering: {
+          vtkWasm: {
+            volumeTextureBrickling: true,
+            brickPartitions: {
+              strategy: 'target',
+              targetPerAxis: 8,
+              applyToAllAxes: true,
+            },
+            brickPartitionsMpr: {
+              strategy: 'fixed',
+              partitions: [8, 8, 8],
+            },
+          },
+        },
+      });
+
+      const {
+        readWasmBrickPartitionOptionsForPath,
+      } = require('../src/RenderingEngine/helpers/volumeTextureBrickWasm');
+
+      expect(readWasmBrickPartitionOptionsForPath('mpr')).toMatchObject({
+        strategy: 'fixed',
+        partitions: [8, 8, 8],
+        targetPerAxis: 8,
+        applyToAllAxes: true,
+      });
+      expect(readWasmBrickPartitionOptionsForPath('volume3d')).toMatchObject({
+        strategy: 'target',
+        targetPerAxis: 8,
+        applyToAllAxes: true,
+      });
+
+      spy.mockRestore();
+    });
+
+    it('mpr fixed vs volume3d target on 512x512x258', () => {
+      const mprPlan = buildWasmVtkBrickPlan([512, 512, 258], {
+        strategy: 'fixed',
+        partitions: [8, 8, 8],
+        max3D: 2048,
+      });
+      const vol3dPlan = buildWasmVtkBrickPlan([512, 512, 258], {
+        strategy: 'target',
+        targetPerAxis: 8,
+        applyToAllAxes: true,
+        max3D: 2048,
+      });
+      expect(mprPlan.vtkPartitions).toEqual([8, 8, 8]);
+      expect(vol3dPlan.vtkPartitions).toEqual([8, 8, 8]);
+      expect(mprPlan.strategy).toBe('fixed');
+      expect(vol3dPlan.strategy).toBe('target');
+    });
+  });
+
+  describe('VTK_WASM_BRICK_PRESETS', () => {
+    it('maps options back to preset ids', () => {
+      expect(
+        resolveVtkWasmBrickPresetFromOptions(VTK_WASM_BRICK_PRESETS.minimal)
+      ).toBe('minimal');
+      expect(
+        resolveVtkWasmBrickPresetFromOptions(VTK_WASM_BRICK_PRESETS['2x2x2'])
+      ).toBe('2x2x2');
+      expect(
+        resolveVtkWasmBrickPresetFromOptions(VTK_WASM_BRICK_PRESETS['4x4x4'])
+      ).toBe('4x4x4');
+      expect(
+        resolveVtkWasmBrickPresetFromOptions(VTK_WASM_BRICK_PRESETS['8x8x8'])
+      ).toBe('8x8x8');
+      expect(
+        resolveVtkWasmBrickPresetFromOptions({
+          strategy: 'fixed',
+          partitions: [3, 3, 3],
+        })
+      ).toBeUndefined();
+    });
+
+    it('validates preset ids', () => {
+      expect(isVtkWasmBrickPresetId('minimal')).toBe(true);
+      expect(isVtkWasmBrickPresetId('8x8x8')).toBe(true);
+      expect(isVtkWasmBrickPresetId('invalid')).toBe(false);
+    });
+
+    it('builds expected brick counts from presets on 2500x512x512', () => {
+      const minimal = buildWasmVtkBrickPlan([2500, 512, 512], {
+        ...VTK_WASM_BRICK_PRESETS.minimal,
+        max3D: 2048,
+      });
+      expect(minimal.bricks).toHaveLength(2);
+
+      const fixed2 = buildWasmVtkBrickPlan([2500, 512, 512], {
+        ...VTK_WASM_BRICK_PRESETS['2x2x2'],
+        max3D: 2048,
+      });
+      expect(fixed2.bricks).toHaveLength(8);
     });
   });
 });

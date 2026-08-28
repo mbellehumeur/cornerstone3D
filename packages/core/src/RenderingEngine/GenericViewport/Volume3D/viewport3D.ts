@@ -67,6 +67,12 @@ import {
   setVtkWasmVolume3DCanvasVisible,
 } from './vtkWasmVolume3DRegistry';
 import {
+  summaryFromBrickPlan,
+  type VtkWasmBrickSummary,
+} from '../vtkWasmBrickDisplay';
+import type { WasmVtkVolumeBrickPlan } from '../../helpers/volumeTextureBrickWasm';
+import type { VtkWasmVolumeBinding } from '../vtkWasmVolumeBinding';
+import {
   iCameraToMviewCamera,
   parallelScaleToMviewOrthoZoom,
 } from './mviewVolume3DCamera';
@@ -405,6 +411,31 @@ class VolumeViewport3D extends GenericViewport<
     }
 
     return this.activeRenderMode;
+  }
+
+  /**
+   * Applied vtk-wasm XYZ brick grid when the wasm Volume3D path is active.
+   */
+  getVtkWasmBrickSummary(): VtkWasmBrickSummary | undefined {
+    if (!isVtkWasmVolume3DRenderMode(this.getActiveRenderMode())) {
+      return undefined;
+    }
+
+    const rendering = this.getCurrentBinding()?.rendering as
+      | {
+          brickPlan?: WasmVtkVolumeBrickPlan;
+          binding?: VtkWasmVolumeBinding;
+        }
+      | undefined;
+
+    const brickPlan =
+      rendering?.brickPlan ?? getVtkWasmVolume3D(this.id)?.brickPlan;
+
+    if (!brickPlan) {
+      return undefined;
+    }
+
+    return summaryFromBrickPlan(brickPlan, rendering?.binding?.mode);
   }
 
   /**

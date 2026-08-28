@@ -21,6 +21,11 @@ import {
   VTK_WASM_PLANAR_CANVAS_CLASS,
   VTK_WASM_VOLUME_RENDER_MODE,
 } from './VtkWasmVolumeSliceRenderPath';
+import {
+  summaryFromBrickPlan,
+  type VtkWasmBrickSummary,
+} from '../vtkWasmBrickDisplay';
+import type { WasmVtkVolumeBrickPlan } from '../../helpers/volumeTextureBrickWasm';
 import type { EffectiveRenderBackend } from '../../../types/RenderBackendRegistry';
 import type {
   ActorEntry,
@@ -2378,6 +2383,29 @@ class PlanarViewport extends GenericViewport<
    */
   public findDataIdByVolumeId(volumeId: string): string | undefined {
     return this.mountedData.findDataIdByVolumeId(volumeId);
+  }
+
+  /**
+   * Applied vtk-wasm XYZ brick grid when the wasm volume slice path is mounted.
+   */
+  public getVtkWasmBrickSummary(): VtkWasmBrickSummary | undefined {
+    const rendering = this.getCurrentPlanarRendering() as
+      | {
+          renderMode?: string;
+          brickPlan?: WasmVtkVolumeBrickPlan;
+          binding?: { mode?: 'single' | 'denseBricks' };
+        }
+      | undefined;
+
+    if (!rendering || rendering.renderMode !== VTK_WASM_VOLUME_RENDER_MODE) {
+      return undefined;
+    }
+
+    if (!rendering.brickPlan) {
+      return undefined;
+    }
+
+    return summaryFromBrickPlan(rendering.brickPlan, rendering.binding?.mode);
   }
 
   protected getCurrentPlanarRendering(): PlanarRendering | undefined {
