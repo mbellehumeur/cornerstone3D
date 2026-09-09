@@ -107,6 +107,14 @@ class TrackballRotateTool extends BaseTool {
       return true;
     }
 
+    // vtk-wasm Volume3D: no vtk-js volume mapper / sample-distance LOD, but
+    // TrackballRotate still orbits volumeCenter. Snap focal there on pointer
+    // down so tall MultiBlock series don't rotate about a mismatched IJK center.
+    if (getVtkWasmVolume3D(viewport.id)) {
+      this._recenterSpecializedOrbit(viewport);
+      return true;
+    }
+
     const actorEntry = viewport.getDefaultActor();
     const actor = actorEntry?.actor as Types.VolumeActor | undefined;
 

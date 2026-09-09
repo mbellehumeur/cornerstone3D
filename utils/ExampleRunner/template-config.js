@@ -106,6 +106,8 @@ module.exports = {
       path: require.resolve('path-browserify'),
       events: false,
       buffer: require.resolve('buffer'),
+      // Linked vtk.js (xmlbuilder2 4.x → @oozcitak/url) in the browser bundle.
+      url: require.resolve('url/'),
     },
   },
   devServer: {

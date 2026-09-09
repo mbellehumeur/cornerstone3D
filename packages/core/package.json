@@ -87,6 +87,8 @@
   "dependencies": {
     "@cornerstonejs/utils": "5.4.10",
     "@kitware/vtk.js": "35.5.3",
+    "@mview/webgpu-volume-standalone": "file:../../../mview-webgpu-volume-lab/mview-webgpu-volume-core",
+    "@slicerlive/webgpu-render": "file:../../../SlicerLive/render",
     "comlink": "4.4.2",
     "gl-matrix": "3.4.3",
     "loglevel": "1.9.2"
