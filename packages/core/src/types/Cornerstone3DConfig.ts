@@ -128,8 +128,21 @@ interface Cornerstone3DConfig {
      * OpenGL Z-slab volumeTextureBrickling.
      */
     vtkWasm?: {
-      /** Bundle URL for loadAsync (mjs/wasm directory or tar.gz). */
+      /**
+       * Force a single bundle URL for every browser (overrides jspiUrl /
+       * compatUrl). Prefer dual URLs so non-JSPI Safari gets the sync build.
+       */
       url?: string;
+      /**
+       * Same-origin / CDN tar for JSPI browsers (Kitware `dist/latest`).
+       * Used when `url` is unset and `WebAssembly.Suspending` exists.
+       */
+      jspiUrl?: string;
+      /**
+       * Same-origin / CDN tar for non-JSPI browsers (e.g. Kitware 9.7.0 split
+       * sync). Used when `url` is unset and JSPI is unavailable.
+       */
+      compatUrl?: string;
       /**
        * When true (default in @kitware/vtk-wasm), `url` is treated as a
        * `.tar.gz`. Set false when `url` is a same-origin directory that

@@ -330,26 +330,26 @@ export function setSlicerLiveVolume3DInteractionQuality(
 }
 
 /** @internal */
-export function getSlicerLiveVolume3DTargetMs(
+export function getSlicerLiveVolume3DTargetFps(
   viewportId: string
 ): number | undefined {
   const entry = entries.get(viewportId);
   if (!entry) {
     return undefined;
   }
-  return entry.renderer.getTargetMs();
+  return entry.renderer.getTargetFps();
 }
 
 /** @internal */
-export function setSlicerLiveVolume3DTargetMs(
+export function setSlicerLiveVolume3DTargetFps(
   viewportId: string,
-  targetMs: number
+  fps: number
 ): boolean {
   const entry = entries.get(viewportId);
-  if (!entry || !Number.isFinite(targetMs) || targetMs <= 0) {
+  if (!entry || !Number.isFinite(fps) || fps <= 0) {
     return false;
   }
-  entry.renderer.setTargetMs(targetMs);
+  entry.renderer.setTargetFps(fps);
   return true;
 }
 

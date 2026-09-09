@@ -91,37 +91,75 @@ const cachedRuntimes = new Map<string, VtkWasmRuntime>();
 
 let webgpuAvailabilityPromise: Promise<boolean> | null = null;
 
-const DEFAULT_VTK_WASM_BUNDLE_URL =
-  'https://raw.githack.com/Kitware/vtk-wasm/dist/latest/vtk-wasm32-emscripten.tar.gz';
+/** Same-origin JSPI bundle (run `node scripts/fetch-vtk-wasm.mjs`). */
+const DEFAULT_SAME_ORIGIN_VTK_WASM_JSPI_TAR =
+  '/vtk-wasm/jspi/vtk-wasm32-emscripten.tar.gz';
 
-/** Same-origin tar.gz (embeds types/ → method table). Prefer over bare directory. */
-const DEFAULT_SAME_ORIGIN_VTK_WASM_TAR =
-  '/vtk-wasm/vtk-wasm32-emscripten.tar.gz';
+/** Same-origin non-JSPI sync bundle. */
+const DEFAULT_SAME_ORIGIN_VTK_WASM_COMPAT_TAR =
+  '/vtk-wasm/compat/vtk-9.7.0-wasm32-emscripten.tar.gz';
+
+/**
+ * True when the browser supports WebAssembly JSPI
+ * (`WebAssembly.Suspending` / promising). Required for Kitware's unified
+ * `latest` glue and for `exec: 'async'` / WebGPU.
+ */
+export function isVtkWasmJspiAvailable(): boolean {
+  return (
+    typeof WebAssembly !== 'undefined' &&
+    typeof (WebAssembly as typeof WebAssembly & { Suspending?: unknown })
+      .Suspending === 'function'
+  );
+}
+
+type VtkWasmUrlConfig = {
+  url?: string;
+  jspiUrl?: string;
+  compatUrl?: string;
+};
+
+/**
+ * Resolve which vtk-wasm tar/directory URL to load.
+ * - `url` alone forces a single bundle for every browser.
+ * - Otherwise pick `jspiUrl` / `compatUrl` (or same-origin defaults) from JSPI.
+ */
+export function resolveVtkWasmBundleUrl(
+  cfg?: VtkWasmUrlConfig | null,
+  jspiAvailable: boolean = isVtkWasmJspiAvailable()
+): string {
+  if (cfg?.url) {
+    return cfg.url;
+  }
+  if (jspiAvailable) {
+    return cfg?.jspiUrl ?? DEFAULT_SAME_ORIGIN_VTK_WASM_JSPI_TAR;
+  }
+  return cfg?.compatUrl ?? DEFAULT_SAME_ORIGIN_VTK_WASM_COMPAT_TAR;
+}
 
 export function getVtkWasmBundleUrl(): string {
-  return (
-    getConfiguration()?.rendering?.vtkWasm?.url ?? DEFAULT_VTK_WASM_BUNDLE_URL
-  );
+  return resolveVtkWasmBundleUrl(getConfiguration()?.rendering?.vtkWasm);
 }
 
 function runtimeCacheKey(options: VtkWasmLoadOptions): string {
   return `${options.url}|${options.rendering}|${options.exec}`;
 }
 
-function getVtkWasmLoadOptions(
+/** @internal exported for tests */
+export function getVtkWasmLoadOptions(
   rendering: VtkWasmRenderingBackend = 'webgl'
 ): VtkWasmLoadOptions {
   const cfg = getConfiguration()?.rendering?.vtkWasm;
-  const url = cfg?.url ?? DEFAULT_SAME_ORIGIN_VTK_WASM_TAR;
+  const url = resolveVtkWasmBundleUrl(cfg);
   // Directory URLs must not be treated as gzip tar (kitware default is true).
   const looksLikeTarGz = /\.tar\.gz(\?|#|$)/i.test(url);
   const urlIsGzip = cfg?.urlIsGzip ?? looksLikeTarGz;
+  const wantsAsync = rendering === 'webgpu';
   return {
     url,
     urlIsGzip,
     rendering,
     // WebGPU requires async method execution (JSPI).
-    exec: rendering === 'webgpu' ? 'async' : 'sync',
+    exec: wantsAsync ? 'async' : 'sync',
   };
 }
 
@@ -140,10 +178,13 @@ export async function isVtkWasmAvailable(): Promise<boolean> {
 
 /**
  * True when vtk-wasm can load with `rendering: 'webgpu'` in this browser.
- * Requires `navigator.gpu` and a successful one-shot WebGPU runtime load
- * (catches missing JSPI / device failures). Result is cached for the session.
+ * Requires JSPI, `navigator.gpu`, and a successful one-shot WebGPU runtime load.
+ * Result is cached for the session.
  */
 export async function isVtkWasmWebgpuAvailable(): Promise<boolean> {
+  if (!isVtkWasmJspiAvailable()) {
+    return false;
+  }
   if (!isWebGPURenderingAvailable()) {
     return false;
   }
@@ -199,7 +240,18 @@ async function resolveLoadAsync(): Promise<LoadAsync> {
 export async function loadVtkWasmRuntime(
   rendering: VtkWasmRenderingBackend = 'webgl'
 ): Promise<VtkWasmRuntime> {
+  if (rendering === 'webgpu' && !isVtkWasmJspiAvailable()) {
+    throw new Error(
+      '[vtkWasm] WebGPU / exec=async requires WebAssembly JSPI ' +
+        '(WebAssembly.Suspending). Use WebGL wasm or a non-JSPI-capable fallback.'
+    );
+  }
   const options = getVtkWasmLoadOptions(rendering);
+  if (options.exec === 'async' && !isVtkWasmJspiAvailable()) {
+    throw new Error(
+      '[vtkWasm] exec=async requires WebAssembly JSPI (WebAssembly.Suspending).'
+    );
+  }
   const key = runtimeCacheKey(options);
   const cached = cachedRuntimes.get(key);
   if (cached) {

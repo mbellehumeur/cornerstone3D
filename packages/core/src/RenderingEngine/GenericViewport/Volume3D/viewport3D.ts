@@ -417,7 +417,11 @@ class VolumeViewport3D extends GenericViewport<
    * Applied vtk-wasm XYZ brick grid when the wasm Volume3D path is active.
    */
   getVtkWasmBrickSummary(): VtkWasmBrickSummary | undefined {
-    if (!isVtkWasmVolume3DRenderMode(this.getActiveRenderMode())) {
+    const registryEntry = getVtkWasmVolume3D(this.id);
+    if (
+      !isVtkWasmVolume3DRenderMode(this.getActiveRenderMode()) &&
+      !registryEntry?.brickPlan
+    ) {
       return undefined;
     }
 
@@ -429,7 +433,7 @@ class VolumeViewport3D extends GenericViewport<
       | undefined;
 
     const brickPlan =
-      rendering?.brickPlan ?? getVtkWasmVolume3D(this.id)?.brickPlan;
+      rendering?.brickPlan ?? registryEntry?.brickPlan;
 
     if (!brickPlan) {
       return undefined;

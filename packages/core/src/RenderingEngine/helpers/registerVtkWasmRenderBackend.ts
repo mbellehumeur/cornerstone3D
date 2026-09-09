@@ -11,11 +11,13 @@ import {
 import {
   isVtkWasmAvailable,
   isVtkWasmWebgpuAvailable,
+  isVtkWasmJspiAvailable,
 } from '../GenericViewport/vtkWasmRuntime';
 
 export {
   isVtkWasmAvailable,
   isVtkWasmWebgpuAvailable,
+  isVtkWasmJspiAvailable,
   VTK_WASM_VOLUME_RENDER_MODE,
   VTK_WASM_IMAGE_RENDER_MODE,
 };

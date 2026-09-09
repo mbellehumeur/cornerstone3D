@@ -64,6 +64,8 @@ export type VtkWasmVolumeBinding = {
    */
   useMultiVolumeInput?: boolean;
   getBrickImageDatas?: () => VtkWasmObject[];
+  /** Dense multi-brick: how many bricks uploaded vs planned. */
+  getBrickUploadStatus?: () => { uploaded: number; total: number };
   /** True once point-data scalars have been successfully attached. */
   hasScalars: () => boolean;
   /**

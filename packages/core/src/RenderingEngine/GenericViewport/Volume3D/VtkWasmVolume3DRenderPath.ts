@@ -116,6 +116,7 @@ export class VtkWasmVolume3DRenderPath
   /** True after brick actors have been wired once for this binding. */
   private brickVolumesSynced = false;
   private binding?: VtkWasmVolumeBinding;
+  private imageVolume?: IImageVolume;
   private sampleDistance = 1;
   private opacityUnitDistance = 1;
 
@@ -166,6 +167,7 @@ export class VtkWasmVolume3DRenderPath
       }
     );
     this.binding = binding;
+    this.imageVolume = imageVolume;
     // Single-shot upload: only marshal when the volume is already complete.
     // Progressive per-slice full re-uploads OOM the wasm heap on bricked CTs.
     const alreadyLoaded = Boolean(
@@ -317,9 +319,39 @@ export class VtkWasmVolume3DRenderPath
 
     const initialCamera = getInitialVolume3DCamera(ctx, imageVolume);
     if (initialCamera) {
+      // Align focal with trackball volumeCenter (AABB). getInitialVolume3DCamera
+      // uses getVolumeCenterIJK which can drift on tall / oblique volumes — that
+      // only breaks rotation (orbit about volumeCenter), not pan/zoom.
+      const entry = getVtkWasmVolume3D(ctx.viewportId);
+      const center = entry?.volumeCenter;
+      if (
+        center &&
+        initialCamera.position &&
+        initialCamera.focalPoint &&
+        initialCamera.viewPlaneNormal
+      ) {
+        const pos = initialCamera.position;
+        const focal = initialCamera.focalPoint;
+        const vpn = initialCamera.viewPlaneNormal;
+        const distance = Math.hypot(
+          pos[0] - focal[0],
+          pos[1] - focal[1],
+          pos[2] - focal[2]
+        );
+        const len = Math.hypot(vpn[0], vpn[1], vpn[2]) || 1;
+        initialCamera.focalPoint = [...center] as [
+          number,
+          number,
+          number,
+        ];
+        initialCamera.position = [
+          center[0] + (vpn[0] / len) * distance,
+          center[1] + (vpn[1] / len) * distance,
+          center[2] + (vpn[2] / len) * distance,
+        ];
+      }
       applyVolume3DCamera(ctx, initialCamera, { resetClippingRange: true });
       await this.applyCameraToWasm(initialCamera);
-      const entry = getVtkWasmVolume3D(ctx.viewportId);
       if (entry && typeof initialCamera.parallelScale === 'number') {
         entry.baselineParallelScale = initialCamera.parallelScale;
       }
@@ -339,6 +371,25 @@ export class VtkWasmVolume3DRenderPath
         .refreshScalars(undefined, { force: true })
         .then(async (ok) => {
           if (!ok || !this.wasmRenderer || !this.handle) {
+            const brickStatus = binding.getBrickUploadStatus?.();
+            if (brickStatus && brickStatus.total > 1) {
+              console.warn(
+                `[vtkWasm] Volume3D present skipped: bricksUploaded=${brickStatus.uploaded}/${brickStatus.total}`
+              );
+            }
+            return;
+          }
+          const brickStatus = binding.getBrickUploadStatus?.() ?? {
+            uploaded: binding.getBrickImageDatas?.()?.length ?? 0,
+            total: binding.brickPlan.bricks.length,
+          };
+          if (
+            (binding.useMultiBlockInput || binding.useMultiVolumeInput) &&
+            brickStatus.uploaded < brickStatus.total
+          ) {
+            console.warn(
+              `[vtkWasm] Volume3D present skipped: bricksUploaded=${brickStatus.uploaded}/${brickStatus.total}`
+            );
             return;
           }
           if (binding.useMultiBlockInput && binding.multiBlock) {
@@ -390,10 +441,23 @@ export class VtkWasmVolume3DRenderPath
               1
             );
           }
-          // Frame from CS volume bounds (known-good). Wasm ImageData bounds can
-          // be empty/wrong after proxy finalize.
+          // Multi-brick: keep wasm aligned with vtk-js (TrackballRotate authority).
+          // frameCameraToImageVolume on wasm-only desyncs → ~90° on first drag.
           if (this.wasmRenderer) {
-            await this.frameCameraToImageVolume(imageVolume);
+            if (
+              binding.useMultiBlockInput === true ||
+              binding.useMultiVolumeInput === true
+            ) {
+              // CS bounds clipping once — not resetCameraClippingRange (MultiBlock
+              // prop bounds) and not per-drag updates (orbit wobble / first-drag snap).
+              await this.syncWasmCameraFromVtkJs(ctx, imageVolume, {
+                applyBoundsClipping: true,
+              });
+            } else {
+              await this.frameCameraToImageVolume(imageVolume, {
+                applyBoundsClipping: true,
+              });
+            }
           }
           if (this.handle?.canvas) {
             this.handle.canvas.style.display = 'block';
@@ -406,6 +470,7 @@ export class VtkWasmVolume3DRenderPath
           console.info(
             `[vtkWasm] Volume3D present ok mode=${binding.mode ?? 'single'} ` +
               `hasScalars=${binding.hasScalars()} ` +
+              `bricksUploaded=${brickStatus.uploaded}/${brickStatus.total} ` +
               `volumeAdded=${this.volumeAddedToRenderer} ` +
               `partitions=${binding.brickPlan.vtkPartitions.join('x')} ` +
               `useMultiBlock=${binding.useMultiBlockInput === true} ` +
@@ -469,6 +534,7 @@ export class VtkWasmVolume3DRenderPath
         this.volume = undefined;
         this.volumeProperty = undefined;
         this.binding = undefined;
+        this.imageVolume = undefined;
         this.volumeAddedToRenderer = false;
       },
     };
@@ -598,26 +664,15 @@ export class VtkWasmVolume3DRenderPath
     }
   }
 
-  /**
-   * Position the wasm camera from Cornerstone ImageData bounds (not wasm
-   * proxy bounds, which may be unset after scalar finalize).
-   */
-  private async frameCameraToImageVolume(
+  private buildFramedCameraFromImageVolume(
     imageVolume: IImageVolume
-  ): Promise<void> {
-    const renderer = this.wasmRenderer;
-    if (!renderer) {
-      return;
-    }
-
+  ): Partial<Volume3DCamera> | undefined {
     const vtkImage = imageVolume.imageData as
       | { getBounds?: () => number[] }
       | undefined;
     const bounds = vtkImage?.getBounds?.();
     if (!bounds || bounds.length < 6) {
-      await invoke(renderer, 'resetCamera');
-      await invoke(renderer, 'resetCameraClippingRange');
-      return;
+      return undefined;
     }
 
     const cx = (bounds[0] + bounds[1]) * 0.5;
@@ -630,37 +685,161 @@ export class VtkWasmVolume3DRenderPath
     const parallelScale = Math.max(dy, dz) * 0.55;
     const distance = radius * 2.5;
 
-    let cam = renderer.activeCamera as VtkWasmObject | undefined;
-    if (!cam) {
-      cam = (await invoke(renderer, 'getActiveCamera')) as
-        | VtkWasmObject
-        | undefined;
+    return {
+      parallelProjection: true,
+      focalPoint: [cx, cy, cz],
+      // View along -Y (approx coronal) — stable default for CT.
+      position: [cx, cy - distance, cz],
+      viewUp: [0, 0, 1],
+      parallelScale,
+    };
+  }
+
+  /**
+   * Position the wasm camera from Cornerstone ImageData bounds (not wasm
+   * proxy bounds, which may be unset after scalar finalize). Single-brick only.
+   */
+  private async frameCameraToImageVolume(
+    imageVolume: IImageVolume,
+    options: { applyBoundsClipping?: boolean } = {}
+  ): Promise<void> {
+    const renderer = this.wasmRenderer;
+    if (!renderer) {
+      return;
     }
-    if (!cam) {
+
+    const framed = this.buildFramedCameraFromImageVolume(imageVolume);
+    if (!framed) {
       await invoke(renderer, 'resetCamera');
       await invoke(renderer, 'resetCameraClippingRange');
       return;
     }
 
-    await invoke(cam, 'setParallelProjection', 1);
-    await invoke(cam, 'setFocalPoint', cx, cy, cz);
-    // View along -Y (approx coronal) — stable default for CT.
-    await invoke(cam, 'setPosition', cx, cy - distance, cz);
-    await invoke(cam, 'setViewUp', 0, 0, 1);
-    await invoke(cam, 'setParallelScale', parallelScale);
-    cam.$set?.({
-      parallelProjection: 1,
-      focalPoint: [cx, cy, cz],
-      position: [cx, cy - distance, cz],
-      viewUp: [0, 0, 1],
-      parallelScale,
-    });
-    await invoke(renderer, 'resetCameraClippingRange');
+    await this.applyCameraToWasm(framed, options);
+    const focal = framed.focalPoint;
     console.info(
-      `[vtkWasm] Volume3D camera frame center=[${cx.toFixed(1)},${cy.toFixed(1)},${cz.toFixed(1)}] ` +
-        `parallelScale=${parallelScale.toFixed(1)} dist=${distance.toFixed(1)} ` +
-        `bounds=[${bounds.map((v) => v.toFixed(1)).join(',')}]`
+      `[vtkWasm] Volume3D camera frame center=[${focal?.[0]?.toFixed(1)},${focal?.[1]?.toFixed(1)},${focal?.[2]?.toFixed(1)}] ` +
+        `parallelScale=${framed.parallelScale?.toFixed(1)}`
     );
+  }
+
+  private readVtkJsCameraPose(
+    ctx: Volume3DViewportRenderContext
+  ): Partial<Volume3DCamera> | undefined {
+    const vtkCam = ctx.vtk.renderer.getActiveCamera();
+    const position = vtkCam.getPosition?.() as Volume3DCamera['position'];
+    const focalPoint = vtkCam.getFocalPoint?.() as Volume3DCamera['focalPoint'];
+    if (!position || !focalPoint) {
+      return undefined;
+    }
+    return {
+      position,
+      focalPoint,
+      viewUp: vtkCam.getViewUp?.() as Volume3DCamera['viewUp'],
+      parallelScale: vtkCam.getParallelScale?.(),
+      parallelProjection: vtkCam.getParallelProjection?.(),
+      viewAngle: vtkCam.getViewAngle?.(),
+    };
+  }
+
+  private async syncWasmCameraFromVtkJs(
+    ctx: Volume3DViewportRenderContext,
+    imageVolume: IImageVolume,
+    options: { applyBoundsClipping?: boolean } = {}
+  ): Promise<void> {
+    const pose = this.readVtkJsCameraPose(ctx);
+    if (pose) {
+      await this.applyCameraToWasm(pose, options);
+      return;
+    }
+    const framed = this.buildFramedCameraFromImageVolume(imageVolume);
+    if (!framed) {
+      return;
+    }
+    applyVolume3DCamera(ctx, framed, { resetClippingRange: true });
+    await this.applyCameraToWasm(framed, { applyBoundsClipping: true });
+  }
+
+  /**
+   * Clip from full CS volume bounds projected on the current view axis (not
+   * MultiBlock prop bounds). Use at present/resize only — not on every drag.
+   */
+  private async applyVolumeBoundsClippingRange(
+    cam: VtkWasmObject,
+    position: [number, number, number],
+    focalPoint: [number, number, number]
+  ): Promise<void> {
+    const renderer = this.wasmRenderer;
+    const bounds = this.imageVolume?.imageData?.getBounds?.();
+    if (!bounds || bounds.length < 6) {
+      if (renderer) {
+        await invoke(renderer, 'resetCameraClippingRange');
+      }
+      return;
+    }
+
+    const viewDir = [
+      focalPoint[0] - position[0],
+      focalPoint[1] - position[1],
+      focalPoint[2] - position[2],
+    ];
+    const viewLen = Math.hypot(viewDir[0], viewDir[1], viewDir[2]) || 1;
+    viewDir[0] /= viewLen;
+    viewDir[1] /= viewLen;
+    viewDir[2] /= viewLen;
+
+    const corners: [number, number, number][] = [
+      [bounds[0], bounds[2], bounds[4]],
+      [bounds[0], bounds[2], bounds[5]],
+      [bounds[0], bounds[3], bounds[4]],
+      [bounds[0], bounds[3], bounds[5]],
+      [bounds[1], bounds[2], bounds[4]],
+      [bounds[1], bounds[2], bounds[5]],
+      [bounds[1], bounds[3], bounds[4]],
+      [bounds[1], bounds[3], bounds[5]],
+    ];
+    let minDist = Infinity;
+    let maxDist = -Infinity;
+    for (const corner of corners) {
+      const d =
+        (corner[0] - position[0]) * viewDir[0] +
+        (corner[1] - position[1]) * viewDir[1] +
+        (corner[2] - position[2]) * viewDir[2];
+      minDist = Math.min(minDist, d);
+      maxDist = Math.max(maxDist, d);
+    }
+
+    const span = maxDist - minDist;
+    const margin = Math.max(span * 0.1, 1);
+    const near = Math.max(0.1, minDist - margin);
+    const far = maxDist + margin;
+    await invoke(cam, 'setClippingRange', near, far);
+    cam.$set?.({ clippingRange: [near, far] });
+  }
+
+  private async applyBoundsClippingFromCamera(
+    cam: VtkWasmObject,
+    camera: Partial<Volume3DCamera>
+  ): Promise<void> {
+    const position = camera.position;
+    const focal = camera.focalPoint;
+    if (
+      position &&
+      position.length >= 3 &&
+      focal &&
+      focal.length >= 3
+    ) {
+      await this.applyVolumeBoundsClippingRange(
+        cam,
+        clonePoint3(position),
+        clonePoint3(focal)
+      );
+      return;
+    }
+    const renderer = this.wasmRenderer;
+    if (renderer) {
+      await invoke(renderer, 'resetCameraClippingRange');
+    }
   }
 
   private clearBrickVolumes(): void {
@@ -738,22 +917,25 @@ export class VtkWasmVolume3DRenderPath
   }
 
   private applyViewState(
-    ctx: Volume3DViewportRenderContext,
+    _ctx: Volume3DViewportRenderContext,
     camera: Volume3DCamera
   ): void {
-    // setViewState already wrote the vtk-js camera. Do not re-apply with
-    // resetClippingRange here — the OpenGL renderer has no volume props, so
-    // that reset produces a bogus clippingRange that then blanks the wasm
-    // present when synced.
-    void this.applyCameraToWasm(camera).then(() => this.renderAsync());
+    // setViewState already wrote the vtk-js camera. Pose-only sync on rotate;
+    // clipping is set at present/resize (MultiBlock resetCameraClippingRange
+    // and per-drag bounds clipping both caused large-series orbit issues).
+    void (async () => {
+      await this.applyCameraToWasm(camera);
+      await this.renderAsync();
+    })();
   }
 
   private async applyCameraToWasm(
-    camera: Partial<Volume3DCamera>
-  ): Promise<void> {
+    camera: Partial<Volume3DCamera>,
+    options: { applyBoundsClipping?: boolean } = {}
+  ): Promise<VtkWasmObject | undefined> {
     const renderer = this.wasmRenderer;
     if (!renderer) {
-      return;
+      return undefined;
     }
 
     let cam = renderer.activeCamera as VtkWasmObject | undefined;
@@ -765,19 +947,12 @@ export class VtkWasmVolume3DRenderPath
     if (!cam) {
       await invoke(renderer, 'resetCamera');
       await invoke(renderer, 'resetCameraClippingRange');
-      return;
+      return undefined;
     }
 
-    // Sync pose/projection only. Never copy CS clippingRange — on rotate,
-    // getRuntimeCamera() reads the empty vtk-js scene's reset range and that
-    // clips the wasm volume out of view.
-    if (camera.parallelProjection !== undefined) {
-      await invoke(
-        cam,
-        'setParallelProjection',
-        camera.parallelProjection ? 1 : 0
-      );
-    }
+    // Match MPR wasm: Volume3D is parallel projection.
+    await invoke(cam, 'setParallelProjection', 1);
+
     if (camera.viewUp) {
       await invoke(cam, 'setViewUp', ...camera.viewUp);
     }
@@ -797,9 +972,7 @@ export class VtkWasmVolume3DRenderPath
     // Plain arrays only: TypedArrays JSON-serialize as objects and fail
     // vtk-wasm DeserializeJSON (type must be array).
     cam.$set?.({
-      ...(camera.parallelProjection !== undefined
-        ? { parallelProjection: camera.parallelProjection ? 1 : 0 }
-        : {}),
+      parallelProjection: camera.parallelProjection === false ? 0 : 1,
       ...(camera.viewUp ? { viewUp: clonePoint3(camera.viewUp) } : {}),
       ...(camera.focalPoint
         ? { focalPoint: clonePoint3(camera.focalPoint) }
@@ -813,7 +986,10 @@ export class VtkWasmVolume3DRenderPath
         : {}),
     });
 
-    await invoke(renderer, 'resetCameraClippingRange');
+    if (options.applyBoundsClipping) {
+      await this.applyBoundsClippingFromCamera(cam, camera);
+    }
+    return cam;
   }
 
   private async resizePresent(
@@ -832,14 +1008,17 @@ export class VtkWasmVolume3DRenderPath
     // Re-sync pose after SetSize — canvas bitmap clears and a stale wasm
     // camera/clipping range can leave the volume blank until the next orbit.
     const vtkCam = ctx.vtk.renderer.getActiveCamera();
-    await this.applyCameraToWasm({
-      position: vtkCam.getPosition?.() as Volume3DCamera['position'],
-      focalPoint: vtkCam.getFocalPoint?.() as Volume3DCamera['focalPoint'],
-      viewUp: vtkCam.getViewUp?.() as Volume3DCamera['viewUp'],
-      parallelScale: vtkCam.getParallelScale?.(),
-      parallelProjection: vtkCam.getParallelProjection?.(),
-      viewAngle: vtkCam.getViewAngle?.(),
-    });
+    await this.applyCameraToWasm(
+      {
+        position: vtkCam.getPosition?.() as Volume3DCamera['position'],
+        focalPoint: vtkCam.getFocalPoint?.() as Volume3DCamera['focalPoint'],
+        viewUp: vtkCam.getViewUp?.() as Volume3DCamera['viewUp'],
+        parallelScale: vtkCam.getParallelScale?.(),
+        parallelProjection: vtkCam.getParallelProjection?.(),
+        viewAngle: vtkCam.getViewAngle?.(),
+      },
+      { applyBoundsClipping: true }
+    );
     await this.renderAsync();
   }
 

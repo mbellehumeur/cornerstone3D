@@ -50,6 +50,7 @@ export type VtkWasmBrickedVolumeBinding = {
    */
   useMultiVolumeInput: boolean;
   getBrickImageDatas: () => VtkWasmObject[];
+  getBrickUploadStatus: () => { uploaded: number; total: number };
   hasScalars: () => boolean;
   /** True once ImageReslice has a real slab (stitched or single-brick), not the empty stub. */
   hasMprInput: () => boolean;
@@ -175,16 +176,33 @@ function brickWorldOrigin(
   volumeOrigin: [number, number, number],
   spacing: [number, number, number],
   direction: number[] | undefined,
-  ijk: [number, number, number]
+  ijk: [number, number, number],
+  imageData?: {
+    indexToWorld?: (
+      index: [number, number, number],
+      dest?: [number, number, number]
+    ) => [number, number, number] | ArrayLike<number>;
+  }
 ): [number, number, number] {
+  if (typeof imageData?.indexToWorld === 'function') {
+    const dest: [number, number, number] = [0, 0, 0];
+    const world = imageData.indexToWorld(ijk, dest);
+    return [
+      Number(world?.[0] ?? dest[0]),
+      Number(world?.[1] ?? dest[1]),
+      Number(world?.[2] ?? dest[2]),
+    ];
+  }
+
   const [i, j, k] = ijk;
   const [sx, sy, sz] = spacing;
   if (direction && direction.length >= 9) {
     const d = direction;
+    // Column vectors I,J,K (matches vtk.js indexToWorld).
     return [
-      volumeOrigin[0] + (d[0] * i * sx + d[1] * j * sy + d[2] * k * sz),
-      volumeOrigin[1] + (d[3] * i * sx + d[4] * j * sy + d[5] * k * sz),
-      volumeOrigin[2] + (d[6] * i * sx + d[7] * j * sy + d[8] * k * sz),
+      volumeOrigin[0] + d[0] * i * sx + d[3] * j * sy + d[6] * k * sz,
+      volumeOrigin[1] + d[1] * i * sx + d[4] * j * sy + d[7] * k * sz,
+      volumeOrigin[2] + d[2] * i * sx + d[5] * j * sy + d[8] * k * sz,
     ];
   }
   return [
@@ -255,12 +273,34 @@ export function bindVtkWasmBrickedVolume(
   }
 
   const dimensions = imageVolume.dimensions as [number, number, number];
+  const csImageData = imageVolume.imageData as
+    | {
+        getOrigin?: () => [number, number, number] | ArrayLike<number>;
+        getSpacing?: () => [number, number, number] | ArrayLike<number>;
+        getDirection?: () => number[] | ArrayLike<number>;
+      }
+    | undefined;
   // Plain arrays only: TypedArrays JSON-serialize as objects and fail
   // vtk-wasm DeserializeJSON (type must be array).
-  const spacing = clonePoint3(imageVolume.spacing);
-  const origin = clonePoint3(imageVolume.origin);
-  const direction = (imageVolume.direction ??
-    imageVolume.imageData?.getDirection?.()) as number[] | undefined;
+  const spacing = clonePoint3(
+    (typeof csImageData?.getSpacing === 'function'
+      ? csImageData.getSpacing()
+      : undefined) ?? imageVolume.spacing
+  );
+  const origin = clonePoint3(
+    (typeof csImageData?.getOrigin === 'function'
+      ? csImageData.getOrigin()
+      : undefined) ?? imageVolume.origin
+  );
+  const directionRaw =
+    (typeof csImageData?.getDirection === 'function'
+      ? csImageData.getDirection()
+      : undefined) ??
+    imageVolume.direction ??
+    csImageData?.getDirection?.();
+  const direction = directionRaw
+    ? (Array.from(directionRaw) as number[])
+    : undefined;
   const numberOfComponents = getNumberOfComponents(imageVolume);
 
   let brickPlan = buildWasmVtkBrickPlan(
@@ -370,11 +410,19 @@ export function bindVtkWasmBrickedVolume(
     if (sx <= 0 || sy <= 0 || sz <= 0) {
       return undefined;
     }
-    const brickOrigin = brickWorldOrigin(origin, spacing, direction, [
-      box[0],
-      box[2],
-      box[4],
-    ]);
+    const brickOrigin = brickWorldOrigin(
+      origin,
+      spacing,
+      direction,
+      [box[0], box[2], box[4]],
+      imageVolume.imageData as
+        | {
+            indexToWorld?: (
+              index: [number, number, number]
+            ) => [number, number, number] | ArrayLike<number>;
+          }
+        | undefined
+    );
     const extent: [number, number, number, number, number, number] = [
       0,
       Math.max(0, sx - 1),
@@ -438,6 +486,7 @@ export function bindVtkWasmBrickedVolume(
   let refreshInFlight: Promise<boolean> | null = null;
   let pendingRefresh = false;
   let anyUploaded = false;
+  let lastBrickUpload = { uploaded: 0, total: brickPlan.bricks.length };
   let mprSlabReady = false;
   let lastMprKey = '';
   /** When volume fits the WASM budget, MPR uses one full ImageData (no thin slabs). */
@@ -509,6 +558,66 @@ export function bindVtkWasmBrickedVolume(
     return dataArray;
   };
 
+  let loggedBrickOriginDiagnostic = false;
+
+  const logBrickOriginDiagnostic = (
+    brickOrigin: [number, number, number],
+    ijk: [number, number, number]
+  ): void => {
+    if (loggedBrickOriginDiagnostic) {
+      return;
+    }
+    loggedBrickOriginDiagnostic = true;
+    const volOrigin = origin;
+    const idxWorld = brickWorldOrigin(
+      volOrigin,
+      spacing,
+      direction,
+      ijk,
+      imageVolume.imageData as
+        | {
+            indexToWorld?: (
+              index: [number, number, number],
+              dest?: [number, number, number]
+            ) => [number, number, number] | ArrayLike<number>;
+          }
+        | undefined
+    );
+    const manualOrigin = brickWorldOrigin(
+      volOrigin,
+      spacing,
+      direction,
+      ijk,
+      undefined
+    );
+    const delta = Math.hypot(
+      idxWorld[0] - manualOrigin[0],
+      idxWorld[1] - manualOrigin[1],
+      idxWorld[2] - manualOrigin[2]
+    );
+    const imageDataOrigin =
+      typeof csImageData?.getOrigin === 'function'
+        ? clonePoint3(csImageData.getOrigin())
+        : volOrigin;
+    const originDelta = Math.hypot(
+      brickOrigin[0] - imageDataOrigin[0],
+      brickOrigin[1] - imageDataOrigin[1],
+      brickOrigin[2] - imageDataOrigin[2]
+    );
+    console.info(
+      `[vtkWasm] brick0 origin diagnostic ijk=[${ijk.join(',')}] ` +
+        `brickOrigin=[${brickOrigin.map((v) => v.toFixed(2)).join(',')}] ` +
+        `imageDataOrigin=[${imageDataOrigin.map((v) => v.toFixed(2)).join(',')}] ` +
+        `indexVsManual=${delta.toFixed(4)} originDelta=${originDelta.toFixed(4)}`
+    );
+    if (delta > 1 || originDelta > 1) {
+      console.warn(
+        `[vtkWasm] brick0 origin mismatch indexVsManual=${delta.toFixed(2)} ` +
+          `originDelta=${originDelta.toFixed(2)} (expected ~0 mm)`
+      );
+    }
+  };
+
   const fillBrickSlot = async (
     slot: BrickSlot,
     typed: MarshallableTypedArray,
@@ -529,6 +638,10 @@ export function bindVtkWasmBrickedVolume(
       numberOfComponents
     );
     if (!next) {
+      const [i0, i1, j0, j1, k0, k1] = slot.brick.extent;
+      console.warn(
+        `[vtkWasm] brick heap.alloc failed extent=[${i0},${i1},${j0},${j1},${k0},${k1}]`
+      );
       return false;
     }
     const dest = typedArrayInterface?.toJSTypedArray?.(next) as
@@ -556,7 +669,30 @@ export function bindVtkWasmBrickedVolume(
     );
     if (!built) {
       disposeVtkObject(next);
+      console.warn(
+        `[vtkWasm] brick finalize failed extent=[${i0},${i1},${j0},${j1},${k0},${k1}]`
+      );
       return false;
+    }
+
+    if (i0 === 0 && j0 === 0 && k0 === 0) {
+      logBrickOriginDiagnostic(
+        brickWorldOrigin(
+          origin,
+          spacing,
+          direction,
+          [i0, j0, k0],
+          imageVolume.imageData as
+            | {
+                indexToWorld?: (
+                  index: [number, number, number],
+                  dest?: [number, number, number]
+                ) => [number, number, number] | ArrayLike<number>;
+              }
+            | undefined
+        ),
+        [i0, j0, k0]
+      );
     }
 
     const previousImage = slot.imageData;
@@ -573,25 +709,40 @@ export function bindVtkWasmBrickedVolume(
   const uploadAllBricks = async (force = false): Promise<boolean> => {
     const scalars = getVolumeScalarArray(imageVolume);
     if (!scalars || scalars.length <= 0) {
-      return anyUploaded;
+      return false;
     }
     const expected =
       dimensions[0] * dimensions[1] * dimensions[2] * numberOfComponents;
     if (scalars.length < expected) {
-      return anyUploaded;
+      console.warn(
+        `[vtkWasm] dense brick upload skipped: scalars ${scalars.length}/${expected} not ready`
+      );
+      return false;
     }
     const typed = toMarshallableTypedArray(scalars);
     let okCount = 0;
-    for (const slot of slots) {
-      if (await fillBrickSlot(slot, typed, force)) {
+    for (let i = 0; i < slots.length; i++) {
+      if (await fillBrickSlot(slots[i], typed, force)) {
         okCount += 1;
+      } else {
+        const ext = slots[i].brick.extent;
+        console.warn(
+          `[vtkWasm] brick upload failed index=${i}/${slots.length} extent=[${ext.join(',')}]`
+        );
       }
     }
+    lastBrickUpload = { uploaded: okCount, total: slots.length };
     anyUploaded = okCount > 0;
     if (anyUploaded) {
       await syncMultiBlockDataset();
     }
-    return anyUploaded;
+    const complete = okCount === slots.length;
+    if (!complete && slots.length > 1) {
+      console.warn(
+        `[vtkWasm] dense brick upload incomplete ${okCount}/${slots.length}`
+      );
+    }
+    return complete;
   };
 
   /**
@@ -708,10 +859,11 @@ export function bindVtkWasmBrickedVolume(
       mprSlabReady = false;
     }
     pendingRefresh = true;
+    let lastOk = false;
     while (pendingRefresh) {
       if (!refreshInFlight) {
         refreshInFlight = (async () => {
-          let ok = anyUploaded;
+          let ok = false;
           while (pendingRefresh) {
             pendingRefresh = false;
             // Volume3D: upload every dense brick.
@@ -726,9 +878,9 @@ export function bindVtkWasmBrickedVolume(
           refreshInFlight = null;
         });
       }
-      await refreshInFlight;
+      lastOk = Boolean(await refreshInFlight);
     }
-    return anyUploaded;
+    return lastOk;
   };
 
   const syncMprPlane = async (
@@ -840,6 +992,10 @@ export function bindVtkWasmBrickedVolume(
     useMultiVolumeInput,
     getBrickImageDatas: () =>
       slots.filter((s) => s.uploaded).map((s) => s.imageData),
+    getBrickUploadStatus: () => ({
+      uploaded: lastBrickUpload.uploaded,
+      total: lastBrickUpload.total,
+    }),
     hasScalars: () => anyUploaded,
     hasMprInput: () =>
       isSingleBrick ? !!(slots[0]?.uploaded && mprSlabReady) : mprSlabReady,

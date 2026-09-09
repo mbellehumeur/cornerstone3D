@@ -36,7 +36,7 @@ declare module '@slicerlive/webgpu-render' {
     shadeCoeffs?: [number, number, number, number];
   };
 
-  export const TARGET_MS_PRESETS: readonly [8, 16, 33];
+  export const TARGET_FPS_PRESETS: readonly [30, 60, 120];
 
   export class SlicerLiveVolumeRenderer {
     static isSupported(): boolean;
@@ -70,8 +70,8 @@ declare module '@slicerlive/webgpu-render' {
     setMotionBudget(quality: number): void;
     getMotionBudgetPx(): number;
     setMotionBudgetPx(budgetPx: number): void;
-    getTargetMs(): number;
-    setTargetMs(ms: number): void;
+    getTargetFps(): number;
+    setTargetFps(fps: number): void;
     getSampleStep(): number;
     getAutoSampleStep(): number;
     setSampleStep(stepMm: number): void;
