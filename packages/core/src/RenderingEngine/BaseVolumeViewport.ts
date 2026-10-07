@@ -73,6 +73,7 @@ import Viewport from './Viewport';
 import type { vtkSlabCamera as vtkSlabCameraType } from './vtkClasses/vtkSlabCamera';
 import vtkSlabCamera from './vtkClasses/vtkSlabCamera';
 import getVolumeViewportScrollInfo from '../utilities/getVolumeViewportScrollInfo';
+import getViewSlabDepth from '../utilities/getViewSlabDepth';
 import { actorIsA, isImageActor } from '../utilities/actorCheck';
 import type { ImageActor } from '../types/IActor';
 import snapFocalPointToSlice from '../utilities/snapFocalPointToSlice';
@@ -153,6 +154,7 @@ abstract class BaseVolumeViewport extends Viewport {
     }
 
     this.initializeVolumeNewImageEventDispatcher();
+    this.initializeVolumeModifiedRenderDispatcher();
   }
 
   static get useCustomRenderingPipeline(): boolean {
@@ -257,6 +259,79 @@ abstract class BaseVolumeViewport extends Viewport {
       Events.ELEMENT_DISABLED,
       volumeNewImageCleanUpBound
     );
+  }
+
+  /**
+   * Requests a render when a streaming volume that this viewport holds
+   * receives new frames. Legacy VolumeViewports otherwise never hear
+   * IMAGE_VOLUME_MODIFIED (GenericViewport paths do), so dirties piled up and
+   * rare paints uploaded hundreds of texture slices at once.
+   *
+   * While the volume loads, the loader renders every 2% of its frames
+   * (`autoRenderOnLoad`), and this dispatcher stays out of the way. It renders
+   * for a change after the load, such as a labelmap edit.
+   */
+  private initializeVolumeModifiedRenderDispatcher(): void {
+    const handleVolumeModified = (evt: Event) => {
+      const detail = (evt as CustomEvent<{ volumeId?: string }>).detail;
+      const volumeId = detail?.volumeId;
+
+      if (!volumeId || !this.volumeIds.has(volumeId) || this.isDisabled) {
+        return;
+      }
+
+      // A volume that is still loading renders through the throttle of its
+      // loader, so a 3D viewport does not ray cast on every frame.
+      if (cache.getVolume(volumeId)?.loadStatus?.loading) {
+        return;
+      }
+
+      this.renderVolumeModified(volumeId);
+    };
+
+    eventTarget.addEventListener(
+      Events.IMAGE_VOLUME_MODIFIED,
+      handleVolumeModified
+    );
+
+    const cleanUp = (evt: Event) => {
+      const { viewportId } = (evt as CustomEvent<{ viewportId?: string }>)
+        .detail;
+
+      if (viewportId !== this.id) {
+        return;
+      }
+
+      eventTarget.removeEventListener(
+        Events.IMAGE_VOLUME_MODIFIED,
+        handleVolumeModified
+      );
+      eventTarget.removeEventListener(Events.ELEMENT_DISABLED, cleanUp);
+    };
+
+    eventTarget.addEventListener(Events.ELEMENT_DISABLED, cleanUp);
+  }
+
+  private renderVolumeModified(volumeId: string): void {
+    if (this.isDisabled) {
+      return;
+    }
+
+    const actors = this.getActors();
+
+    for (const entry of actors) {
+      const referencedId = entry.referencedId ?? entry.uid;
+
+      if (referencedId !== volumeId && entry.uid !== volumeId) {
+        continue;
+      }
+
+      const mapper = entry.actor?.getMapper?.();
+
+      mapper?.modified?.();
+    }
+
+    this.render();
   }
 
   /**
@@ -1304,7 +1379,7 @@ abstract class BaseVolumeViewport extends Viewport {
     }
   }
 
-  public setSampleDistanceMultiplier(multiplier: number): void {}
+  public setSampleDistanceMultiplier(_multiplier: number): void {}
 
   /**
    * Retrieve the viewport default properties
@@ -2427,17 +2502,9 @@ abstract class BaseVolumeViewport extends Viewport {
    * `docs/docs/concepts/cornerstone-tools/annotation/voxel-statistics.md`.
    */
   protected getReferencePlaneThickness(): number | undefined {
-    const slabThickness = this.getSlabThickness();
-
-    if (
-      !Number.isFinite(slabThickness) ||
-      slabThickness <= RENDERING_DEFAULTS.MINIMUM_SLAB_THICKNESS
-    ) {
-      return undefined;
-    }
-
-    return slabThickness * 2;
+    return getViewSlabDepth(this.getSlabThickness() * 2);
   }
+
   /**
    * Given a point in world coordinates, return the intensity at that point
    * @param point - The point in world coordinates to get the intensity
@@ -2525,7 +2592,7 @@ abstract class BaseVolumeViewport extends Viewport {
    * allow using it as a parameter key.
    */
   public getViewReferenceId(specifier: ViewReferenceSpecifier = {}): string {
-    let { volumeId, sliceIndex: sliceIndex } = specifier;
+    let { volumeId, sliceIndex } = specifier;
     if (!volumeId) {
       const actorEntries = this.getActors();
       if (!actorEntries) {

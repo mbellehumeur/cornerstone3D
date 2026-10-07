@@ -51,6 +51,28 @@ interface Cornerstone3DConfig {
     strictZSpacingForVolumeViewport?: boolean;
 
     /**
+     * EXPERIMENTAL, and off by default. Which measure gives the distance
+     * between two adjacent slices of a volume viewport.
+     *
+     * - `'l2'` - the default and the historic behaviour.
+     *   `getSpacingInNormalDirection` gives the L2 length of the projected
+     *   spacing vector, `sqrt( Σᵢ (n · aᵢ · sᵢ)² )`.
+     * - `'l1'` - `getVoxelThicknessAlongNormal` gives the L1 length,
+     *   `Σᵢ |n · aᵢ| · sᵢ`, which is how far one voxel reaches along the
+     *   normal.
+     *
+     * The two measures are equal when the normal is parallel to a voxel axis,
+     * so an acquisition-orientation view behaves the same either way. The L2
+     * value is the smaller one for an oblique normal, so the viewport steps
+     * less than the width of one voxel, and two adjacent oblique slices show
+     * some of the same voxels. A brush fill on an oblique plane then appears
+     * on the next slice and on the previous slice.
+     *
+     * See https://github.com/cornerstonejs/cornerstone3D/issues/2912.
+     */
+    sliceStepMeasure?: 'l1' | 'l2';
+
+    /**
      * The rendering engine mode to use.
      * 'contextPool' is the a rendering engine that uses sequential rendering, pararllization and has enhanced support/performance for multi-monitor and high resolution displays.
      * 'tiled' is a rendering engine that uses tiled rendering.
@@ -94,6 +116,17 @@ interface Cornerstone3DConfig {
     volumeRendering?: {
       /** Multiplier for the calculated sample distance */
       sampleDistanceMultiplier?: number;
+    };
+    /**
+     * The work that one render does to fill the dirty slices of a reduced
+     * volume texture. The render stops after `maxSlicesPerRender` slices that
+     * hold data, or when `maxMillisecondsPerRender` has passed after at least
+     * one slice. It then requests another render for the slices that remain.
+     * The defaults are 16 slices and 8 ms.
+     */
+    reducedTextureFill?: {
+      maxSlicesPerRender?: number;
+      maxMillisecondsPerRender?: number;
     };
     /**
      * When true, legacy viewport types (STACK, ORTHOGRAPHIC, VIDEO, ECG,

@@ -18,6 +18,7 @@ import isOpposite from './isOpposite';
 import getClosestImageId from './getClosestImageId';
 import getSpacingInNormalDirection from './getSpacingInNormalDirection';
 import getEffectiveSpacingAlongDirection from './getEffectiveSpacingAlongDirection';
+import getViewSlabDepth from './getViewSlabDepth';
 import getTargetVolumeAndSpacingInNormalDir from './getTargetVolumeAndSpacingInNormalDir';
 import getVolumeActorCorners from './getVolumeActorCorners';
 import indexWithinDimensions from './indexWithinDimensions';
@@ -68,6 +69,7 @@ import { generateVolumePropsFromImageIds } from './generateVolumePropsFromImageI
 import { convertStackToVolumeViewport } from './convertStackToVolumeViewport';
 import { convertVolumeToStackViewport } from './convertVolumeToStackViewport';
 import VoxelManager from './VoxelManager';
+import CompositeVoxelManager from './CompositeVoxelManager';
 import RLEVoxelMap from './RLEVoxelMap';
 import roundNumber, { roundToPrecision } from './roundNumber';
 import convertToGrayscale from './convertToGrayscale';
@@ -80,6 +82,7 @@ import { pointInShapeCallback } from './pointInShapeCallback';
 import * as ECGUtilities from './ECGUtilities';
 import * as VideoUtilities from './VideoUtilities';
 import * as WSIUtilities from './WSIUtilities';
+import * as voxelGrid from './voxelGrid';
 // name spaces
 export * as planar from './planar';
 import * as windowLevel from './windowLevel';
@@ -185,6 +188,7 @@ export {
   getClosestImageId,
   getSpacingInNormalDirection,
   getEffectiveSpacingAlongDirection,
+  getViewSlabDepth,
   getTargetVolumeAndSpacingInNormalDir,
   getVolumeActorCorners,
   indexWithinDimensions,
@@ -234,6 +238,7 @@ export {
   generateVolumePropsFromImageIds,
   getBufferConfiguration,
   VoxelManager,
+  CompositeVoxelManager,
   RLEVoxelMap,
   convertStackToVolumeViewport,
   convertVolumeToStackViewport,
@@ -255,6 +260,7 @@ export {
   ECGUtilities,
   VideoUtilities,
   WSIUtilities,
+  voxelGrid,
   deepEqual,
   jumpToSlice,
   scroll,
