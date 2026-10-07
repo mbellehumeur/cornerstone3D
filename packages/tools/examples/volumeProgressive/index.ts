@@ -12,6 +12,14 @@ import {
   imageLoader,
   metaData,
   getRenderingCapabilities,
+  getRenderingEngine,
+  setVolume3DTargetFps,
+  setVolume3DTargetFpsEnabled,
+  getVolume3DTargetFpsSnapshot,
+  VOLUME_3D_DEFAULT_TARGET_FPS,
+  VOLUME_3D_DEFAULT_INTERACTIVE_SAMPLE_DISTANCE_FACTOR,
+  VOLUME_3D_MIN_TARGET_FPS,
+  VOLUME_3D_MAX_TARGET_FPS,
 } from '@cornerstonejs/core';
 import {
   initDemo,
@@ -21,6 +29,8 @@ import {
   addDropdownToToolbar,
   addGpuCapabilityProfileDropdown,
   addButtonToToolbar,
+  addCheckboxToToolbar,
+  addSliderToToolbar,
 } from '../../../../utils/demo/helpers';
 import * as cornerstoneTools from '@cornerstonejs/tools';
 import * as cornerstoneAdapters from '@cornerstonejs/adapters';
@@ -230,6 +240,88 @@ const elements = [0, 1, 2, 3, 4].map(() => {
 });
 const [element1, element2, element3, element4, element5] = elements;
 
+/** Sampling Distance baseline multiplier (fixed LOD path; no dropdown here). */
+const sampleDistanceMultiplier = 1;
+
+const volume3dWrapper = document.createElement('div');
+volume3dWrapper.style.position = 'relative';
+volume3dWrapper.style.width = size;
+volume3dWrapper.style.height = size;
+volume3dWrapper.appendChild(element4);
+
+const targetFpsOverlay = document.createElement('pre');
+targetFpsOverlay.id = 'target-fps-overlay';
+targetFpsOverlay.style.display = 'none';
+targetFpsOverlay.style.position = 'absolute';
+targetFpsOverlay.style.top = 'auto';
+targetFpsOverlay.style.bottom = '8px';
+targetFpsOverlay.style.left = '8px';
+targetFpsOverlay.style.margin = '0';
+targetFpsOverlay.style.padding = '8px 10px';
+targetFpsOverlay.style.background = 'rgba(0, 0, 0, 0.72)';
+targetFpsOverlay.style.color = '#e8e8e8';
+targetFpsOverlay.style.font =
+  '12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+targetFpsOverlay.style.borderRadius = '4px';
+targetFpsOverlay.style.pointerEvents = 'none';
+targetFpsOverlay.style.zIndex = '2';
+targetFpsOverlay.style.whiteSpace = 'pre';
+volume3dWrapper.appendChild(targetFpsOverlay);
+
+let targetFpsOverlayRaf = 0;
+
+function formatBudgetPx(pixels: number): string {
+  if (pixels >= 1_000_000) {
+    return `${(pixels / 1_000_000).toFixed(2)}M`;
+  }
+  if (pixels >= 1_000) {
+    return `${Math.round(pixels / 1_000)}k`;
+  }
+  return `${Math.round(pixels)}`;
+}
+
+function renderTargetFpsOverlay(): void {
+  const snapshot = getVolume3DTargetFpsSnapshot(viewportId3D);
+  const sampleText =
+    snapshot && snapshot.sampleDistance > 0
+      ? snapshot.sampleDistance.toFixed(3)
+      : '—';
+
+  if (snapshot?.enabled) {
+    const emaFpsText = snapshot.emaMs > 0 ? snapshot.emaFps.toFixed(1) : '—';
+    targetFpsOverlay.textContent = [
+      `Target FPS  ${snapshot.targetFps}  (${snapshot.targetMs.toFixed(1)} ms)`,
+      `EMA FPS     ${emaFpsText}`,
+      `Phase       ${snapshot.phase}`,
+      `Budget      ${formatBudgetPx(snapshot.budgetPx)} / ${formatBudgetPx(snapshot.maxPx)} px`,
+      `LOD         steps ${snapshot.steps}  sample ${sampleText}  scale ${snapshot.scale.toFixed(2)}`,
+      `Drag frames ${snapshot.dragFrames}`,
+    ].join('\n');
+    return;
+  }
+
+  const interacting = snapshot?.interacting === true;
+  const factor = interacting
+    ? VOLUME_3D_DEFAULT_INTERACTIVE_SAMPLE_DISTANCE_FACTOR
+    : 1;
+  targetFpsOverlay.textContent = [
+    `LOD         fixedSampleDistance`,
+    `Multiplier  ${sampleDistanceMultiplier}`,
+    `Factor      ×${factor}${interacting ? ' (drag)' : ' (idle)'}`,
+    `Sample      ${sampleText}`,
+  ].join('\n');
+}
+
+function startTargetFpsOverlay(): void {
+  targetFpsOverlay.style.display = 'block';
+  const tick = () => {
+    renderTargetFpsOverlay();
+    targetFpsOverlayRaf = requestAnimationFrame(tick);
+  };
+  cancelAnimationFrame(targetFpsOverlayRaf);
+  targetFpsOverlayRaf = requestAnimationFrame(tick);
+}
+
 /**
  * The viewports sit in two rows, and each row holds the two viewports of the
  * same height.
@@ -250,7 +342,7 @@ const viewportRow = (...rowElements) => {
   viewportGrid.appendChild(row);
 };
 
-viewportRow(element3, element4, element5);
+viewportRow(element3, volume3dWrapper, element5);
 viewportRow(element1, element2);
 
 content.appendChild(viewportGrid);
@@ -599,6 +691,65 @@ async function run() {
 
   loaders.appendChild(probePanel);
 
+  const toolbar = document.getElementById('demo-toolbar');
+
+  const fidelityRow = document.createElement('div');
+  fidelityRow.style.display = 'flex';
+  fidelityRow.style.alignItems = 'center';
+  fidelityRow.style.gap = '8px';
+  fidelityRow.style.marginTop = '8px';
+  fidelityRow.style.flexWrap = 'wrap';
+  toolbar?.appendChild(fidelityRow);
+
+  addCheckboxToToolbar({
+    id: 'interactive-fidelity-enabled',
+    title: 'Interactive fidelity degradation',
+    container: fidelityRow,
+    onChange: (checked) => {
+      setVolume3DTargetFpsEnabled(viewportId3D, checked);
+      const fpsSlider = document.getElementById(
+        'interactive-fidelity-fps'
+      ) as HTMLInputElement | null;
+      if (fpsSlider) {
+        fpsSlider.disabled = !checked;
+      }
+      getRenderingEngine(renderingEngineId)
+        ?.getViewport(viewportId3D)
+        ?.render();
+    },
+  });
+
+  // Helper sets checked="false" as an attribute, which HTML still treats as checked.
+  (
+    document.getElementById('interactive-fidelity-enabled') as HTMLInputElement
+  ).checked = false;
+
+  addSliderToToolbar({
+    id: 'interactive-fidelity-fps',
+    title: `Target FPS: ${VOLUME_3D_DEFAULT_TARGET_FPS}`,
+    range: [VOLUME_3D_MIN_TARGET_FPS, VOLUME_3D_MAX_TARGET_FPS],
+    defaultValue: VOLUME_3D_DEFAULT_TARGET_FPS,
+    container: fidelityRow,
+    onSelectedValueChange: (value) => {
+      const fps = Number(value);
+      setVolume3DTargetFps(viewportId3D, fps);
+      getRenderingEngine(renderingEngineId)
+        ?.getViewport(viewportId3D)
+        ?.render();
+    },
+    updateLabelOnChange: (value, label) => {
+      label.innerHTML = `Target FPS: ${value}`;
+    },
+  });
+
+  // Target FPS slider starts disabled while Interactive fidelity degradation is off.
+  const fpsSliderEl = document.getElementById(
+    'interactive-fidelity-fps'
+  ) as HTMLInputElement | null;
+  if (fpsSliderEl) {
+    fpsSliderEl.disabled = true;
+  }
+
   // Instantiate a rendering engine
   const renderingEngine = new RenderingEngine(renderingEngineId);
 
@@ -674,6 +825,10 @@ async function run() {
   toolGroup3D.addViewport(viewportId3D, renderingEngineId);
   toolGroup3D.addViewport(viewportId3DSeg, renderingEngineId);
   renderingEngine.renderViewports(viewportIds);
+
+  setVolume3DTargetFps(viewportId3D, VOLUME_3D_DEFAULT_TARGET_FPS);
+  setVolume3DTargetFpsEnabled(viewportId3D, false);
+  startTargetFpsOverlay();
 
   const progressiveRendering = true;
 
@@ -778,6 +933,11 @@ async function run() {
     [...sizes, sizes[2], sizes[2]].forEach(([width, height], index) => {
       elements[index].style.width = `${width}px`;
       elements[index].style.height = `${height}px`;
+      // Keep the Target FPS overlay wrapper aligned with the CT 3D element.
+      if (index === 3) {
+        volume3dWrapper.style.width = `${width}px`;
+        volume3dWrapper.style.height = `${height}px`;
+      }
     });
 
     renderingEngine.resize(true, false);
