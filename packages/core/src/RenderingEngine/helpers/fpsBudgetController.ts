@@ -10,7 +10,7 @@ export const VOLUME_3D_MIN_TARGET_FPS = 1;
 export const VOLUME_3D_MAX_TARGET_FPS = 60;
 
 /** Absolute floor for adaptive pixel budget. */
-export const HARD_MIN_BUDGET_PX = 10_000;
+export const HARD_MIN_BUDGET_PX = 100;
 
 const FPS_EMA_ALPHA = 0.3;
 const FPS_DEADBAND = 0.12;
@@ -22,7 +22,7 @@ const BUDGET_SHRINK_AGGRESSIVE = 0.35;
 const BIG_SHRINK_RATIO = 0.18;
 const MIN_ADAPTIVE_STEPS = 64;
 /** Keep full scale until budget is this fraction of full-res pixels. */
-const STEPS_ONLY_UNTIL = 0.55;
+const STEPS_ONLY_UNTIL = 0.25;
 /** Fallback start fraction when no learned budget is available. */
 export const AGGRESSIVE_START_BUDGET_FRAC = 0.4;
 
@@ -63,7 +63,11 @@ export function normalizeTargetFps(value: unknown): number {
   if (!Number.isFinite(fps) || fps <= 0) {
     return VOLUME_3D_DEFAULT_TARGET_FPS;
   }
-  return clamp(Math.round(fps), VOLUME_3D_MIN_TARGET_FPS, VOLUME_3D_MAX_TARGET_FPS);
+  return clamp(
+    Math.round(fps),
+    VOLUME_3D_MIN_TARGET_FPS,
+    VOLUME_3D_MAX_TARGET_FPS
+  );
 }
 
 /**
@@ -133,7 +137,10 @@ export function createFpsBudget({
     targetMs: Math.max(4, Number(targetMs) || 33),
     minPx: Math.max(HARD_MIN_BUDGET_PX, Number(minPx) || HARD_MIN_BUDGET_PX),
     maxPx: Math.max(HARD_MIN_BUDGET_PX, Number(maxPx) || HARD_MIN_BUDGET_PX),
-    budgetPx: Math.max(HARD_MIN_BUDGET_PX, Number(startPx) || HARD_MIN_BUDGET_PX),
+    budgetPx: Math.max(
+      HARD_MIN_BUDGET_PX,
+      Number(startPx) || HARD_MIN_BUDGET_PX
+    ),
     update(measuredMs, { allowGrow = true, aggressive = false } = {}) {
       const result = {
         changed: false,
@@ -153,7 +160,9 @@ export function createFpsBudget({
       if (adj > 1 && !allowGrow) {
         return result;
       }
-      const shrinkFar = aggressive ? BUDGET_SHRINK_AGGRESSIVE : BUDGET_SHRINK_FAR;
+      const shrinkFar = aggressive
+        ? BUDGET_SHRINK_AGGRESSIVE
+        : BUDGET_SHRINK_FAR;
       const shrinkNear = aggressive
         ? Math.min(BUDGET_SHRINK_NEAR, 0.7)
         : BUDGET_SHRINK_NEAR;
@@ -164,7 +173,10 @@ export function createFpsBudget({
           ? Math.max(shrinkFar, Math.min(growFar, adj))
           : Math.max(shrinkNear, Math.min(growNear, adj));
       const previous = this.budgetPx;
-      const next = Math.max(this.minPx, Math.min(this.maxPx, previous * limited));
+      const next = Math.max(
+        this.minPx,
+        Math.min(this.maxPx, previous * limited)
+      );
       if (Math.abs(next - previous) < previous * 0.02) {
         return result;
       }

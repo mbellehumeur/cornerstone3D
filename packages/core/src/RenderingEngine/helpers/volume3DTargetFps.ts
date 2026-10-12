@@ -55,8 +55,8 @@ export type Volume3DTargetFpsSnapshot = {
   budgetHoldFrames: number;
 };
 
-/** Throttle budget steering while still sampling every frame. */
-const BUDGET_UPDATE_INTERVAL_MS = 500;
+/** Steer budget every N presents (EMA still updates every present). */
+const BUDGET_UPDATE_EVERY_N_PRESENTS = 2;
 /** After resume, only allow shrink for this many budget samples. */
 const RESUME_SHRINK_ONLY_FRAMES = 4;
 /** Freeze budget this many frames after a large shrink. */
@@ -66,7 +66,7 @@ const AGGRESSIVE_WINDOW_MS = 2000;
 
 /** Nominal interactive step count for VTK sample-distance LOD. */
 const INTERACTIVE_FULL_STEPS = 136;
-const INTERACTIVE_MIN_SCALE = 0.35;
+const INTERACTIVE_MIN_SCALE = 0.2;
 
 type MapperSampleDistance = {
   mapper: {
@@ -85,7 +85,6 @@ type Volume3DTargetFpsEntry = {
   fpsBudget: FpsBudget;
   emaMs: number;
   lastPresentMs: number;
-  lastBudgetUpdateAtMs: number;
   dragFrameCount: number;
   budgetHoldFrames: number;
   lastGoodBudgetPx: number;
@@ -154,7 +153,6 @@ function ensureEntry(viewportId: string): Volume3DTargetFpsEntry | undefined {
     }),
     emaMs: 0,
     lastPresentMs: 0,
-    lastBudgetUpdateAtMs: 0,
     dragFrameCount: 0,
     budgetHoldFrames: 0,
     lastGoodBudgetPx: 0,
@@ -242,7 +240,11 @@ function resolveSampleDistance(
       | { getMapper?: () => MapperSampleDistance['mapper'] }
       | undefined;
     const distance = actor?.getMapper?.()?.getSampleDistance?.();
-    if (typeof distance === 'number' && Number.isFinite(distance) && distance > 0) {
+    if (
+      typeof distance === 'number' &&
+      Number.isFinite(distance) &&
+      distance > 0
+    ) {
       return distance;
     }
   }
@@ -308,7 +310,6 @@ function computeLod(
 
 function rearmLearning(entry: Volume3DTargetFpsEntry) {
   entry.emaMs = 0;
-  entry.lastBudgetUpdateAtMs = 0;
   entry.dragFrameCount = 0;
   entry.budgetHoldFrames = 0;
   entry.lastGoodBudgetPx = 0;
@@ -343,10 +344,7 @@ function resolvePhase(entry: Volume3DTargetFpsEntry): Volume3DTargetFpsPhase {
  * Clamps to 1–60. Returns false when the viewport is not legacy Volume3D.
  * Does not enable targeting by itself — use setVolume3DTargetFpsEnabled.
  */
-export function setVolume3DTargetFps(
-  viewportId: string,
-  fps: number
-): boolean {
+export function setVolume3DTargetFps(viewportId: string, fps: number): boolean {
   const entry = ensureEntry(viewportId);
   if (!entry) {
     return false;
@@ -484,7 +482,6 @@ export function beginVolume3DInteraction(
     }
     entry.skipNextDt = true;
     entry.dragFrameCount = 0;
-    entry.lastBudgetUpdateAtMs = 0;
     entry.emaMs = 0;
     entry.lastUpdateSettled = false;
     entry.lastLod = computeLod(entry, viewport);
@@ -621,14 +618,10 @@ export function recordVolume3DPresent(viewportId: string): void {
     return;
   }
 
-  if (!entry.lastBudgetUpdateAtMs) {
-    entry.lastBudgetUpdateAtMs = now;
+  // Sample EMA every present; only steer budget every N presents.
+  if (entry.dragFrameCount % BUDGET_UPDATE_EVERY_N_PRESENTS !== 0) {
     return;
   }
-  if (now - entry.lastBudgetUpdateAtMs < BUDGET_UPDATE_INTERVAL_MS) {
-    return;
-  }
-  entry.lastBudgetUpdateAtMs = now;
 
   entry.fpsBudget.targetMs = 1000 / entry.targetFps;
   const allowGrow =
