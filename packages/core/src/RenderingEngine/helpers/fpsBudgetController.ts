@@ -15,14 +15,17 @@ export const HARD_MIN_BUDGET_PX = 100;
 const FPS_EMA_ALPHA = 0.3;
 const FPS_DEADBAND = 0.12;
 const BUDGET_SHRINK_NEAR = 0.85;
-const BUDGET_GROW_NEAR = 1.05;
+const BUDGET_GROW_NEAR = 1.12;
 const BUDGET_SHRINK_FAR = 0.55;
-const BUDGET_GROW_FAR = 1.08;
+/** Strong recover when much faster than target (was ~1.08 — too weak vs shrink). */
+const BUDGET_GROW_FAR = 1.35;
 const BUDGET_SHRINK_AGGRESSIVE = 0.35;
+/** Adj above this always allows grow, even if the caller locked grow. */
+const FORCE_GROW_ADJ = 1.2;
 const BIG_SHRINK_RATIO = 0.18;
 const MIN_ADAPTIVE_STEPS = 64;
 /** Keep full scale until budget is this fraction of full-res pixels. */
-const STEPS_ONLY_UNTIL = 0.25;
+const STEPS_ONLY_UNTIL = 0.4;
 /** Fallback start fraction when no learned budget is available. */
 export const AGGRESSIVE_START_BUDGET_FRAC = 0.4;
 
@@ -157,7 +160,8 @@ export function createFpsBudget({
         result.settled = true;
         return result;
       }
-      if (adj > 1 && !allowGrow) {
+      // Clear headroom (EMA much faster than target) always recovers quality.
+      if (adj > 1 && !allowGrow && adj < FORCE_GROW_ADJ) {
         return result;
       }
       const shrinkFar = aggressive
@@ -166,8 +170,9 @@ export function createFpsBudget({
       const shrinkNear = aggressive
         ? Math.min(BUDGET_SHRINK_NEAR, 0.7)
         : BUDGET_SHRINK_NEAR;
-      const growFar = aggressive ? 1.02 : BUDGET_GROW_FAR;
-      const growNear = aggressive ? 1.02 : BUDGET_GROW_NEAR;
+      // Aggressive learn may still grow when forceGrow; use normal grow rates.
+      const growFar = BUDGET_GROW_FAR;
+      const growNear = BUDGET_GROW_NEAR;
       const limited =
         adj < 0.65 || adj > 1.5
           ? Math.max(shrinkFar, Math.min(growFar, adj))

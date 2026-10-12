@@ -366,6 +366,16 @@ const viewportRow = (...rowElements) => {
 viewportRow(element3, volume3dWrapper, element5);
 viewportRow(element1, element2);
 
+const fidelityRow = document.createElement('div');
+fidelityRow.id = 'interactive-fidelity-controls';
+fidelityRow.style.display = 'flex';
+fidelityRow.style.alignItems = 'center';
+fidelityRow.style.gap = '8px';
+fidelityRow.style.margin = '8px 0 4px';
+fidelityRow.style.flexWrap = 'wrap';
+fidelityRow.style.clear = 'both';
+
+content.appendChild(fidelityRow);
 content.appendChild(viewportGrid);
 
 const instructions = document.createElement('div');
@@ -711,16 +721,6 @@ async function run() {
   });
 
   loaders.appendChild(probePanel);
-
-  const toolbar = document.getElementById('demo-toolbar');
-
-  const fidelityRow = document.createElement('div');
-  fidelityRow.style.display = 'flex';
-  fidelityRow.style.alignItems = 'center';
-  fidelityRow.style.gap = '8px';
-  fidelityRow.style.marginTop = '8px';
-  fidelityRow.style.flexWrap = 'wrap';
-  toolbar?.appendChild(fidelityRow);
 
   addCheckboxToToolbar({
     id: 'interactive-fidelity-enabled',

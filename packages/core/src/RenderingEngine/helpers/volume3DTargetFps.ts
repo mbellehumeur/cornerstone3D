@@ -66,7 +66,7 @@ const AGGRESSIVE_WINDOW_MS = 2000;
 
 /** Nominal interactive step count for VTK sample-distance LOD. */
 const INTERACTIVE_FULL_STEPS = 136;
-const INTERACTIVE_MIN_SCALE = 0.2;
+const INTERACTIVE_MIN_SCALE = 0.25;
 
 type MapperSampleDistance = {
   mapper: {
@@ -624,8 +624,13 @@ export function recordVolume3DPresent(viewportId: string): void {
   }
 
   entry.fpsBudget.targetMs = 1000 / entry.targetFps;
+  // Prefer shrink-only for the first few presents, but always allow grow when
+  // EMA is clearly faster than the target (small/easy volumes overshoot).
+  const targetMs = entry.fpsBudget.targetMs;
+  const hasHeadroom = entry.emaMs > 0 && entry.emaMs < targetMs * 0.85;
   const allowGrow =
-    !aggressive && entry.dragFrameCount > RESUME_SHRINK_ONLY_FRAMES;
+    hasHeadroom ||
+    (!aggressive && entry.dragFrameCount > RESUME_SHRINK_ONLY_FRAMES);
   const result = entry.fpsBudget.update(entry.emaMs, {
     allowGrow,
     aggressive,
