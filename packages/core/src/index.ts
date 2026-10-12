@@ -31,6 +31,11 @@ export type {
   Volume3DTargetFpsSnapshot,
 } from './RenderingEngine/helpers/volume3DTargetFps';
 export * from './RenderingEngine/helpers/getOrCreateCanvas';
+export {
+  attachFidelityIndicator,
+  maybeAttachFidelityIndicator,
+  detachFidelityIndicator,
+} from './RenderingEngine/helpers/fidelityIndicator';
 import VolumeViewport from './RenderingEngine/VolumeViewport';
 import VolumeViewport3D from './RenderingEngine/VolumeViewport3D';
 import BaseVolumeViewport from './RenderingEngine/BaseVolumeViewport';
