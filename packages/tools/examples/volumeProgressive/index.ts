@@ -291,16 +291,6 @@ volume3dWrapper.appendChild(targetFpsOverlay);
 
 let targetFpsOverlayRaf = 0;
 
-function formatBudgetPx(pixels: number): string {
-  if (pixels >= 1_000_000) {
-    return `${(pixels / 1_000_000).toFixed(2)}M`;
-  }
-  if (pixels >= 1_000) {
-    return `${Math.round(pixels / 1_000)}k`;
-  }
-  return `${Math.round(pixels)}`;
-}
-
 function renderTargetFpsOverlay(): void {
   const snapshot = getVolume3DTargetFpsSnapshot(viewportId3D);
   const sampleText =
@@ -309,13 +299,16 @@ function renderTargetFpsOverlay(): void {
       : '—';
 
   if (snapshot?.enabled) {
-    const emaFpsText = snapshot.emaMs > 0 ? snapshot.emaFps.toFixed(1) : '—';
+    const emaFpsText =
+      snapshot.emaMs > 0
+        ? `${snapshot.emaFps.toFixed(1)}  (${snapshot.emaMs.toFixed(1)} ms)`
+        : '—';
     targetFpsOverlay.textContent = [
       `Target FPS  ${snapshot.targetFps}  (${snapshot.targetMs.toFixed(1)} ms)`,
-      `EMA FPS     ${emaFpsText}`,
+      `Frame EMA   ${emaFpsText}`,
       `Phase       ${snapshot.phase}`,
-      `Budget      ${formatBudgetPx(snapshot.budgetPx)} / ${formatBudgetPx(snapshot.maxPx)} px`,
-      `LOD         steps ${snapshot.steps}  sample ${sampleText}  scale ${snapshot.scale.toFixed(2)}`,
+      `Multiplier  ×${snapshot.sampleDistanceMultiplier}`,
+      `Sample      ${sampleText}`,
       `Drag frames ${snapshot.dragFrames}`,
     ].join('\n');
     return;
@@ -327,8 +320,7 @@ function renderTargetFpsOverlay(): void {
     : 1;
   targetFpsOverlay.textContent = [
     `LOD         fixedSampleDistance`,
-    `Multiplier  ${sampleDistanceMultiplier}`,
-    `Factor      ×${factor}${interacting ? ' (drag)' : ' (idle)'}`,
+    `Multiplier  ×${factor}${interacting ? ' (drag)' : ' (idle)'}`,
     `Sample      ${sampleText}`,
   ].join('\n');
 }

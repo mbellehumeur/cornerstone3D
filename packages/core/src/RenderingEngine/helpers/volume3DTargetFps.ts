@@ -3,22 +3,22 @@ import ViewportType from '../../enums/ViewportType';
 import type { IViewport } from '../../types/IViewport';
 import type { ActorEntry } from '../../types/IActor';
 import {
-  AGGRESSIVE_START_BUDGET_FRAC,
-  createFpsBudget,
-  HARD_MIN_BUDGET_PX,
+  clampToSampleDistanceMultiplierLadder,
+  DEFAULT_START_SAMPLE_DISTANCE_MULTIPLIER,
+  FAST_CLIMB_CAP_MULTIPLIER,
   normalizeTargetFps,
-  resolveTargetedLod,
+  stepSampleDistanceMultiplier,
   updateEmaMs,
   VOLUME_3D_DEFAULT_TARGET_FPS,
-  type FpsBudget,
-  type LodProfile,
-  type ResolvedLod,
 } from './fpsBudgetController';
 
 export {
   VOLUME_3D_DEFAULT_TARGET_FPS,
   VOLUME_3D_MIN_TARGET_FPS,
   VOLUME_3D_MAX_TARGET_FPS,
+  SAMPLE_DISTANCE_MULTIPLIER_LADDER,
+  DEFAULT_START_SAMPLE_DISTANCE_MULTIPLIER,
+  FAST_CLIMB_CAP_MULTIPLIER,
 } from './fpsBudgetController';
 
 /** Fixed interactive sample-distance factor (legacy rotate ×2). */
@@ -28,12 +28,7 @@ export type Volume3DInteractiveQualityPolicy =
   | 'fixedSampleDistance'
   | 'targetFps';
 
-export type Volume3DTargetFpsPhase =
-  | 'idle'
-  | 'learn'
-  | 'hold'
-  | 'steer'
-  | 'settled';
+export type Volume3DTargetFpsPhase = 'idle' | 'steer' | 'settled';
 
 export type Volume3DTargetFpsSnapshot = {
   enabled: boolean;
@@ -44,29 +39,20 @@ export type Volume3DTargetFpsSnapshot = {
   targetMs: number;
   emaFps: number;
   emaMs: number;
-  budgetPx: number;
-  minPx: number;
-  maxPx: number;
-  lastGoodBudgetPx: number;
-  scale: number;
-  steps: number;
+  sampleDistanceMultiplier: number;
+  lastGoodSampleDistanceMultiplier: number;
   sampleDistance: number;
   dragFrames: number;
-  budgetHoldFrames: number;
 };
 
-/** Steer budget every N presents (EMA still updates every present). */
-const BUDGET_UPDATE_EVERY_N_PRESENTS = 2;
-/** After resume, only allow shrink for this many budget samples. */
-const RESUME_SHRINK_ONLY_FRAMES = 4;
-/** Freeze budget this many frames after a large shrink. */
-const BUDGET_HOLD_AFTER_SHRINK = 2;
-/** Aggressive learn window after target FPS changes. */
-const AGGRESSIVE_WINDOW_MS = 2000;
-
-/** Nominal interactive step count for VTK sample-distance LOD. */
-const INTERACTIVE_FULL_STEPS = 136;
-const INTERACTIVE_MIN_SCALE = 0.25;
+/** Steer multiplier every N presents (EMA still updates every present). */
+const MULTIPLIER_UPDATE_EVERY_N_PRESENTS = 2;
+/** Fast mid-ladder climb cooldown (new multiplier still below ×8). */
+const MULTIPLIER_COOLDOWN_AFTER_STEP_UP_MID = 1;
+/** Slow high-ladder climb cooldown (new multiplier at/above ×8). */
+const MULTIPLIER_COOLDOWN_AFTER_STEP_UP_HIGH = 8;
+/** Longer cooldown after stepping down to avoid thrashing quality. */
+const MULTIPLIER_COOLDOWN_AFTER_STEP_DOWN = 6;
 
 type MapperSampleDistance = {
   mapper: {
@@ -82,31 +68,25 @@ type Volume3DTargetFpsEntry = {
   enabled: boolean;
   policy: Volume3DInteractiveQualityPolicy;
   interacting: boolean;
-  fpsBudget: FpsBudget;
+  sampleDistanceMultiplier: number;
+  lastGoodSampleDistanceMultiplier: number;
   emaMs: number;
+  /** performance.now() at the end of the last recorded present. */
   lastPresentMs: number;
   dragFrameCount: number;
-  budgetHoldFrames: number;
-  lastGoodBudgetPx: number;
-  aggressiveUntilMs: number;
+  /** Presents remaining before the next ladder steer is allowed. */
+  multiplierCooldownPresents: number;
+  /**
+   * Once true, this drag only climbs/holds — no step-down.
+   * False at drag start so a resumed lastGood multiplier can ease down.
+   */
+  hasClimbedThisDrag: boolean;
   skipNextDt: boolean;
   lastUpdateSettled: boolean;
   baselineMappers: MapperSampleDistance[];
-  lastLod: ResolvedLod;
-  lastPresentSize: {
-    renderWidth: number;
-    renderHeight: number;
-    scale: number;
-  } | null;
 };
 
 const entries = new Map<string, Volume3DTargetFpsEntry>();
-
-const interactiveProfile: LodProfile = {
-  minimumScale: INTERACTIVE_MIN_SCALE,
-  maximumScale: 1,
-  steps: INTERACTIVE_FULL_STEPS,
-};
 
 function isLegacyVolume3DViewport(viewport: IViewport | undefined): boolean {
   // Only the classic VolumeViewport3D class (`type === volume3d`), not
@@ -129,65 +109,24 @@ function ensureEntry(viewportId: string): Volume3DTargetFpsEntry | undefined {
     return undefined;
   }
 
-  const nativePixels = Math.max(
-    1,
-    (viewport.sWidth || 1) * (viewport.sHeight || 1)
-  );
-  const maxPx = nativePixels;
-  const minPx = HARD_MIN_BUDGET_PX;
-  const startPx = Math.max(
-    minPx,
-    Math.round(maxPx * AGGRESSIVE_START_BUDGET_FRAC)
-  );
-  const targetFps = VOLUME_3D_DEFAULT_TARGET_FPS;
   const entry: Volume3DTargetFpsEntry = {
-    targetFps,
+    targetFps: VOLUME_3D_DEFAULT_TARGET_FPS,
     enabled: false,
     policy: 'fixedSampleDistance',
     interacting: false,
-    fpsBudget: createFpsBudget({
-      targetMs: 1000 / targetFps,
-      minPx,
-      maxPx,
-      startPx,
-    }),
+    sampleDistanceMultiplier: DEFAULT_START_SAMPLE_DISTANCE_MULTIPLIER,
+    lastGoodSampleDistanceMultiplier: 0,
     emaMs: 0,
     lastPresentMs: 0,
     dragFrameCount: 0,
-    budgetHoldFrames: 0,
-    lastGoodBudgetPx: 0,
-    aggressiveUntilMs: 0,
+    multiplierCooldownPresents: 0,
+    hasClimbedThisDrag: false,
     skipNextDt: false,
     lastUpdateSettled: false,
     baselineMappers: [],
-    lastLod: {
-      scale: 1,
-      steps: INTERACTIVE_FULL_STEPS,
-      budgetPx: startPx,
-    },
-    lastPresentSize: null,
   };
   entries.set(viewportId, entry);
   return entry;
-}
-
-function syncBudgetLimits(entry: Volume3DTargetFpsEntry, viewport: IViewport) {
-  const nativePixels = Math.max(
-    1,
-    (viewport.sWidth || 1) * (viewport.sHeight || 1)
-  );
-  entry.fpsBudget.maxPx = Math.max(HARD_MIN_BUDGET_PX, nativePixels);
-  entry.fpsBudget.minPx = HARD_MIN_BUDGET_PX;
-  entry.fpsBudget.budgetPx = Math.max(
-    entry.fpsBudget.minPx,
-    Math.min(entry.fpsBudget.maxPx, entry.fpsBudget.budgetPx)
-  );
-  if (entry.lastGoodBudgetPx > 0) {
-    entry.lastGoodBudgetPx = Math.max(
-      entry.fpsBudget.minPx,
-      Math.min(entry.fpsBudget.maxPx, entry.lastGoodBudgetPx)
-    );
-  }
 }
 
 function captureBaselineMappers(viewport: IViewport): MapperSampleDistance[] {
@@ -265,25 +204,23 @@ export function resolveFixedSampleDistanceFactor(
   return VOLUME_3D_DEFAULT_INTERACTIVE_SAMPLE_DISTANCE_FACTOR;
 }
 
+function applySampleDistanceMultiplier(
+  entry: Volume3DTargetFpsEntry,
+  multiplier: number
+) {
+  for (const { mapper, baselineSampleDistance } of entry.baselineMappers) {
+    mapper.setSampleDistance?.(baselineSampleDistance * multiplier);
+  }
+}
+
 function applyFixedSampleDistanceFactor(
   entry: Volume3DTargetFpsEntry,
   sampleDistanceFactor?: number
 ) {
-  const factor = resolveFixedSampleDistanceFactor(sampleDistanceFactor);
-  for (const { mapper, baselineSampleDistance } of entry.baselineMappers) {
-    mapper.setSampleDistance?.(baselineSampleDistance * factor);
-  }
-}
-
-function applySampleDistanceForLod(
-  entry: Volume3DTargetFpsEntry,
-  lod: ResolvedLod
-) {
-  const fullSteps = INTERACTIVE_FULL_STEPS;
-  const stepRatio = lod.steps > 0 ? fullSteps / lod.steps : 1;
-  for (const { mapper, baselineSampleDistance } of entry.baselineMappers) {
-    mapper.setSampleDistance?.(baselineSampleDistance * stepRatio);
-  }
+  applySampleDistanceMultiplier(
+    entry,
+    resolveFixedSampleDistanceFactor(sampleDistanceFactor)
+  );
 }
 
 function restoreBaselineSampleDistances(entry: Volume3DTargetFpsEntry) {
@@ -292,28 +229,21 @@ function restoreBaselineSampleDistances(entry: Volume3DTargetFpsEntry) {
   }
 }
 
-function computeLod(
-  entry: Volume3DTargetFpsEntry,
-  viewport: IViewport
-): ResolvedLod {
-  syncBudgetLimits(entry, viewport);
-  const nativePixels = Math.max(
-    1,
-    (viewport.sWidth || 1) * (viewport.sHeight || 1)
-  );
-  return resolveTargetedLod(
-    interactiveProfile,
-    nativePixels,
-    entry.fpsBudget.budgetPx
-  );
+function resolveStartMultiplier(entry: Volume3DTargetFpsEntry): number {
+  if (entry.lastGoodSampleDistanceMultiplier > 0) {
+    return clampToSampleDistanceMultiplierLadder(
+      entry.lastGoodSampleDistanceMultiplier
+    );
+  }
+  return DEFAULT_START_SAMPLE_DISTANCE_MULTIPLIER;
 }
 
 function rearmLearning(entry: Volume3DTargetFpsEntry) {
   entry.emaMs = 0;
+  entry.lastPresentMs = 0;
   entry.dragFrameCount = 0;
-  entry.budgetHoldFrames = 0;
-  entry.lastGoodBudgetPx = 0;
-  entry.aggressiveUntilMs = performance.now() + AGGRESSIVE_WINDOW_MS;
+  entry.multiplierCooldownPresents = 0;
+  entry.hasClimbedThisDrag = false;
   entry.skipNextDt = true;
   entry.lastUpdateSettled = false;
 }
@@ -325,13 +255,6 @@ function isTargetFpsPolicyActive(entry: Volume3DTargetFpsEntry): boolean {
 function resolvePhase(entry: Volume3DTargetFpsEntry): Volume3DTargetFpsPhase {
   if (!entry.interacting) {
     return 'idle';
-  }
-  const now = performance.now();
-  if (entry.aggressiveUntilMs > 0 && now < entry.aggressiveUntilMs) {
-    return 'learn';
-  }
-  if (entry.budgetHoldFrames > 0) {
-    return 'hold';
   }
   if (entry.lastUpdateSettled) {
     return 'settled';
@@ -352,13 +275,8 @@ export function setVolume3DTargetFps(viewportId: string, fps: number): boolean {
   const next = normalizeTargetFps(fps);
   const previous = entry.targetFps;
   entry.targetFps = next;
-  entry.fpsBudget.targetMs = 1000 / next;
   if (next !== previous) {
     rearmLearning(entry);
-  }
-  const viewport = resolveViewport(viewportId);
-  if (viewport) {
-    syncBudgetLimits(entry, viewport);
   }
   return true;
 }
@@ -372,7 +290,7 @@ export function getVolume3DTargetFps(viewportId: string): number | undefined {
  * Set interactive quality policy for a legacy Volume3D viewport.
  * `fixedSampleDistance` (default) applies a fixed sample-distance multiplier
  * during drag (tool `rotateSampleDistanceFactor` when provided, else ×2);
- * `targetFps` uses adaptive budget LOD when also enabled via
+ * `targetFps` uses the discrete sample-distance ladder when also enabled via
  * setVolume3DTargetFpsEnabled.
  */
 export function setVolume3DInteractiveQualityPolicy(
@@ -446,7 +364,7 @@ export function getVolume3DTargetFpsEnabled(
  * Under `fixedSampleDistance`, optional `sampleDistanceFactor` (e.g. from
  * tool `rotateSampleDistanceFactor`) multiplies baseline sample distance when
  * it is a finite number > 0; otherwise the default ×2 is used.
- * Under `targetFps`, the factor is ignored.
+ * Under `targetFps`, the factor is ignored; the discrete ladder is used.
  */
 export function beginVolume3DInteraction(
   viewportId: string,
@@ -470,30 +388,20 @@ export function beginVolume3DInteraction(
   }
 
   entry.interacting = true;
-  entry.lastPresentSize = null;
 
   if (isTargetFpsPolicyActive(entry)) {
-    syncBudgetLimits(entry, viewport);
-    if (entry.lastGoodBudgetPx > 0) {
-      entry.fpsBudget.budgetPx = Math.min(
-        entry.fpsBudget.budgetPx,
-        entry.lastGoodBudgetPx
-      );
-    }
+    entry.sampleDistanceMultiplier = resolveStartMultiplier(entry);
     entry.skipNextDt = true;
     entry.dragFrameCount = 0;
+    entry.multiplierCooldownPresents = 0;
+    entry.hasClimbedThisDrag = false;
     entry.emaMs = 0;
+    entry.lastPresentMs = 0;
     entry.lastUpdateSettled = false;
-    entry.lastLod = computeLod(entry, viewport);
-    applySampleDistanceForLod(entry, entry.lastLod);
+    applySampleDistanceMultiplier(entry, entry.sampleDistanceMultiplier);
   } else {
     // fixedSampleDistance (default)
     applyFixedSampleDistanceFactor(entry, options?.sampleDistanceFactor);
-    entry.lastLod = {
-      scale: 1,
-      steps: INTERACTIVE_FULL_STEPS,
-      budgetPx: entry.fpsBudget.budgetPx,
-    };
   }
 
   return true;
@@ -508,24 +416,16 @@ export function endVolume3DInteraction(viewportId: string): boolean {
     return false;
   }
 
-  if (isTargetFpsPolicyActive(entry) && entry.emaMs > 0) {
-    const result = entry.fpsBudget.update(entry.emaMs, { allowGrow: true });
-    entry.lastUpdateSettled = result.settled;
-    if (result.settled) {
-      entry.lastGoodBudgetPx = entry.fpsBudget.budgetPx;
-    }
+  // Remember the last multiplier used this drag so the next drag resumes
+  // there (first-ever drag still starts at DEFAULT_START = 1).
+  if (isTargetFpsPolicyActive(entry)) {
+    entry.lastGoodSampleDistanceMultiplier = entry.sampleDistanceMultiplier;
   }
 
   restoreBaselineSampleDistances(entry);
   entry.baselineMappers = [];
   entry.interacting = false;
   entry.skipNextDt = false;
-  entry.lastPresentSize = null;
-  entry.lastLod = {
-    scale: 1,
-    steps: INTERACTIVE_FULL_STEPS,
-    budgetPx: entry.fpsBudget.budgetPx,
-  };
   return true;
 }
 
@@ -534,118 +434,104 @@ export function isVolume3DInteracting(viewportId: string): boolean {
 }
 
 /**
- * Interactive present size for ContextPool (smaller GL rect during Target FPS).
- * Returns null for fixedSampleDistance policy or when not interacting.
+ * True when ContextPool should time this viewport's full present
+ * (VTK render through blit) for Target FPS EMA.
  */
-export function getVolume3DInteractivePresentSize(
+export function shouldMeasureVolume3DPresent(viewportId: string): boolean {
+  const entry = entries.get(viewportId);
+  return Boolean(entry?.interacting && isTargetFpsPolicyActive(entry));
+}
+
+/** Finite positive frame cost in milliseconds. */
+export function isPositiveFiniteMs(value: unknown): value is number {
+  const ms = Number(value);
+  return Number.isFinite(ms) && ms > 0;
+}
+
+/** Ignore tab-background / focus gaps that would nuke the EMA. */
+const MAX_INTER_PRESENT_MS = 1000;
+
+/**
+ * Record a Volume3D present cost and step the sample-distance ladder.
+ *
+ * `presentMs` is wall-clock for this viewport's ContextPool present
+ * (render through blit). The EMA uses
+ * `max(presentMs, interPresentMs)` so a cheap GL submit cannot hide a
+ * slow present cadence (other viewports, main-thread gaps, etc.).
+ */
+export function recordVolume3DPresent(
   viewportId: string,
-  sWidth: number,
-  sHeight: number
-): { renderWidth: number; renderHeight: number; scale: number } | null {
-  const entry = entries.get(viewportId);
-  if (!entry?.interacting || !isTargetFpsPolicyActive(entry)) {
-    return null;
-  }
-
-  const viewport = resolveViewport(viewportId);
-  if (!viewport) {
-    return null;
-  }
-
-  const lod = computeLod(entry, viewport);
-  entry.lastLod = lod;
-  applySampleDistanceForLod(entry, lod);
-
-  if (!(lod.scale < 0.999)) {
-    entry.lastPresentSize = null;
-    return null;
-  }
-
-  const renderWidth = Math.max(1, Math.round(sWidth * lod.scale));
-  const renderHeight = Math.max(1, Math.round(sHeight * lod.scale));
-  const present = { renderWidth, renderHeight, scale: lod.scale };
-  entry.lastPresentSize = present;
-  return present;
-}
-
-/**
- * Present size used for the most recent interactive VTK draw (for matching blit).
- */
-export function peekVolume3DInteractivePresentSize(
-  viewportId: string
-): { renderWidth: number; renderHeight: number; scale: number } | null {
-  const entry = entries.get(viewportId);
-  if (!entry || !isTargetFpsPolicyActive(entry)) {
-    return null;
-  }
-  return entry.lastPresentSize ?? null;
-}
-
-/**
- * Record wall-clock present dt after ContextPool blit and steer budgetPx.
- * No-op unless Target FPS policy is active and interacting.
- */
-export function recordVolume3DPresent(viewportId: string): void {
+  presentMs: number
+): void {
   const entry = entries.get(viewportId);
   if (!entry?.interacting || !isTargetFpsPolicyActive(entry)) {
     return;
   }
 
   const now = performance.now();
-  if (entry.skipNextDt || !(entry.lastPresentMs > 0)) {
-    entry.lastPresentMs = now;
+
+  // First sample after arming / target change: seed EMA, arm inter-present.
+  if (entry.skipNextDt) {
     entry.skipNextDt = false;
+    entry.lastPresentMs = now;
+    if (isPositiveFiniteMs(presentMs)) {
+      entry.emaMs = updateEmaMs(entry.emaMs, presentMs);
+    }
     return;
   }
 
-  const dt = now - entry.lastPresentMs;
+  const interPresentMs =
+    entry.lastPresentMs > 0 ? now - entry.lastPresentMs : 0;
   entry.lastPresentMs = now;
-  if (!(dt > 0) || !Number.isFinite(dt)) {
+
+  const cappedInter =
+    interPresentMs > 0 && interPresentMs <= MAX_INTER_PRESENT_MS
+      ? interPresentMs
+      : 0;
+  const span = isPositiveFiniteMs(presentMs) ? presentMs : 0;
+  const frameMs = Math.max(span, cappedInter);
+  if (!(frameMs > 0)) {
     return;
   }
 
   entry.dragFrameCount += 1;
-  entry.emaMs = updateEmaMs(entry.emaMs, dt);
+  entry.emaMs = updateEmaMs(entry.emaMs, frameMs);
 
-  const aggressive =
-    entry.aggressiveUntilMs > 0 && now < entry.aggressiveUntilMs;
-  if (!aggressive && entry.aggressiveUntilMs > 0) {
-    entry.aggressiveUntilMs = 0;
-  }
-
-  if (entry.budgetHoldFrames > 0 && !aggressive) {
-    entry.budgetHoldFrames -= 1;
+  if (entry.multiplierCooldownPresents > 0) {
+    entry.multiplierCooldownPresents -= 1;
     return;
   }
 
-  // Sample EMA every present; only steer budget every N presents.
-  if (entry.dragFrameCount % BUDGET_UPDATE_EVERY_N_PRESENTS !== 0) {
+  if (entry.dragFrameCount % MULTIPLIER_UPDATE_EVERY_N_PRESENTS !== 0) {
     return;
   }
 
-  entry.fpsBudget.targetMs = 1000 / entry.targetFps;
-  // Prefer shrink-only for the first few presents, but always allow grow when
-  // EMA is clearly faster than the target (small/easy volumes overshoot).
-  const targetMs = entry.fpsBudget.targetMs;
-  const hasHeadroom = entry.emaMs > 0 && entry.emaMs < targetMs * 0.85;
-  const allowGrow =
-    hasHeadroom ||
-    (!aggressive && entry.dragFrameCount > RESUME_SHRINK_ONLY_FRAMES);
-  const result = entry.fpsBudget.update(entry.emaMs, {
-    allowGrow,
-    aggressive,
-  });
-
+  const targetMs = 1000 / entry.targetFps;
+  // Resume from lastGood may step down while Frame EMA has headroom.
+  // After any climb this drag, lock step-down for the rest of the drag.
+  const result = stepSampleDistanceMultiplier(
+    entry.sampleDistanceMultiplier,
+    entry.emaMs,
+    targetMs,
+    { allowStepDown: !entry.hasClimbedThisDrag }
+  );
   entry.lastUpdateSettled = result.settled;
-
-  if (result.settled) {
-    entry.lastGoodBudgetPx = entry.fpsBudget.budgetPx;
-    if (aggressive) {
-      entry.aggressiveUntilMs = 0;
+  if (result.changed) {
+    const previous = entry.sampleDistanceMultiplier;
+    entry.sampleDistanceMultiplier = result.multiplier;
+    applySampleDistanceMultiplier(entry, entry.sampleDistanceMultiplier);
+    if (result.multiplier > previous) {
+      entry.hasClimbedThisDrag = true;
+      entry.multiplierCooldownPresents =
+        result.multiplier >= FAST_CLIMB_CAP_MULTIPLIER
+          ? MULTIPLIER_COOLDOWN_AFTER_STEP_UP_HIGH
+          : MULTIPLIER_COOLDOWN_AFTER_STEP_UP_MID;
+    } else {
+      entry.multiplierCooldownPresents = MULTIPLIER_COOLDOWN_AFTER_STEP_DOWN;
     }
   }
-  if (result.bigShrink && !aggressive) {
-    entry.budgetHoldFrames = BUDGET_HOLD_AFTER_SHRINK;
+  if (result.settled) {
+    entry.lastGoodSampleDistanceMultiplier = entry.sampleDistanceMultiplier;
   }
 }
 
@@ -673,15 +559,10 @@ export function getVolume3DTargetFpsSnapshot(
     targetMs,
     emaFps,
     emaMs,
-    budgetPx: entry.fpsBudget.budgetPx,
-    minPx: entry.fpsBudget.minPx,
-    maxPx: entry.fpsBudget.maxPx,
-    lastGoodBudgetPx: entry.lastGoodBudgetPx,
-    scale: entry.lastLod.scale,
-    steps: entry.lastLod.steps,
+    sampleDistanceMultiplier: entry.sampleDistanceMultiplier,
+    lastGoodSampleDistanceMultiplier: entry.lastGoodSampleDistanceMultiplier,
     sampleDistance: resolveSampleDistance(entry, viewportId),
     dragFrames: entry.dragFrameCount,
-    budgetHoldFrames: entry.budgetHoldFrames,
   };
 }
 

@@ -29,9 +29,8 @@ import type {
 import { getViewportClassForInput } from './helpers/viewportTypeToViewportClass';
 import { isGenericViewport } from '../utilities/viewportCapabilities';
 import {
-  getVolume3DInteractivePresentSize,
-  peekVolume3DInteractivePresentSize,
   recordVolume3DPresent,
+  shouldMeasureVolume3DPresent,
 } from './helpers/volume3DTargetFps';
 
 /**
@@ -477,13 +476,8 @@ class ContextPoolRenderingEngine extends BaseRenderingEngine {
 
     const viewportWidth = viewport.sWidth;
     const viewportHeight = viewport.sHeight;
-    const interactivePresent = getVolume3DInteractivePresentSize(
-      viewport.id,
-      viewportWidth,
-      viewportHeight
-    );
-    const renderWidth = interactivePresent?.renderWidth ?? viewportWidth;
-    const renderHeight = interactivePresent?.renderHeight ?? viewportHeight;
+    const renderWidth = viewportWidth;
+    const renderHeight = viewportHeight;
 
     const xEnd = Math.min(1, renderWidth / maxSize.width);
     const yEnd = Math.min(1, renderHeight / maxSize.height);
@@ -504,6 +498,15 @@ class ContextPoolRenderingEngine extends BaseRenderingEngine {
       renderer.setDraw(viewportId === viewport.id);
     });
 
+    const openGLRenderWindow =
+      offscreenMultiRenderWindow.getOpenGLRenderWindow();
+    const context = openGLRenderWindow.get3DContext();
+
+    // Target FPS: wall-clock the full present (VTK render through blit).
+    // recordVolume3DPresent also folds in inter-present cadence.
+    const measurePresent = shouldMeasureVolume3DPresent(viewport.id);
+    const presentT0 = measurePresent ? performance.now() : 0;
+
     renderWindow.render();
 
     allRenderers.forEach(({ renderer: r }) => r.setDraw(false));
@@ -516,12 +519,16 @@ class ContextPoolRenderingEngine extends BaseRenderingEngine {
       view.setRenderPasses(originalRenderPasses);
     }
 
-    const openGLRenderWindow =
-      offscreenMultiRenderWindow.getOpenGLRenderWindow();
-    const context = openGLRenderWindow.get3DContext();
     const offScreenCanvas = context.canvas;
 
     const eventDetail = this._copyToOnscreenCanvas(viewport, offScreenCanvas);
+
+    if (measurePresent) {
+      const presentMs = performance.now() - presentT0;
+      if (presentMs > 0) {
+        recordVolume3DPresent(viewport.id, presentMs);
+      }
+    }
 
     return eventDetail;
   }
@@ -592,9 +599,8 @@ class ContextPoolRenderingEngine extends BaseRenderingEngine {
     } = viewport;
     const dWidth = viewport.sWidth;
     const dHeight = viewport.sHeight;
-    const interactivePresent = peekVolume3DInteractivePresentSize(viewportId);
-    const sourceWidth = interactivePresent?.renderWidth ?? dWidth;
-    const sourceHeight = interactivePresent?.renderHeight ?? dHeight;
+    const sourceWidth = dWidth;
+    const sourceHeight = dHeight;
 
     // Update on-screen canvas size only when the VTK render result is available,
     // so the displayed size matches the rendered size and aspect ratio without flicker.
@@ -613,15 +619,13 @@ class ContextPoolRenderingEngine extends BaseRenderingEngine {
       offScreenCanvas,
       0, // Source X
       sourceY, // Source Y (copy from where VTK rendered at bottom)
-      sourceWidth, // Source width (may be smaller during Target FPS interaction)
+      sourceWidth, // Source width
       sourceHeight, // Source height
       0, // Destination X
       0, // Destination Y
       dWidth, // Destination width (always full on-screen size)
       dHeight // Destination height
     );
-
-    recordVolume3DPresent(viewportId);
 
     return {
       element,
