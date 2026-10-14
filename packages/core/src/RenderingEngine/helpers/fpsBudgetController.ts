@@ -68,7 +68,7 @@ export function clampToSampleDistanceMultiplierLadder(value: number): number {
     return ladder[ladder.length - 1];
   }
 
-  let best = ladder[0];
+  let best: (typeof SAMPLE_DISTANCE_MULTIPLIER_LADDER)[number] = ladder[0];
   let bestDist = Math.abs(n - best);
   for (let i = 1; i < ladder.length; i++) {
     const rung = ladder[i];
