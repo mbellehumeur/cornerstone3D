@@ -1,35 +1,23 @@
-import cache from '../../../cache/cache';
-import {
-  Events,
-  ImageQualityStatus,
-  ViewportType,
-  VoxelStatistics,
-} from '../../../enums';
+import { Events, ImageQualityStatus } from '../../../enums';
 import eventTarget from '../../../eventTarget';
 import { getConfiguration } from '../../../init';
-import type {
-  ActorEntry,
-  IViewport,
-  Point3,
-  VoxelGrid,
-  VoxelQualityRecord,
-} from '../../../types';
-import {
-  isAliasingReduction,
-  voxelGridsEqual,
-} from '../../../utilities/voxelGrid';
-import { sampleDistanceOf } from '../createVolumeMapper';
+import type { IViewport, Point3 } from '../../../types';
 import { ensureFidelityIndicatorStyles } from './fidelityIndicatorStyles';
+import { isLabelmapActorEntry } from './isLabelmapActorEntry';
 import {
+  type FidelityDataKind,
   type FidelityLine,
   type SvgFidelityState,
+  dataKindOf,
   formatFactor,
   formatFactors,
   isInteractiveLod,
   isReduced,
-  reductionFactorsOf,
+  lineHasData,
   svgStateOf,
 } from './fidelityIndicatorState';
+
+export { isLabelmapActorEntry };
 
 const COLORS = {
   full: '#2e9d4a',
@@ -40,7 +28,7 @@ const COLORS = {
 };
 
 /** How long Done stays visible before it fades (SVG mode). */
-const DONE_HOLD_MS = 1000;
+export const DONE_HOLD_MS = 3000;
 
 const SVG_GLYPH =
   '<g class="fi-glyph">' +
@@ -57,84 +45,92 @@ const ARIA_LABELS: Record<SvgFidelityState, string> = {
   lod: 'Image fidelity: interactive LOD',
 };
 
-type VolumeViewportLike = IViewport & {
-  getActors: () => ActorEntry[];
+/** One view of the fidelity lines: the product icon, or the debug badge. */
+type FidelityView = {
+  update: (lines: FidelityLine[]) => void;
+  remove: () => void;
 };
 
-type VolumeMapperLike = {
-  getScalarTexture?: () => { getGrid?: () => VoxelGrid };
-  getSampleDistance?: () => number;
-  getInputData?: () => {
-    getSpacing: () => number[];
-    getBounds: () => number[];
-  };
-};
-
-type TextBadge = {
-  root: HTMLDivElement;
-  pills: HTMLDivElement;
-  details: HTMLPreElement;
+type FidelityViewport = IViewport & {
+  getFidelityLines?: () => FidelityLine[];
 };
 
 const cleanups = new WeakMap<object, () => void>();
 
 /**
- * Attaches the fidelity indicator to a volume viewport.
+ * Attaches the fidelity indicator to a viewport that can report fidelity.
  *
  * Default UI is the fidelity indicator in the top-right (`loading` / `done` /
  * `lossy` / `lod`). When `init({ debug: { fidelityIndicatorDebug: true } })`
  * is set, the verbose debug badge is also shown in the top-left.
  *
- * When `init({ dangerouslyDisableFidelityIndicator: true })` is set, this
- * is a no-op.
+ * The indicator is a consumer of `viewport.getFidelityLines()` and
+ * `VIEWPORT_FIDELITY_CHANGED` (GENVIEW-FIDELITY-7). It never fires that event.
+ * Apps that need the absolute record use `getFidelityState()`. It does not
+ * read actors or mappers.
+ *
+ * Replaces any existing attachment for this viewport (including the engine
+ * default). When `init({ dangerouslyDisableFidelityIndicator: true })` is set,
+ * this detaches any existing indicator and is otherwise a no-op.
+ *
+ * The built-in hover text is a developer view of the record (grid, delivery,
+ * source, sample distance). Clinician-facing copy belongs on an application
+ * indicator that reads the same state (FIDELITY-UI-5).
  *
  * @returns a function that removes the indicator and its listeners
  */
 export function attachFidelityIndicator(viewport: IViewport): () => void {
+  detachFidelityIndicator(viewport);
+
   if (getConfiguration().dangerouslyDisableFidelityIndicator) {
     return () => {};
   }
 
-  if (!hasGetActors(viewport)) {
+  if (!hasFidelityApi(viewport)) {
     return () => {};
   }
 
-  const volumeViewport = viewport;
-  const { element, id: viewportId } = volumeViewport;
   const verbose = getConfiguration().debug?.fidelityIndicatorDebug === true;
 
   ensureFidelityIndicatorStyles();
 
-  const removeSvg = attachSvgIndicator(element, volumeViewport, viewportId);
+  const { host, restore: restoreHost } = overlayHostOf(viewport.element);
+  const views = [createSvgIndicator(host)];
 
-  if (!verbose) {
-    return removeSvg;
+  if (verbose) {
+    views.push(createTextBadge(host));
   }
 
-  const removeText = attachTextBadge(element, volumeViewport, viewportId);
-
-  return () => {
-    removeSvg();
-    removeText();
+  const cleanup = subscribeToFidelity(viewport, views, restoreHost);
+  const registered = () => {
+    if (cleanups.get(viewport) === registered) {
+      cleanups.delete(viewport);
+    }
+    cleanup();
   };
+
+  cleanups.set(viewport, registered);
+  return registered;
 }
 
 /**
- * Attaches the fidelity indicator when the viewport is a volume type and the
- * product indicator is not disabled. Stores cleanup in a WeakMap for
- * {@link detachFidelityIndicator}.
+ * Attaches the fidelity indicator when the viewport can report fidelity and
+ * the product indicator is not disabled. Uses {@link attachFidelityIndicator},
+ * which stores cleanup for {@link detachFidelityIndicator}.
+ *
+ * A generic family that can show degradable data reports fidelity before it
+ * mounts data; the indicator stays `hidden` until it draws such data.
  */
 export function maybeAttachFidelityIndicator(viewport: IViewport): void {
   if (getConfiguration().dangerouslyDisableFidelityIndicator) {
     return;
   }
 
-  if (!isVolumeFidelityViewport(viewport) || !hasGetActors(viewport)) {
+  if (!canReportFidelity(viewport)) {
     return;
   }
 
-  detachFidelityIndicator(viewport);
-  cleanups.set(viewport, attachFidelityIndicator(viewport));
+  attachFidelityIndicator(viewport);
 }
 
 /** Removes a previously attached fidelity indicator, if any. */
@@ -150,46 +146,33 @@ export function detachFidelityIndicator(viewport: IViewport): void {
 }
 
 /**
- * Whether this viewport should get the product fidelity indicator.
- * Stack (and stack remapped to PLANAR_NEXT) is excluded; orthographic and
- * volume-3D (legacy and Next) are included.
+ * Whether a viewport can report fidelity (GENVIEW-FIDELITY-8). Declared on
+ * `IViewportFidelity`; `Viewport` and `GenericViewport` both implement it.
  */
-export function isVolumeFidelityViewport(viewport: IViewport): boolean {
-  const requested = viewport.requestedType ?? viewport.type;
-
-  return (
-    requested === ViewportType.ORTHOGRAPHIC ||
-    requested === ViewportType.VOLUME_3D ||
-    requested === ViewportType.VOLUME_3D_NEXT ||
-    viewport.type === ViewportType.VOLUME_3D ||
-    viewport.type === ViewportType.VOLUME_3D_NEXT
-  );
+export function canReportFidelity(viewport: IViewport): boolean {
+  return viewport.canReportFidelity() === true;
 }
 
-function hasGetActors(viewport: IViewport): viewport is VolumeViewportLike {
-  return typeof (viewport as VolumeViewportLike).getActors === 'function';
+function hasFidelityApi(viewport: IViewport): viewport is FidelityViewport {
+  return typeof (viewport as FidelityViewport).getFidelityLines === 'function';
+}
+
+function linesOf(viewport: FidelityViewport): FidelityLine[] {
+  return viewport.getFidelityLines?.() ?? [];
 }
 
 /**
- * Host for the indicator/tooltip. Prefer the outer viewport element, not
- * `.viewport-element` (that div uses `overflow: hidden` and clips hover panels).
+ * Reads fidelity lines from the viewport API and passes them to every view:
+ * on attach, after a render, on `VIEWPORT_FIDELITY_CHANGED`, and when volume
+ * data changes without a render. The indicator never fires the event
+ * (FIDELITY-UI-8).
  */
-function overlayHostOf(element: HTMLDivElement): HTMLElement {
-  if (typeof getComputedStyle !== 'undefined') {
-    if (getComputedStyle(element).position === 'static') {
-      element.style.position = 'relative';
-    }
-  }
-
-  return element;
-}
-
-function attachTextBadge(
-  element: HTMLDivElement,
-  viewport: VolumeViewportLike,
-  viewportId: string
+function subscribeToFidelity(
+  viewport: FidelityViewport,
+  views: FidelityView[],
+  restoreHost: () => void
 ): () => void {
-  const badge = createTextBadge(element);
+  const { element } = viewport;
   let rafId = 0;
   let disposed = false;
 
@@ -198,7 +181,12 @@ function attachTextBadge(
     if (disposed) {
       return;
     }
-    renderTextBadge(badge, readLines(viewport));
+
+    const lines = linesOf(viewport);
+
+    for (const view of views) {
+      view.update(lines);
+    }
   };
 
   const schedule = () => {
@@ -207,11 +195,17 @@ function attachTextBadge(
     }
   };
 
-  const onVolumeModified = (evt: Event) => {
-    const { volumeId } = (evt as CustomEvent<{ volumeId?: string }>).detail;
+  const onVolumeModified = () => {
+    schedule();
+  };
 
-    if (volumeId && volumeIdsOf(viewport).has(volumeId)) {
-      schedule();
+  const onFidelityChanged = () => {
+    if (disposed) {
+      return;
+    }
+    const lines = linesOf(viewport);
+    for (const view of views) {
+      view.update(lines);
     }
   };
 
@@ -225,37 +219,67 @@ function attachTextBadge(
       rafId = 0;
     }
     element.removeEventListener(Events.IMAGE_RENDERED, schedule);
-    eventTarget.removeEventListener(
-      Events.IMAGE_VOLUME_MODIFIED,
-      onVolumeModified
+    element.removeEventListener(
+      Events.VIEWPORT_FIDELITY_CHANGED,
+      onFidelityChanged
     );
-    eventTarget.removeEventListener(Events.ELEMENT_DISABLED, onDisabled);
-    badge.root.remove();
-  };
-
-  const onDisabled = (evt: Event) => {
-    const detail = (evt as CustomEvent<{ viewportId?: string }>).detail;
-
-    if (detail?.viewportId === viewportId) {
-      cleanUp();
+    for (const type of VOLUME_DATA_EVENTS) {
+      eventTarget.removeEventListener(type, onVolumeModified);
     }
+    for (const view of views) {
+      view.remove();
+    }
+    restoreHost();
   };
 
   element.addEventListener(Events.IMAGE_RENDERED, schedule);
-  eventTarget.addEventListener(Events.IMAGE_VOLUME_MODIFIED, onVolumeModified);
-  eventTarget.addEventListener(Events.ELEMENT_DISABLED, onDisabled);
+  element.addEventListener(Events.VIEWPORT_FIDELITY_CHANGED, onFidelityChanged);
+  for (const type of VOLUME_DATA_EVENTS) {
+    eventTarget.addEventListener(type, onVolumeModified);
+  }
   schedule();
 
   return cleanUp;
 }
 
-function attachSvgIndicator(
-  element: HTMLDivElement,
-  viewport: VolumeViewportLike,
-  viewportId: string
-): () => void {
-  const host = overlayHostOf(element);
+/** The events that change the quality record of a volume. */
+const VOLUME_DATA_EVENTS = [
+  Events.IMAGE_VOLUME_MODIFIED,
+  Events.IMAGE_VOLUME_LOADING_COMPLETED,
+];
 
+/**
+ * Host for the indicator/tooltip. Prefer the outer viewport element, not
+ * `.viewport-element` (that div uses `overflow: hidden` and clips hover panels).
+ * When this sets an inline `position`, `restore` clears it on detach.
+ */
+function overlayHostOf(element: HTMLDivElement): {
+  host: HTMLElement;
+  restore: () => void;
+} {
+  let previousInline: string | undefined;
+
+  if (typeof getComputedStyle !== 'undefined') {
+    const computed = getComputedStyle(element).position;
+    // Browsers report `static`; jsdom may report `''` for the default.
+    if (computed === 'static' || computed === '') {
+      previousInline = element.style.position;
+      element.style.position = 'relative';
+    }
+  }
+
+  return {
+    host: element,
+    restore: () => {
+      if (previousInline === undefined) {
+        return;
+      }
+      element.style.position = previousInline;
+    },
+  };
+}
+
+function createSvgIndicator(host: HTMLElement): FidelityView {
   const root = document.createElement('div');
   root.className = 'fi-root';
   Object.assign(root.style, {
@@ -286,29 +310,30 @@ function attachSvgIndicator(
   root.append(htmlLayer, svg, details);
   host.appendChild(root);
 
+  let currentState: SvgFidelityState | 'hidden' = 'hidden';
+  let doneFadeTimer = 0;
+  let hovered = false;
+  let lastLines: FidelityLine[] = [];
+
   for (const type of ['mousedown', 'pointerdown', 'wheel']) {
     root.addEventListener(type, (event) => event.stopPropagation());
   }
 
+  // The hover text is built only while it shows.
   root.addEventListener('mouseenter', () => {
+    hovered = true;
     root.dataset.hover = 'true';
+    details.textContent = fidelityHoverTextOf(lastLines);
   });
   root.addEventListener('mouseleave', () => {
+    hovered = false;
     delete root.dataset.hover;
   });
-
-  let rafId = 0;
-  let disposed = false;
-  let currentState: SvgFidelityState | 'hidden' = 'hidden';
-  let doneFadeTimer = 0;
-  /** Once Done has faded (or entered silently after dismissal), stays true for this attachment. */
-  let doneHoldElapsed = false;
 
   const scheduleDoneFade = () => {
     clearTimeout(doneFadeTimer);
     doneFadeTimer = window.setTimeout(() => {
       doneFadeTimer = 0;
-      doneHoldElapsed = true;
       if (currentState === 'done') {
         root.dataset.shown = 'false';
       }
@@ -319,18 +344,6 @@ function attachSvgIndicator(
     if (!svg.querySelector('.fi-glyph')) {
       svg.innerHTML = SVG_GLYPH;
     }
-  };
-
-  const enterDoneSilently = (from: SvgFidelityState | 'hidden') => {
-    root.dataset.from = from === 'hidden' ? 'hidden' : from;
-    root.dataset.state = 'done';
-    root.dataset.shown = 'false';
-    ensureSvgGlyph();
-    clearTimeout(doneFadeTimer);
-    doneFadeTimer = 0;
-    doneHoldElapsed = true;
-    currentState = 'done';
-    svg.setAttribute('aria-label', ARIA_LABELS.done);
   };
 
   const setSvgState = (next: SvgFidelityState | 'hidden') => {
@@ -350,19 +363,19 @@ function attachSvgIndicator(
       return;
     }
 
+    // A render in the same state keeps the running fade, so Done still fades
+    // while the viewport renders every frame.
     if (next === currentState) {
-      if (next === 'done' && !doneHoldElapsed) {
-        scheduleDoneFade();
-      }
+      return;
+    }
+
+    // Done is a recovery from a lossy state (FIDELITY-UI-4). A lossless view
+    // that was never lossy shows nothing.
+    if (next === 'done' && currentState === 'hidden') {
       return;
     }
 
     const from = currentState;
-
-    if (next === 'done' && doneHoldElapsed) {
-      enterDoneSilently(from);
-      return;
-    }
 
     root.dataset.from = from === 'hidden' ? 'hidden' : from;
     root.dataset.state = next;
@@ -382,187 +395,75 @@ function attachSvgIndicator(
     }
   };
 
-  const update = () => {
-    rafId = 0;
-    if (disposed) {
-      return;
-    }
-    const lines = readLines(viewport);
-    setSvgState(svgStateOf(lines));
-    details.textContent = fidelityHoverTextOf(lines);
+  return {
+    update: (lines) => {
+      lastLines = lines;
+      setSvgState(svgStateOf(lines));
+      if (hovered) {
+        details.textContent = fidelityHoverTextOf(lines);
+      }
+    },
+    remove: () => {
+      clearTimeout(doneFadeTimer);
+      root.remove();
+    },
   };
-
-  const schedule = () => {
-    if (!rafId && !disposed) {
-      rafId = requestAnimationFrame(update);
-    }
-  };
-
-  const onVolumeModified = (evt: Event) => {
-    const { volumeId } = (evt as CustomEvent<{ volumeId?: string }>).detail;
-
-    if (volumeId && volumeIdsOf(viewport).has(volumeId)) {
-      schedule();
-    }
-  };
-
-  const cleanUp = () => {
-    if (disposed) {
-      return;
-    }
-    disposed = true;
-    clearTimeout(doneFadeTimer);
-    if (rafId) {
-      cancelAnimationFrame(rafId);
-      rafId = 0;
-    }
-    element.removeEventListener(Events.IMAGE_RENDERED, schedule);
-    eventTarget.removeEventListener(
-      Events.IMAGE_VOLUME_MODIFIED,
-      onVolumeModified
-    );
-    eventTarget.removeEventListener(Events.ELEMENT_DISABLED, onDisabled);
-    root.remove();
-  };
-
-  const onDisabled = (evt: Event) => {
-    const detail = (evt as CustomEvent<{ viewportId?: string }>).detail;
-
-    if (detail?.viewportId === viewportId) {
-      cleanUp();
-    }
-  };
-
-  element.addEventListener(Events.IMAGE_RENDERED, schedule);
-  eventTarget.addEventListener(Events.IMAGE_VOLUME_MODIFIED, onVolumeModified);
-  eventTarget.addEventListener(Events.ELEMENT_DISABLED, onDisabled);
-  schedule();
-
-  return cleanUp;
-}
-
-function volumeIdsOf(viewport: VolumeViewportLike): Set<string> {
-  const ids = new Set<string>();
-
-  for (const entry of viewport.getActors()) {
-    const id = entry.referencedId ?? entry.uid;
-
-    if (id && cache.getVolume(id)) {
-      ids.add(id);
-    }
-  }
-
-  return ids;
-}
-
-function readLines(viewport: VolumeViewportLike): FidelityLine[] {
-  const lines: FidelityLine[] = [];
-  const seen = new Set<string>();
-
-  for (const entry of viewport.getActors()) {
-    const id = entry.referencedId ?? entry.uid;
-    const volume = id ? cache.getVolume(id) : undefined;
-
-    if (
-      !volume ||
-      seen.has(id) ||
-      volume.reductionStatistic === VoxelStatistics.ForegroundMajority
-    ) {
-      continue;
-    }
-
-    seen.add(id);
-
-    const mapper = (
-      entry.actor as { getMapper?: () => VolumeMapperLike }
-    ).getMapper?.() as VolumeMapperLike | undefined;
-    const texture = mapper?.getScalarTexture?.();
-    const grid = texture?.getGrid?.() ?? volume.voxelGrid;
-    const fullGrid = volume.voxelGrid;
-    const record = volume.getGridQuality(grid, volume.reductionStatistic) as
-      | VoxelQualityRecord
-      | undefined;
-    const fullResolution = voxelGridsEqual(grid, fullGrid);
-
-    lines.push({
-      label: 'Image',
-      record: record ?? undefined,
-      reductionFactors: reductionFactorsOf(grid, fullGrid),
-      fullResolution,
-      sampleDistanceLod: sampleDistanceLodOf(mapper),
-    });
-  }
-
-  return lines;
-}
-
-/**
- * How much coarser the ray sample distance is than idle. 1 when idle or when
- * the mapper has no sample distance (MPR).
- */
-function sampleDistanceLodOf(mapper: VolumeMapperLike | undefined): number {
-  if (!mapper?.getSampleDistance) {
-    return 1;
-  }
-
-  const current = mapper.getSampleDistance();
-  const imageData = mapper.getInputData?.();
-
-  if (!imageData || !(current > 0)) {
-    return 1;
-  }
-
-  const texture = mapper.getScalarTexture?.();
-  const baseline = sampleDistanceOf(
-    imageData as Parameters<typeof sampleDistanceOf>[0],
-    texture,
-    1
-  );
-
-  if (!(baseline > 0)) {
-    return 1;
-  }
-
-  return current / baseline;
 }
 
 function summaryOf(line: FidelityLine): {
   text: string;
   color: string;
 } {
-  const { record, reductionFactors, fullResolution, sampleDistanceLod } = line;
+  const { record, reductionFactors, sampleDistanceLod, imageQualityStatus } =
+    line;
 
-  if (!record) {
+  if (!lineHasData(line)) {
     return { text: 'NO DATA', color: COLORS.none };
   }
 
-  if (record.missing > 0) {
-    const loaded =
-      record.voxels > 0
-        ? Math.min(
-            99,
-            Math.floor((100 * (record.voxels - record.missing)) / record.voxels)
-          )
-        : 0;
+  const dataKind = dataKindOf(line);
 
-    return {
-      text: `${record.exact ? '' : '~'}${loaded}% loaded`,
-      color: COLORS.loading,
-    };
+  if (dataKind === 'loading') {
+    if (record) {
+      const loaded =
+        record.voxels > 0
+          ? Math.min(
+              99,
+              Math.floor(
+                (100 * (record.voxels - record.missing)) / record.voxels
+              )
+            )
+          : 0;
+
+      return {
+        text: `${record.exact ? '' : '~'}${loaded}% loaded`,
+        color: COLORS.loading,
+      };
+    }
+
+    return { text: 'LOADING', color: COLORS.loading };
   }
 
-  if (isAliasingReduction(record.reduction)) {
+  if (dataKind === 'decimated') {
     return { text: 'DECIMATED', color: COLORS.decimated };
   }
 
   const parts: string[] = [];
 
-  if (!fullResolution || isReduced(reductionFactors)) {
-    parts.push(`REDUCED ${formatFactors(reductionFactors)}`);
+  if (dataKind === 'reduced') {
+    // Every reduced line names its reduction, so the badge never reads FULL.
+    if (isReduced(reductionFactors)) {
+      parts.push(`REDUCED ${formatFactors(reductionFactors)}`);
+    } else {
+      const status = imageQualityStatus ?? record?.lowest;
+      parts.push(ImageQualityStatus[status] ?? 'REDUCED');
+    }
   }
 
   if (isInteractiveLod(sampleDistanceLod)) {
     parts.push(`LOD ${formatFactor(sampleDistanceLod)}×`);
+  } else if (line.interactiveReduction) {
+    parts.push('LOD');
   }
 
   if (parts.length) {
@@ -572,55 +473,81 @@ function summaryOf(line: FidelityLine): {
   return { text: 'FULL', color: COLORS.full };
 }
 
+/**
+ * Developer-facing hover text for the built-in indicator. This is not
+ * clinician copy (FIDELITY-UI-5); applications should render clinician
+ * words from the absolute `getFidelityState()` / `VIEWPORT_FIDELITY_CHANGED`.
+ */
 function fidelityHoverTextOf(lines: FidelityLine[]): string {
   if (!lines.length) {
-    return 'No volume in this viewport yet';
+    return 'No image data in this viewport yet';
   }
 
   return lines.map(detailsOf).join('\n\n');
 }
 
+const DETAIL_STATUS: Record<FidelityDataKind, (line: FidelityLine) => string> =
+  {
+    loading: () => 'loading',
+    decimated: () => 'decimated',
+    reduced: (line) =>
+      line.record
+        ? `reduced ${formatFactors(line.reductionFactors)}`
+        : 'reduced',
+    full: () => 'full resolution',
+  };
+
 function detailsOf(line: FidelityLine): string {
-  const { label, record, reductionFactors, fullResolution, sampleDistanceLod } =
-    line;
+  const { label, record, sampleDistanceLod, imageQualityStatus } = line;
 
   if (!record) {
-    return `${label}: no quality record`;
+    if (imageQualityStatus !== undefined) {
+      const status =
+        ImageQualityStatus[imageQualityStatus] ?? String(imageQualityStatus);
+
+      return [
+        `${label}`,
+        `  status    ${DETAIL_STATUS[dataKindOf(line)](line)}`,
+        `  delivery  ${status}`,
+        `  note      developer view — app indicators supply clinician text`,
+      ].join('\n');
+    }
+
+    return line.fullResolution
+      ? `${label}: no quality record`
+      : `${label}: no quality record, reduced ${formatFactors(line.reductionFactors)}`;
   }
 
   const { grid } = record;
-  const status = ImageQualityStatus[record.status] ?? String(record.status);
+  const delivery = ImageQualityStatus[record.status] ?? String(record.status);
   const range =
     record.lowest === record.highest
       ? ''
       : ` [${ImageQualityStatus[record.lowest]}..${ImageQualityStatus[record.highest]}]`;
   const missingPercent =
     record.voxels > 0 ? Math.round((100 * record.missing) / record.voxels) : 0;
-  const dataState = isAliasingReduction(record.reduction)
-    ? 'decimated'
-    : !fullResolution || isReduced(reductionFactors)
-      ? `reduced ${formatFactors(reductionFactors)} vs full volume`
-      : 'full resolution';
+  const status = DETAIL_STATUS[dataKindOf(line)](line);
   const lodState = isInteractiveLod(sampleDistanceLod)
     ? `sample distance ×${formatFactor(sampleDistanceLod)} (interactive)`
-    : 'sample distance idle';
+    : line.interactiveReduction
+      ? 'deferred resample (interactive)'
+      : 'sample distance idle';
 
   return [
     `${label}`,
-    `  status    ${status}${range}`,
+    `  status    ${status}`,
+    `  delivery  ${delivery}${range}`,
     `  grid      ${grid.dimensions.join('×')} @ ${grid.spacing
       .map((value) => formatFactor(value))
       .join('×')} mm`,
     `  missing   ${record.exact ? '' : '~'}${missingPercent}% of ${record.voxels} voxels`,
     `  source    ${record.source} · ${record.reduction} · ${record.deliveries} deliveries`,
-    `  data      ${dataState}`,
     `  lod       ${lodState}`,
+    `  note      developer view — app indicators supply clinician text`,
   ].join('\n');
 }
 
-function createTextBadge(element: HTMLDivElement): TextBadge {
-  const host = overlayHostOf(element);
-
+function createTextBadge(host: HTMLElement): FidelityView {
   const root = document.createElement('div');
 
   Object.assign(root.style, {
@@ -649,55 +576,72 @@ function createTextBadge(element: HTMLDivElement): TextBadge {
 
   root.append(pills, details);
 
+  let hovered = false;
+  let lastLines: FidelityLine[] = [];
+  let lastPillsKey = '';
+
   for (const type of ['mousedown', 'pointerdown', 'wheel']) {
     root.addEventListener(type, (event) => event.stopPropagation());
   }
 
   root.addEventListener('mouseenter', () => {
+    hovered = true;
+    details.textContent = fidelityHoverTextOf(lastLines);
     details.style.display = 'block';
   });
   root.addEventListener('mouseleave', () => {
+    hovered = false;
     details.style.display = 'none';
   });
 
   host.appendChild(root);
 
-  return { root, pills, details };
-}
+  return {
+    update: (lines) => {
+      lastLines = lines;
+      renderPills(lines);
+      if (hovered) {
+        details.textContent = fidelityHoverTextOf(lines);
+      }
+    },
+    remove: () => root.remove(),
+  };
 
-function renderTextBadge(
-  { pills, details }: TextBadge,
-  lines: FidelityLine[]
-): void {
-  const shown = lines.length
-    ? lines
-    : [
-        {
-          label: 'Image',
-          reductionFactors: [1, 1, 1] as Point3,
-          fullResolution: true,
-          sampleDistanceLod: 1,
-        },
-      ];
+  function renderPills(lines: FidelityLine[]): void {
+    const shown = lines.length
+      ? lines
+      : [
+          {
+            label: 'Image',
+            reductionFactors: [1, 1, 1] as Point3,
+            fullResolution: true,
+            sampleDistanceLod: 1,
+          },
+        ];
+    const summaries = shown.map((line) => ({ line, ...summaryOf(line) }));
+    const key = summaries.map(({ text, color }) => text + color).join('|');
 
-  pills.replaceChildren(
-    ...shown.map((line) => {
-      const { text, color } = summaryOf(line);
-      const pill = document.createElement('div');
+    // The pills change only when a summary changes, not on each render.
+    if (key === lastPillsKey) {
+      return;
+    }
+    lastPillsKey = key;
 
-      Object.assign(pill.style, {
-        display: 'inline-block',
-        marginRight: '4px',
-        padding: '1px 6px',
-        borderRadius: '8px',
-        background: color,
-      });
-      pill.textContent = shown.length > 1 ? `${line.label} ${text}` : text;
+    pills.replaceChildren(
+      ...summaries.map(({ line, text, color }) => {
+        const pill = document.createElement('div');
 
-      return pill;
-    })
-  );
-  details.textContent = lines.length
-    ? lines.map(detailsOf).join('\n\n')
-    : 'No volume in this viewport yet';
+        Object.assign(pill.style, {
+          display: 'inline-block',
+          marginRight: '4px',
+          padding: '1px 6px',
+          borderRadius: '8px',
+          background: color,
+        });
+        pill.textContent = shown.length > 1 ? `${line.label} ${text}` : text;
+
+        return pill;
+      })
+    );
+  }
 }
