@@ -8,14 +8,15 @@ import { getTransferFunctionsHash } from '@kitware/vtk.js/Rendering/OpenGL/Rende
 import { Representation } from '@kitware/vtk.js/Rendering/Core/Property/Constants';
 import { BlendMode } from '@kitware/vtk.js/Rendering/Core/VolumeMapper/Constants';
 import { getCanUseNorm16Texture } from '../../init';
+import cache from '../../cache/cache';
 import canUseFloatOpacityTexture from './canUseFloatOpacityTexture';
 import { coreLog } from '../../utilities/logger';
-import { getBufferConfiguration } from '../../utilities/getBufferConfiguration';
+import { volumeTextureBytes } from '../../utilities/getBufferConfiguration';
 import { voxelGridWithinLimits } from '../../utilities/voxelGrid';
 import {
-  getActiveGpuCapabilityProfile,
-  gridLimitsOfProfile,
-} from '../../utilities/gpuCapabilityProfiles';
+  gpuSettingsForRender,
+  gridLimitsOfGpuSettings,
+} from '../../utilities/gpuSettingsPresets';
 
 const log = coreLog.getLogger(
   'RenderingEngine',
@@ -23,26 +24,41 @@ const log = coreLog.getLogger(
 );
 
 /**
- * States whether the device that the active capability profile describes can
- * hold a texture of these dimensions.
+ * States whether the active GPU settings can hold a texture of these
+ * dimensions.
  *
- * The count happens before the allocation. An application states the profile,
- * and this function probes nothing.
+ * The count happens before the allocation. An application selects the GPU
+ * settings, and this function probes nothing. With final downsampling off,
+ * every texture fits, so the mapper allocates as it did before the GPU
+ * settings existed.
+ *
+ * A dynamic (4D) volume and a texture of more than one component also always
+ * fit: the strategy does not reduce them (VRS-I-13, VRS-I-14), so the mapper
+ * tries the upload as in 4.x instead of keeping the previous image.
  *
  * @param {number[]} dims - the number of voxels on each axis
  * @param {string} dataType - the type of the buffer of the texture
  * @param {number} numberOfComponents - the number of components of one voxel
- * @param {{volumeId?: string}} context - what the mapper knows, for the message
- * @returns {boolean} true when the device can hold the texture
+ * @param {{volumeId?: string, dynamic?: boolean}} context - what the mapper
+ *   knows about the volume
+ * @returns {boolean} true when the GPU settings can hold the texture
  */
-function gridFitsProfile(dims, dataType, numberOfComponents, context) {
-  const profile = getActiveGpuCapabilityProfile();
-  const { numBytes } = getBufferConfiguration(
-    dataType,
-    numberOfComponents || 1,
-    { isVolumeBuffer: true }
+export function gridFitsGpuSettings(
+  dims,
+  dataType,
+  numberOfComponents,
+  context
+) {
+  const gpuSettings = gpuSettingsForRender();
+
+  if (!gpuSettings || numberOfComponents > 1 || context?.dynamic) {
+    return true;
+  }
+
+  const limits = gridLimitsOfGpuSettings(
+    gpuSettings,
+    volumeTextureBytes(1, dataType, numberOfComponents)
   );
-  const limits = gridLimitsOfProfile(profile, numBytes);
   const grid = {
     dimensions: [dims[0], dims[1], dims[2]],
     spacing: [1, 1, 1],
@@ -55,7 +71,7 @@ function gridFitsProfile(dims, dataType, numberOfComponents, context) {
   }
 
   log.warn(
-    `the profile ${profile.id} cannot hold a texture of ${dims[0]}x${dims[1]}x${dims[2]} for the volume ${context?.volumeId}, so no allocation is issued`
+    `the GPU settings preset ${gpuSettings.id} cannot hold a texture of ${dims[0]}x${dims[1]}x${dims[2]} for the volume ${context?.volumeId}, so no allocation is issued`
   );
 
   return false;
@@ -452,8 +468,11 @@ function vtkStreamingOpenGLVolumeMapper(publicAPI, model) {
             // allocation instead, and the render path draws what it drew
             // before. MR-API-IV-7, and acceptance criterion 15.
             if (
-              !gridFitsProfile(dims, dataType, textureNumberOfComponents, {
+              !gridFitsGpuSettings(dims, dataType, textureNumberOfComponents, {
                 volumeId: currentTexture.getVolumeId?.(),
+                dynamic: cache
+                  .getVolume(currentTexture.getVolumeId?.())
+                  ?.isDynamicVolume?.(),
               })
             ) {
               currentTexture.deactivate();

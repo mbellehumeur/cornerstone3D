@@ -3,7 +3,7 @@ import addButtonToToolbar from './addButtonToToolbar';
 import addCheckboxToToolbar from './addCheckboxToToolbar';
 import addDropdownToToolbar from './addDropdownToToolbar';
 import addFillOpacityDropdownToToolbar from './addFillOpacityDropdownToToolbar';
-import addGpuCapabilityProfileDropdown from './addGpuCapabilityProfileDropdown';
+import addGpuSettingsPresetDropdown from './addGpuSettingsPresetDropdown';
 import addUShapeModeDropdownToToolbar from './addUShapeModeDropdownToToolbar';
 import addInputToToolbar from './addInputToToolbar';
 import addLabelToToolbar from './addLabelToToolbar';
@@ -29,6 +29,11 @@ export {
   get4DVolumeImageIds,
   getNaturalizedInstanceForDisplaySetSplit,
 } from './splitDisplaySetsFromImageIds';
+export {
+  applyCustomizationUpdate,
+  hasUpdateCommand,
+  applyFilterCommand,
+} from './applyCustomizationUpdate';
 import createInfoSection from './createInfoSection';
 import downloadSurfacesData from './downloadSurfacesData';
 import getLocalUrl from './getLocalUrl';
@@ -59,7 +64,7 @@ export {
   addCheckboxToToolbar,
   addDropdownToToolbar,
   addFillOpacityDropdownToToolbar,
-  addGpuCapabilityProfileDropdown,
+  addGpuSettingsPresetDropdown,
   addUShapeModeDropdownToToolbar,
   addInputToToolbar,
   addLabelToToolbar,

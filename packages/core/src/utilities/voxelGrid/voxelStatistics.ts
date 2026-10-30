@@ -46,9 +46,9 @@ function createAverageAccumulator(): VoxelStatisticAccumulator {
       sum = 0;
       count = 0;
     },
-    add: (value: number) => {
-      sum += value;
-      count++;
+    add: (value: number, weight = 1) => {
+      sum += value * weight;
+      count += weight;
     },
     getValue: () => (count === 0 ? undefined : sum / count),
   };
@@ -75,13 +75,13 @@ function createForegroundMajorityAccumulator(): VoxelStatisticAccumulator {
       majorityCount = 0;
       sawBackground = false;
     },
-    add: (value: number) => {
+    add: (value: number, weight = 1) => {
       if (value === 0) {
         sawBackground = true;
         return;
       }
 
-      const next = (counts.get(value) ?? 0) + 1;
+      const next = (counts.get(value) ?? 0) + weight;
 
       counts.set(value, next);
 
@@ -137,6 +137,17 @@ function registerCoreVoxelStatistics(): void {
  * ONE COMPONENT of one voxel, because the code that reduces a grid builds one
  * accumulator for each component of a voxel. A definition therefore serves a
  * volume of one component and an RGB volume, and it states the arithmetic once.
+ *
+ * `add(value, weight)` gives the part of the source voxel that lies inside the
+ * box, from 0 to 1. The weight is 1 for every voxel when the factor `N / M` is
+ * a whole number. A fractional factor cuts the voxels at the two ends of a box,
+ * and those voxels arrive with a weight below 1. An accumulator that ignores
+ * the weight counts a cut voxel as a whole voxel: a weighted statistic, such as
+ * a mean or a count, then gives too much influence to the voxels at the edges
+ * of each box. An order statistic, such as a minimum or a maximum, can ignore
+ * the weight. `fillPlane` gets the weights of the frames in `frameWeights`, and
+ * `reduceBySlices` and `fillPlane` must weight the voxels as the accumulator
+ * does.
  *
  * `reduceBySlices`, `fillPlane` and `boxReduction` are optional. Without
  * them, a reduction takes the accumulator, a reduced texture slice falls back

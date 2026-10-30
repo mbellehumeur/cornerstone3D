@@ -35,6 +35,7 @@ import {
   voxelGridKey,
   voxelGridsEqual,
 } from './voxelGrid';
+import { snapToWhole } from './voxelGrid/boxSpan';
 
 /**
  * One sub voxel manager of a composite, with the grid and the statistic that
@@ -118,8 +119,9 @@ export type VoxelRepresentation<T> = {
    *
    * A voxel of a derived representation is a box of source voxels, and not one
    * source voxel, so the quality of that voxel is the quality of the WORST
-   * source voxel of its box, and the voxel holds no data at all while any
-   * source voxel of its box has not arrived. `getRegionQuality` therefore maps
+   * source voxel of its box. The voxel is the average of the source voxels of
+   * its box that arrived, and it holds no data only while no source voxel of
+   * its box has arrived. `getRegionQuality` therefore maps
    * the region back into the source and reads this record, instead of holding a
    * record of its own.
    *
@@ -248,7 +250,7 @@ export type RepresentationStorage<T> = {
 
 /** The options of a derivation of a new representation. */
 export type CreateVoxelRepresentationOptions = {
-  /** The box size of each axis of the derivation. */
+  /** The box size of each axis of the derivation, which can hold a fraction. */
   factors: Point3;
   /** The representation that the derivation reads. The best source by default. */
   sourceGrid?: VoxelGrid;
@@ -770,8 +772,9 @@ export default class CompositeVoxelManager<T> implements IVoxelManager<T> {
    * Derives a new representation, and adds it to the composite.
    *
    * The source is the representation of `sourceGrid`, or the best that the
-   * composite holds. A box size is a whole number of at least 1, so the result
-   * is never finer than its source: A DERIVATION ALWAYS GOES FROM A HIGHER
+   * composite holds. A box size is at least 1, and it can hold a fraction
+   * (`N / M`, see `deriveBoxAverageGrid`), so the result is never finer than
+   * its source: A DERIVATION ALWAYS GOES FROM A HIGHER
    * RESOLUTION TO A LOWER ONE, and data that no derivation can give comes from
    * a direct load through `acceptData`.
    */
@@ -801,8 +804,8 @@ export default class CompositeVoxelManager<T> implements IVoxelManager<T> {
       sourceDimensions,
     };
     // A DERIVATION ALWAYS GOES FROM A HIGHER RESOLUTION TO A LOWER ONE. The
-    // construction holds that rule: a box size is a whole number of at least 1,
-    // so the result is never finer than the source that it reads.
+    // construction holds that rule: a box size is at least 1, so the result is
+    // never finer than the source that it reads.
     const grid = deriveBoxAverageGrid(sourceRepresentation.grid, reduction);
     const { voxelManager, imageIds } = this.createStorageForGrid(
       grid,
@@ -936,11 +939,18 @@ export default class CompositeVoxelManager<T> implements IVoxelManager<T> {
     const batches = Math.ceil(depth / DERIVATION_BATCH_SLICES);
 
     const reduceBatch = (batch: number): BoundsIJK => {
-      const firstK = offsetK + batch * DERIVATION_BATCH_SLICES * factorK;
+      // A fractional factor makes the bounds of a batch fall inside a source
+      // slice, so the batch takes every slice that it meets.
+      const firstK = Math.floor(
+        snapToWhole(offsetK + batch * DERIVATION_BATCH_SLICES * factorK)
+      );
       const lastK =
-        offsetK +
-        Math.min((batch + 1) * DERIVATION_BATCH_SLICES, depth) * factorK -
-        1;
+        Math.ceil(
+          snapToWhole(
+            offsetK +
+              Math.min((batch + 1) * DERIVATION_BATCH_SLICES, depth) * factorK
+          )
+        ) - 1;
       const sourceBounds = boundsOfGrid(source.grid);
       const slab: BoundsIJK = [
         sourceBounds[0],
@@ -1292,8 +1302,10 @@ export default class CompositeVoxelManager<T> implements IVoxelManager<T> {
         return 0;
       }
 
-      const firstBox = Math.floor(first / factors[axis]);
-      const lastBox = Math.floor(last / factors[axis]);
+      // A box of a fractional factor can cut a source voxel, which then meets
+      // two boxes.
+      const firstBox = Math.floor(snapToWhole(first / factors[axis]));
+      const lastBox = Math.ceil(snapToWhole((last + 1) / factors[axis])) - 1;
 
       sourceOffset[axis] = offset[axis] + firstBox * factors[axis];
       sourceDimensions[axis] = Math.min(
@@ -1571,9 +1583,11 @@ export default class CompositeVoxelManager<T> implements IVoxelManager<T> {
    * source gives.
    *
    * The function maps the region back into the source, and it reads the frozen
-   * record of the source there. A derived voxel holds no data while any source
-   * voxel of its box is missing, so the part of the region that is missing
-   * follows the part of the source that is missing.
+   * record of the source there for the qualities. A derived voxel is the
+   * average of the source voxels of its box that arrived (P31.3), so it holds
+   * data when any source voxel of its box arrived. Only a box that no source
+   * delivery meets counts as missing. A box can be fractional (see `boxSpan`),
+   * and a source voxel that the box cuts counts as a voxel of that box.
    */
   private qualityOfDerived(
     representation: VoxelRepresentation<T>,
@@ -1599,22 +1613,29 @@ export default class CompositeVoxelManager<T> implements IVoxelManager<T> {
       return withStatus(record);
     }
 
-    let missingSource = sourceVoxels - coverage.covered;
-
-    if (missingSource > 0 && quality !== undefined) {
+    if (coverage.covered < sourceVoxels && quality !== undefined) {
       record.lowest = Math.min(record.lowest ?? quality, quality);
       record.highest = Math.max(record.highest ?? quality, quality);
-      missingSource = 0;
+      record.missing = 0;
+
+      return withStatus(record);
     }
 
-    record.missing = Math.ceil((record.voxels * missingSource) / sourceVoxels);
+    // The deliveries of the source, mapped onto the boxes that they meet.
+    const boxes = coverageOfRegion(
+      (delivered ?? []).map((delivery) => ({
+        bounds: mapBoundsBetweenGrids(
+          grid,
+          representation.grid,
+          delivery.bounds
+        ),
+        quality: delivery.quality,
+      })),
+      target
+    );
 
-    // A voxel of this representation is a BOX of source voxels, so the part of
-    // the source that is missing gives the part of this representation that is
-    // missing, in proportion. The count is exact when the source holds
-    // everything, and when the source holds nothing.
-    record.exact =
-      record.exact && (missingSource === 0 || missingSource === sourceVoxels);
+    record.missing = record.voxels - boxes.covered;
+    record.exact = record.exact && boxes.exact;
 
     return withStatus(record);
   }

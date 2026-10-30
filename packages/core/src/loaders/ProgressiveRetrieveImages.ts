@@ -21,6 +21,7 @@ import cache from '../cache/cache';
 import eventTarget from '../eventTarget';
 import { fillNearbyFrames } from './fillNearbyFrames';
 import { coreLog } from '../utilities/logger';
+import { getLossyDownsampling } from '../init';
 
 const log = coreLog.getLogger('loaders', 'ProgressiveRetrieveImages');
 
@@ -195,6 +196,7 @@ class ProgressiveRetrieveImagesInstance {
         }
         const { imageQualityStatus } = image;
         complete ||= imageQualityStatus === ImageQualityStatus.FULL_RESOLUTION;
+        image.imageQualityPending = !complete && (!done || !!next);
         if (oldStatus !== undefined && oldStatus > imageQualityStatus) {
           // We already have a better status, so don't update it
           this.updateStageStatus(request.stage, null, true);
@@ -220,6 +222,11 @@ class ProgressiveRetrieveImagesInstance {
           this.addRequest(next, options.streamingData);
         } else {
           if (!complete) {
+            // No stage follows, so the image shown is final.
+            const shown = cache.getImage(imageId);
+            if (shown) {
+              shown.imageQualityPending = false;
+            }
             this.listener.errorCallback(imageId, true, "Couldn't decode");
           }
           this.outstandingRequests--;
@@ -358,7 +365,9 @@ class ProgressiveRetrieveImagesInstance {
    */
   protected findNearbyRequests(index: number, stage): NearbyRequest[] {
     const nearby = new Array<NearbyRequest>();
-    if (!stage.nearbyFrames) {
+    // A nearby fill shows a copy of another frame, which is a lossy
+    // interleaved downsampling.
+    if (!stage.nearbyFrames || !getLossyDownsampling().interleavedLoading) {
       return nearby;
     }
     for (const nearbyItem of stage.nearbyFrames) {

@@ -35,7 +35,7 @@ already exists.
   ║            │ asks         │                        │                            ║
   ║            ▼              │                        │                            ║
   ║   VolumeStrategyProvider ─┘                        │                            ║
-  ║            │   · reads the GpuCapabilityProfile    │                            ║
+  ║            │   · reads the GpuSettings    │                            ║
   ║            │   · computes the box factors per axis │                            ║
   ║            │   · provisions the texture sets ──────┘                            ║
   ║            │                                                                    ║
@@ -85,15 +85,36 @@ already exists.
 | `VolumeTextureSet`       | A named set of textures, and the unit of storage, of cost and of eviction. Its members carry an area index.                                            |
 | `volumeTextureStore`     | The global store of the sets, with one budget for the texture memory of every volume.                                                                  |
 | `CompositeVoxelManager`  | The voxels. It holds the full-resolution data and every reduced representation, and it fills a grid from the best sources that it has.                 |
-| `GpuCapabilityProfile`   | A declared class of device. An application states which profile applies, and nothing probes.                                                           |
+| `GpuSettings`            | The values that a preset gives: the texture edge, the texture memory and the speed. An application selects the preset, and nothing probes.             |
 | `VoxelQualityRecord`     | The absolute record of the data that a render drew. It states no verdict.                                                                              |
+
+## Where the code is
+
+[Volume Render Sequences](./volumeRenderSequences.md) gives the sequence of calls as diagrams. The
+table gives the file of each piece. The paths are under `packages/core/src/`, except the last row.
+
+| Piece or step                                       | Code                                                                                                               |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| The presets, and the limits of a grid               | `utilities/gpuSettingsPresets.ts`: `setGpuSettingsPreset`, `gridLimitsOfGpuSettings`                               |
+| The factors of a reduction, and the reduced grid    | `utilities/voxelGrid/`: `boxAverageReductionFactors`, `reducedDimensions`, `deriveBoxAverageGrid`                  |
+| The default provider and the default selection      | `RenderingEngine/helpers/volumeRenderStrategy.ts`: `defaultVolumeStrategyProvider`, `selectFirstReadyStrategy`     |
+| The one place that both architectures share         | `RenderingEngine/helpers/resolveVolumeTexture.ts`, called by `createVolumeActor` and `createVolumeSliceActor`      |
+| The texture sets and the store                      | `cache/classes/VolumeTextureSet.ts`, `cache/volumeTextureStore.ts`, `ImageVolume.provisionTextureSet`              |
+| The marks and the deliveries                        | `cache/classes/ImageVolume.ts`: `markFrameTexturesDirty`, `recordFrameDelivery`, `markFrameModified`               |
+| The load                                            | `cache/classes/BaseStreamingImageVolume.ts`: `load`, `successCallback`, `takeInCachedImages`                       |
+| The fill of a reduced texture                       | `RenderingEngine/vtkClasses/vtkStreamingOpenGLTexture.js`: `updateTextureFromComposite`, `fillSliceByBoxStatistic` |
+| The selection on each render (generic architecture) | `RenderingEngine/GenericViewport/Planar/VtkVolumeSliceRenderPath.ts`: `provisionStrategies`, `applyStrategy`       |
+| The sample distance of a 3D render                  | `RenderingEngine/helpers/createVolumeMapper.ts`: `sampleDistanceOf`                                                |
+| The statistic of a labelmap                         | `packages/tools/src/stateManagement/segmentation/labelmapModel/labelmapLayerStore.ts`: `tagLabelmapVolume`         |
 
 ## How the viewport builds the strategies
 
 **The provider runs when the render path adds its actor, and it never runs on the frame path.** It
 does the expensive thing: it allocates the textures.
 
-The default provider reads the capability profile and answers in one of two ways:
+With final downsampling off (`rendering.lossyDownsampling.final`, the default), the default provider
+always builds the full-resolution strategy. With final downsampling on, the provider reads the GPU
+settings and answers in one of two ways:
 
 - The device can hold the full-resolution grid, so the provider builds the **full-resolution
   strategy** and provisions the set `full-resolution/full-extent`.
@@ -101,7 +122,8 @@ The default provider reads the capability profile and answers in one of two ways
   reduced set whose name carries those factors.
 
 The reduction is per axis and it is not uniform. An edge of 2049 voxels exceeds a limit of 2048 on
-one axis and by one voxel, so one axis reduces and the other two do not.
+one axis and by one voxel, so one axis reduces and the other two do not. A factor can hold a
+fraction, see `VRS-I-12`.
 
 **The provider derives no representation.** A reduced texture fills each slice with the
 `fillPlane` of the statistic of the volume (`ImageVolume.reductionStatistic`) straight from the
@@ -310,10 +332,15 @@ texture, which is what lets a basis point move.
 **VRS-C-10.** The record that the selection receives is open. A render component adds the fields
 that its own function reads, and no existing caller changes.
 
+**VRS-C-11.** With final downsampling off (`rendering.lossyDownsampling.final`), a volume renders as
+in 4.x: it gets a full-resolution texture, no GPU settings preset applies, and a 3D render uses the
+sample distance of 4.x. Every render path reads the GPU settings through `gpuSettingsForRender`,
+which gives no settings in that case.
+
 ## § Implementation choices
 
-**VRS-I-1.** The default provider builds the full-resolution strategy when the capability profile
-admits it, and the reduced-resolution strategy otherwise. It reads the capability alone: a
+**VRS-I-1.** The default provider builds the full-resolution strategy when it gets no GPU settings
+(see `VRS-C-11`) or the GPU settings admit it, and the reduced-resolution strategy otherwise. It reads the capability alone: a
 performance-bound choice belongs to task T14, which supplies its own provider.
 
 **VRS-I-2.** The default selection keeps the strategy of the previous render while that strategy is
@@ -343,6 +370,34 @@ at once, and each later batch runs in an idle callback.
 
 **VRS-I-11.** A legacy viewport pins its set instead of claiming it. A claim needs a release at every
 removal of an actor, and a legacy viewport has many such paths.
+
+**VRS-I-12.** A reduced texture spans the full-resolution extent. The mappers allocate the
+dimensions of the reduced grid, and vtk.js maps the texture over the extent of the full-resolution
+`imageData`. On an axis of N source voxels and M texels, texel j therefore covers the source
+`[j · N / M, (j + 1) · N / M)`, and the box of the fill must be that same range:
+
+- The factor of an axis is `N / M`, and it can hold a fraction. A fill averages the source over the
+  range of the texel, and a source voxel that an end of the range cuts counts with the part of it
+  that lies inside the range. The foreground majority of a labelmap uses the same weights.
+- `deriveBoxAverageGrid` of that factor gives the spacing `s · N / M` and puts the centre of box j at
+  the centre of its range, so a CPU grid of the same reduction agrees with the texture.
+- `boxAverageReductionFactors` takes the largest M that fits the limits. It takes a whole factor f
+  that divides N in place of that M when `N / f` is at least `DIVISOR_PREFERENCE_MIN_RATIO` (0.9) of
+  M, because the box is then exact and whole.
+- A whole factor that does not divide N gives `ceil(N / f)` texels, which do not span N source
+  voxels. A texture of such a grid draws stretched, so no reduced texture uses one.
+
+**VRS-I-13.** A dynamic (4D) volume is not reduced: its factors are `[1, 1, 1]`, and it draws one
+full-resolution texture of the current dimension group, as in 4.x. The dynamic texture update writes
+full frames before any check of the grid, and the reduced fill reads frames by image-id index. An
+open issue tracks the support, to resolve after the first merge.
+
+**VRS-I-14.** A volume of more than one component (for example RGB) is not reduced: its factors are
+`[1, 1, 1]`. The reduced fill and its upload have no component stride. An open issue tracks the
+support, to resolve after the first merge.
+
+For both cases, the mapper does not refuse the allocation when the texture is larger than the GPU
+settings (`gridFitsGpuSettings`). It tries the upload, as in 4.x.
 
 ## What a new render type defines
 

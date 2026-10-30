@@ -217,8 +217,8 @@ The rule for a display is less strict:
 - A fill can average only the source voxels that the display needs, such as the voxels of one
   oblique plane.
 
-**A derivation always goes from a higher resolution to a lower one.** A box size is a whole number
-of at least 1, so the result is never finer than its source. Data that no derivation can give
+**A derivation always goes from a higher resolution to a lower one.** A box size is at least 1, and
+it can hold a fraction (`N / M`), so the result is never finer than its source. Data that no derivation can give
 arrives through `acceptData`.
 
 **A derivation reduces the regions that its source has delivered, and no others.** A source that
@@ -306,9 +306,9 @@ whole volume that arrives at the full quality takes the record back to one entry
 
 `exact` states whether `missing` is a count or an estimate. **A record that is not exact never
 states less than what is missing**, so a reader that trusts it errs towards "the data is not
-complete", and never towards a wrong statement of completeness. Two cases give an estimate: a
-derived representation, whose voxel maps to a box of source voxels, and a set of deliveries at
-unrelated offsets whose edges are too many to cut exactly.
+complete", and never towards a wrong statement of completeness. One case gives an estimate: a set
+of deliveries at unrelated offsets whose edges are too many to cut exactly. A derived
+representation counts its boxes exactly, by the rule of P31.3 above.
 
 The record is **absolute**, and it states **no verdict**. It says which data exists and how much is
 missing, and a reader compares that against its own requirement. Two viewports over one volume can
@@ -345,12 +345,15 @@ A derived representation holds **no record of its own**. One of its voxels is a 
 voxels, so:
 
 - the quality of that voxel is the quality of the **worst** source voxel of its box;
-- the voxel holds **no data at all** while any source voxel of its box has not arrived.
+- the voxel is the average of the source voxels of its box that have arrived (P31.3), so it holds
+  data when **any** source voxel of its box has arrived;
+- only a box with **no** arrived source voxel counts as missing. A fractional box counts a source
+  voxel that it cuts as one of its voxels.
 
 `createRepresentation` therefore takes a copy of the record of its source, and `getRegionQuality`
 maps the region back into the source and reads that copy. **The copy states the data that the
-derivation really read**, and never more: a box that reads a source voxel that has not arrived
-holds nothing, and the copy says so. When a delivery redoes that box, it takes the copy forward at
+derivation really read**, and never more: a box that has read no source voxel holds nothing, and
+the copy says so. When a delivery redoes that box, it takes the copy forward at
 the same time, so the record and the data always describe the same moment.
 
 ### The verdict of one reader
@@ -517,6 +520,13 @@ adds the arithmetic and, when the caller gives a `name`, the constant.
 number, and a voxel of an RGB volume is an array of numbers. The reduction builds one accumulator
 for each component, and the components are independent, so a definition states the arithmetic once
 and it serves both cases.
+
+**An accumulator gets the weight of each voxel.** The reduction calls `add(value, weight)`. The
+weight is the part of the source voxel that lies inside the box, from 0 to 1. A whole factor gives
+the weight 1 to every voxel. A fractional factor `N / M` cuts the voxels at the two ends of a box,
+and those voxels get a weight below 1. An accumulator that ignores the weight counts a cut voxel as
+a whole voxel, so a mean or a count gives too much influence to the voxels at the edges of a box. A
+minimum or a maximum, as in the example above, can ignore the weight.
 
 **A statistic can also register fast paths.** The three fields are optional:
 
