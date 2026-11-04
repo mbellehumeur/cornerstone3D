@@ -126,6 +126,27 @@ describe('CompositeVoxelManager.createRepresentation', () => {
     expect(composite.getRepresentations()).toHaveLength(2);
   });
 
+  it('redoes a derived box after a write to the source with no delivery (rederiveAll)', () => {
+    const composite = makeComposite([4, 4, 1]);
+    const derived = composite.createRepresentation({ factors: [2, 2, 1] });
+
+    // A computed volume writes new values; the derived box keeps the old mean.
+    for (const [i, j] of [
+      [0, 0],
+      [1, 0],
+      [0, 1],
+      [1, 1],
+    ]) {
+      composite.setAtIJK(i, j, 0, 100);
+    }
+    expect(derived.voxelManager.getAtIJK(0, 0, 0)).toBe(3);
+
+    composite.rederiveAll();
+
+    expect(derived.voxelManager.getAtIJK(0, 0, 0)).toBe(100);
+    expect(derived.voxelManager.getAtIJK(1, 1, 0)).toBe(13);
+  });
+
   it('derives one brick of the source', () => {
     const composite = makeComposite([8, 1, 1]);
     const derived = composite.createRepresentation({
@@ -781,7 +802,7 @@ describe('CompositeVoxelManager stores the quality by region', () => {
     );
   });
 
-  it('states that a record is not exact, and never states less than what is missing', () => {
+  it('counts only a derived box with no arrived source voxel as missing', () => {
     const dimensions = [8, 8, 4];
     const composite = new CompositeVoxelManager({
       primary: VoxelManager.createMapVoxelManager({ dimension: dimensions }),
@@ -797,27 +818,24 @@ describe('CompositeVoxelManager stores the quality by region', () => {
     const derived = composite.createRepresentation({ factors: [2, 2, 2] });
     const record = composite.getRegionQuality(derived);
 
-    // One frame of the four arrived, so the derived record is an estimate.
-    expect(record.exact).toBe(false);
-    expect(record.missing).toBeGreaterThan(0);
+    // Frame 0 feeds the boxes of k = 0, and the boxes of k = 1 are empty.
+    expect(record.voxels).toBe(32);
+    expect(record.missing).toBe(16);
+    expect(record.exact).toBe(true);
 
+    // Frames 0 and 2 of 4: each box holds the average of one arrived frame
+    // (P31.3), so no box is missing.
     composite.acceptData({
       grid: composite.grid,
-      bounds: [
-        [0, 7],
-        [0, 7],
-        [0, 3],
-      ],
+      frameIndex: 2,
       quality: ImageQualityStatus.FULL_RESOLUTION,
     });
 
-    const complete = composite.getRegionQuality(
+    const partial = composite.getRegionQuality(
       composite.createRepresentation({ factors: [2, 2, 2] })
     );
 
-    // A source that holds everything gives an exact record.
-    expect(complete.exact).toBe(true);
-    expect(complete.missing).toBe(0);
+    expect(partial.missing).toBe(0);
   });
 });
 
@@ -1334,6 +1352,22 @@ describe('CompositeVoxelManager derives a large grid in batches', () => {
       onDerivedRegionChanged,
     });
   }
+
+  it('stops a running derivation when rederiveAll starts a new one', async () => {
+    const changed = [];
+    const composite = makeFullComposite(64, (region) => changed.push(region));
+    const derived = composite.createRepresentation({ factors: [1, 1, 2] });
+    const first = derived.derivation;
+
+    composite.rederiveAll();
+    await first;
+    await derived.derivation;
+
+    // Only the second derivation reports its second batch.
+    expect(changed).toHaveLength(1);
+    expect(derived.voxelManager.getAtIJK(0, 0, 31)).toBe(5);
+    expect(composite.getRegionQuality(derived).missing).toBe(0);
+  });
 
   it('reduces the first batch at once and the rest in idle time', async () => {
     const changed = [];

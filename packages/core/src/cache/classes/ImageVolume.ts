@@ -87,6 +87,10 @@ export interface vtkStreamingOpenGLTexture extends vtkOpenGLTexture {
   setGrid: (grid: VoxelGrid) => void;
   /** The grid that this texture holds. */
   getGrid: () => VoxelGrid | undefined;
+  /** States the statistic that this texture holds. */
+  setStatistic: (statistic: VoxelStatistic) => void;
+  /** The statistic that this texture holds. */
+  getStatistic: () => VoxelStatistic | null | undefined;
 }
 
 /** The base class for volume data. It includes the volume metadata
@@ -453,8 +457,9 @@ export class ImageVolume {
    * derives nothing again.
    *
    * THE DERIVATION MUST READ THE GRID OF THIS VOLUME. A slice of the derived
-   * grid then covers a whole number of frames of this volume, and the image id
-   * of the first of those frames names it. A derivation from another
+   * grid then covers a run of frames of this volume, and the image id of the
+   * first of those frames names it. A fractional factor cuts the two end frames
+   * of the run, and the id also states that cut. A derivation from another
    * representation gets no store here, and the composite keeps an array of its
    * own for it.
    *
@@ -630,11 +635,12 @@ export class ImageVolume {
       volumeGrid: this.voxelGrid,
       dataType: this.dataType,
       numberOfComponents: this._numberOfComponents,
-      createTexture: ({ grid }) => {
+      createTexture: ({ grid, statistic }) => {
         const texture = vtkStreamingOpenGLTexture.newInstance();
 
         texture.setVolumeId(this.volumeId);
         texture.setGrid(grid);
+        texture.setStatistic(statistic);
 
         return texture;
       },
@@ -854,7 +860,6 @@ export class ImageVolume {
    * destroy the volume and make it unusable
    */
   destroy(): void {
-    // TODO: GPU memory associated with volume is not cleared.
     this.imageData.delete();
     this.imageData = null;
     this.voxelManager.clear();
@@ -877,9 +882,13 @@ export class ImageVolume {
    * Updates the internals of the volume to reflect the changes in the
    * underlying scalar data. This should be called when the scalar data
    * is modified externally
+   *
+   * A reduced representation holds its own voxels, so this also redoes each
+   * one from the new data (`CompositeVoxelManager.rederiveAll`), in batches.
    */
   public modified() {
     this.imageData.modified();
+    this._compositeVoxelManager?.rederiveAll();
     this.markAllTexturesDirty();
 
     this.numFrames = this._getNumFrames();

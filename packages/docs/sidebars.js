@@ -141,6 +141,7 @@ module.exports = {
             'concepts/cornerstone-core/voxelManager',
             'concepts/cornerstone-core/compositeVoxelManager',
             'concepts/cornerstone-core/volumeRenderStrategy',
+            'concepts/cornerstone-core/volumeRenderSequences',
             'concepts/cornerstone-core/volumeLoader',
             'concepts/cornerstone-core/geometryLoader',
             'concepts/cornerstone-core/cache',
@@ -178,6 +179,9 @@ module.exports = {
             'concepts/cornerstone-metadata/display-sets',
           ],
         },
+        // Deliberately outside Metadata: the vocabulary is not about metadata,
+        // and display-set splitting is only its first consumer.
+        'concepts/safe-functions',
         {
           type: 'category',
           label: 'Progressive Loading',

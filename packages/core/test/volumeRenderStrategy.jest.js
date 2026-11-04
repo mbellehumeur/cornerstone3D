@@ -5,12 +5,15 @@ import {
   jest,
   afterEach,
   beforeEach,
+  beforeAll,
+  afterAll,
 } from '@jest/globals';
 import { VtkVolumeSliceRenderPath } from '../src/RenderingEngine/GenericViewport/Planar/VtkVolumeSliceRenderPath';
 import {
   defaultVolumeStrategyProvider,
   provisionFullResolutionStrategy,
   provisionReducedResolutionStrategy,
+  reducedStrategyName,
   selectFirstReadyStrategy,
 } from '../src/RenderingEngine/helpers/volumeRenderStrategy';
 import { resolveVolumeTexture } from '../src/RenderingEngine/helpers/resolveVolumeTexture';
@@ -18,11 +21,21 @@ import ImageVolume from '../src/cache/classes/ImageVolume';
 import volumeTextureStore from '../src/cache/volumeTextureStore';
 import VoxelManager from '../src/utilities/VoxelManager';
 import {
-  getGpuCapabilityProfile,
-  setActiveGpuCapabilityProfile,
-  resetActiveGpuCapabilityProfile,
-} from '../src/utilities/gpuCapabilityProfiles';
+  getGpuSettingsPreset,
+  gpuSettingsForRender,
+  setGpuSettingsPreset,
+  resetGpuSettingsPreset,
+} from '../src/utilities/gpuSettingsPresets';
+import vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
+import { sampleDistanceOf } from '../src/RenderingEngine/helpers/createVolumeMapper';
 import { VoxelStatistics } from '../src/enums';
+import { setLossyDownsampling } from '../src/init';
+import { gridFitsGpuSettings } from '../src/RenderingEngine/vtkClasses/vtkStreamingOpenGLVolumeMapper';
+
+// These tests check the reductions of final downsampling, which is off by
+// default.
+beforeAll(() => setLossyDownsampling({ final: true }));
+afterAll(() => setLossyDownsampling({ final: false }));
 
 // A STRATEGY IS THE UNIT: it states how a render gets its voxels, and the names
 // of the texture sets derive from it. The provider builds the strategies when
@@ -66,16 +79,16 @@ function makeRendering(volume) {
 function context(volume, profileId = 'high') {
   return {
     volume,
-    profile: getGpuCapabilityProfile(profileId),
+    gpuSettings: getGpuSettingsPreset(profileId),
     viewportId: 'viewport-1',
   };
 }
 
 /** Calls the private member that provisions, as `addData` does. */
 function provision(path, rendering, profileId, reason = 'initial') {
-  const active = getGpuCapabilityProfile(profileId ?? 'high');
+  const active = getGpuSettingsPreset(profileId ?? 'high');
 
-  setActiveGpuCapabilityProfile(active.id);
+  setGpuSettingsPreset(active.id);
   path.provisionStrategies(rendering, reason);
 }
 
@@ -90,7 +103,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  resetActiveGpuCapabilityProfile();
+  resetGpuSettingsPreset();
 });
 
 describe('the default provider builds the strategies', () => {
@@ -124,7 +137,103 @@ describe('the default provider builds the strategies', () => {
     ]);
   });
 
-  it('gives no full-resolution strategy when the profile cannot hold it', () => {
+  it('rounds the factors of a set name to 4 decimals, and keeps them distinct', () => {
+    expect(reducedStrategyName([1, 1, 2464 / 2048])).toBe(
+      'reduced-1x1x1.2031/full-extent/average'
+    );
+
+    // The reduced edges M and M + 1 of one source edge at the 10000 bound.
+    const names = new Set(
+      [10000, 10001].map((edge) => reducedStrategyName([1, 1, 10002 / edge]))
+    );
+
+    expect(names.size).toBe(2);
+  });
+
+  it('renders as in 4.x with final downsampling off', () => {
+    const volume = makeVolume();
+
+    setGpuSettingsPreset('low-tablet');
+    setLossyDownsampling({ final: false });
+
+    try {
+      // No preset applies, so the default provider gets no settings.
+      expect(gpuSettingsForRender()).toBeUndefined();
+
+      for (const gpuSettings of [
+        gpuSettingsForRender(),
+        getGpuSettingsPreset('low-tablet'),
+      ]) {
+        const strategies = defaultVolumeStrategyProvider({
+          volume,
+          gpuSettings,
+        });
+
+        expect(strategies.map((strategy) => strategy.name)).toEqual([
+          'full-resolution/full-extent',
+        ]);
+      }
+
+      // The 4.x sample distance: no floor from the length of the ray.
+      const imageData = vtkImageData.newInstance();
+
+      imageData.setDimensions([512, 512, 2464]);
+      imageData.setSpacing([0.7, 0.7, 0.5]);
+      expect(sampleDistanceOf(imageData, undefined, 0.5)).toBeCloseTo(
+        (0.5 * (0.7 + 0.7 + 0.5)) / 6
+      );
+    } finally {
+      setLossyDownsampling({ final: true });
+    }
+  });
+
+  it('does not reduce a dynamic volume or a multi-component volume', () => {
+    const dynamic = makeVolume({ volumeId: 'dynamic-volume' });
+    const [width, height, depth] = dimensions;
+    const rgb = new ImageVolume({
+      volumeId: 'rgb-volume',
+      metadata: { FrameOfReferenceUID: 'for-1' },
+      dimensions,
+      spacing: [1, 1, 1],
+      origin: [0, 0, 0],
+      direction: identityDirection,
+      imageIds: Array.from({ length: depth }, (_, k) => `image:rgb:${k}`),
+      dataType: 'Uint8Array',
+      numberOfComponents: 3,
+      voxelManager: VoxelManager.createScalarVolumeVoxelManager({
+        dimensions,
+        scalarData: new Uint8Array(width * height * depth * 3),
+        numberOfComponents: 3,
+      }),
+    });
+
+    dynamic.isDynamicVolume = () => true;
+
+    // The edge of 512 exceeds the edge of 256 of `low-tablet`.
+    for (const volume of [dynamic, rgb]) {
+      expect(
+        defaultVolumeStrategyProvider(context(volume, 'low-tablet')).map(
+          (strategy) => strategy.name
+        )
+      ).toEqual(['full-resolution/full-extent']);
+    }
+  });
+
+  it('lets the mapper upload a dynamic or multi-component texture that the preset cannot hold', () => {
+    setGpuSettingsPreset('low-tablet');
+
+    try {
+      expect(gridFitsGpuSettings(dimensions, 'Uint16Array', 1, {})).toBe(false);
+      expect(gridFitsGpuSettings(dimensions, 'Uint8Array', 3, {})).toBe(true);
+      expect(
+        gridFitsGpuSettings(dimensions, 'Uint16Array', 1, { dynamic: true })
+      ).toBe(true);
+    } finally {
+      resetGpuSettingsPreset();
+    }
+  });
+
+  it('gives no full-resolution strategy when the preset cannot hold it', () => {
     const volume = makeVolume();
 
     expect(
@@ -234,12 +343,12 @@ describe('the render path provisions once and selects per render', () => {
     // A render component that implements phases supplies a function like this.
     const select = ({ strategies }) => strategies[strategies.length - 1];
     const path = new VtkVolumeSliceRenderPath(
-      ({ volume: aVolume, profile }) => [
+      ({ volume: aVolume, gpuSettings }) => [
         provisionReducedResolutionStrategy({
           volume: aVolume,
-          profile: getGpuCapabilityProfile('low-tablet'),
+          gpuSettings: getGpuSettingsPreset('low-tablet'),
         }),
-        provisionFullResolutionStrategy({ volume: aVolume, profile }),
+        provisionFullResolutionStrategy({ volume: aVolume, gpuSettings }),
       ],
       select
     );
@@ -274,11 +383,11 @@ describe('the render path provisions once and selects per render', () => {
       ({ volume: aVolume }) => [
         provisionReducedResolutionStrategy({
           volume: aVolume,
-          profile: getGpuCapabilityProfile('low-tablet'),
+          gpuSettings: getGpuSettingsPreset('low-tablet'),
         }),
         provisionFullResolutionStrategy({
           volume: aVolume,
-          profile: getGpuCapabilityProfile('high'),
+          gpuSettings: getGpuSettingsPreset('high'),
         }),
       ],
       ({ strategies }) => (useFull ? strategies[1] : strategies[0])
@@ -369,13 +478,13 @@ describe('the strategies are rebuilt when something changes', () => {
         ? [
             provisionReducedResolutionStrategy({
               volume: aVolume,
-              profile: getGpuCapabilityProfile('low-tablet'),
+              gpuSettings: getGpuSettingsPreset('low-tablet'),
             }),
           ]
         : [
             provisionFullResolutionStrategy({
               volume: aVolume,
-              profile: getGpuCapabilityProfile('high'),
+              gpuSettings: getGpuSettingsPreset('high'),
             }),
           ]
     );
@@ -440,7 +549,7 @@ describe('the strategies are rebuilt when something changes', () => {
 
 describe('the render reports the quality', () => {
   it('reports the record of the grid that it really bound', () => {
-    setActiveGpuCapabilityProfile('low-tablet');
+    setGpuSettingsPreset('low-tablet');
 
     const volume = makeVolume();
     const rendering = makeRendering(volume);
@@ -499,7 +608,7 @@ describe('the actor helpers choose a strategy for either architecture', () => {
       provideStrategies: ({ volume: aVolume }) =>
         defaultVolumeStrategyProvider({
           volume: aVolume,
-          profile: getGpuCapabilityProfile('low-tablet'),
+          gpuSettings: getGpuSettingsPreset('low-tablet'),
         }),
     });
 
@@ -516,7 +625,7 @@ describe('the actor helpers choose a strategy for either architecture', () => {
       provideStrategies: ({ volume: aVolume }) =>
         defaultVolumeStrategyProvider({
           volume: aVolume,
-          profile: getGpuCapabilityProfile('high'),
+          gpuSettings: getGpuSettingsPreset('high'),
         }),
     });
 
